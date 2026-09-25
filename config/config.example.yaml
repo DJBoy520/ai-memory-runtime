@@ -1,0 +1,29 @@
+# AI Memory Runtime (AMR) 配置文件范例
+server:
+  business_socket: "/run/user/1000/qdrant-bge.sock"
+  admin_socket: "/run/user/1000/qdrant-bge-admin.sock"
+  socket_mode: 0o600
+  max_request_bytes: 4194304  # 4MB
+
+model:
+  name_or_path: "BAAI/bge-m3"
+  device: "cuda"
+  fp16: true
+  max_batch: 16
+  max_queue_size: 64
+  idle_timeout_seconds: 300
+  max_token_length: 8192
+
+storage:
+  sqlite_path: "data/sessions.db"
+  busy_timeout: 5000
+  wal_enabled: true
+
+qdrant:
+  url: "http://localhost:6333"
+  api_key: ""
+  timeout: 10.0
+  collections:
+    - "ai_memory"
+    - "crypto_standards"
+    - "project_docs"
