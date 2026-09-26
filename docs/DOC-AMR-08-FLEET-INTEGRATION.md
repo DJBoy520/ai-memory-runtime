@@ -10,7 +10,7 @@
 
 ## 一、背景与现状痛点 (Problem Statement)
 
-当前工作区已成功部署并运行 **AI Memory Runtime (AMR)**（守护进程 `qdrant-bge.service`，监听 UDS `/run/user/1000/qdrant-bge.sock`，具备 BGE-M3 动态加载、3600秒空闲自动卸载显存能力，且已配置好 Qdrant API Key 鉴权）。
+当前工作区已成功部署并运行 **AI Memory Runtime (AMR)**（守护进程 `amr.service`，监听 UDS `/run/user/1000/qdrant-bge.sock`，具备 BGE-M3 动态加载、3600秒空闲自动卸载显存能力，且已配置好 Qdrant API Key 鉴权）。
 
 ### 现状与隐患分析：
 

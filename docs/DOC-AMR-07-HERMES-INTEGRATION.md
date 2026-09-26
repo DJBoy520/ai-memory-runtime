@@ -14,13 +14,13 @@
 ### 1.1 现状痛点
 1. **MCP 模式的被动缺陷**：纯粹作为 MCP 工具挂载时，智能体只能“被动按需调用”；如果模型在交互中未主动调用 `memory_search` 或 `memory_record`，长效记忆与重要决策容易产生断层。
 2. **Mem0 库的冗余与异构**：第三方 Mem0 库体系庞大、依赖繁琐，要求独立的 LLM/Embedder/VectorStore 三元驱动，曾导致本地需要维护粗暴常驻 GPU 的 HTTP 8100 端口（`bge-m3.service`）。
-3. **架构大一统诉求**：本地已有成熟自启、具备 3600 秒空闲回收显存与 SQLite WAL 审计的 AI Memory Runtime（AMR，`qdrant-bge.service`）。必须将 Hermes 的记忆机制直接纳管至 AMR 架构中，实现全自动无感感知。
+3. **架构大一统诉求**：本地已有成熟自启、具备 3600 秒空闲回收显存与 SQLite WAL 审计的 AI Memory Runtime（AMR，`amr.service`）。必须将 Hermes 的记忆机制直接纳管至 AMR 架构中，实现全自动无感感知。
 
 ### 1.2 目标定位
 在 Hermes 插件体系内实现原生 **`amr` 记忆插件**（`plugins/memory/amr/`），继承 Hermes 的 `MemoryProvider` 抽象基类：
 - **无感预取 (Prefetch)**：老板输入后、生成回答前，后台毫秒级查询 AMR UDS（`memory_search`），将关联历史决策无感注入 Prompt；
 - **无感归档 (Sync Turn)**：每轮对话结束后，在非阻塞后台线程将对话流水自动持久化（`session.ingest`），并按需提炼沉淀事实（`memory_record`）；
-- **零额外显存常驻**：完全复用已自启的 `qdrant-bge.service`，共享 3600 秒自动释放；
+- **零额外显存常驻**：完全复用已自启的 `amr.service`，共享 3600 秒自动释放；
 - **全 Agent 数据贯通**：Hermes 自动提取的记忆与 OpenClaw、OpenCode 写入的记忆同库、同集合（`ai_memory`）、同 Schema。
 
 ---

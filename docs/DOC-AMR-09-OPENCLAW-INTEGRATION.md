@@ -14,7 +14,7 @@
 
 ### 1.1 基础设施就绪情况
 目前主机（Ubuntu x64，搭载 Tesla P4 GPU，显存严格 ≤8GB）已稳定部署并运行了统一的记忆守护进程 **AI Memory Runtime (AMR)**：
-- **守护服务**：`systemctl --user status qdrant-bge.service`（处于 active 运行状态，PID 正常）；
+- **守护服务**：`systemctl --user status amr.service`（处于 active 运行状态，PID 正常）；
 - **通信接口**：Unix Domain Socket (UDS) 监听在 `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/qdrant-bge.sock`；
 - **传输协议**：标准 4 字节大端序 `uint32` 长度前缀 + UTF-8 JSON-RPC 2.0 报文（单帧上限 4MB）；
 - **核心能力**：

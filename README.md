@@ -110,18 +110,18 @@ storage:
 ```bash
 # 复制 systemd service 配置
 mkdir -p ~/.config/systemd/user/
-cp systemd/qdrant-bge.service ~/.config/systemd/user/
+cp systemd/amr.service ~/.config/systemd/user/
 
 # 开启用户驻留（确保用户注销后服务依然常驻运行）
 loginctl enable-linger $USER
 
 # 激活与启动服务
 systemctl --user daemon-reload
-systemctl --user enable qdrant-bge.service
-systemctl --user start qdrant-bge.service
+systemctl --user enable amr.service
+systemctl --user start amr.service
 
 # 查看服务运行状态
-systemctl --user status qdrant-bge.service
+systemctl --user status amr.service
 ```
 
 ---

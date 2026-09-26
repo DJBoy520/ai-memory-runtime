@@ -95,7 +95,7 @@
      - 将 5 个 `memory_*` 工具透明序列化为 UDS 协议发往 `qdrant-bge.sock`；
      - 硬编码注入 `source_agent` 标识。
   2. 编写 `src/admin/cli.py`：实现 `admin-cli status`、`admin-cli unload` 等运维指令（对接 `qdrant-bge-admin.sock`）；
-  3. 编写 `systemd/qdrant-bge.service`；
+  3. 编写 `systemd/amr.service`；
   4. 整合全量测试套件 `tests/`。
 - **验收准则**：
   - 启动 systemd 用户服务，通过 MCP Stdio 模拟协议完整执行存取；

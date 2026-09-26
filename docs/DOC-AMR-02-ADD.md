@@ -123,6 +123,6 @@ ai-memory-runtime/
 │   └── admin/
 │       └── cli.py            # 管理员 admin-cli 入口
 ├── systemd/
-│   └── qdrant-bge.service
+│   └── amr.service
 └── tests/
 ```
