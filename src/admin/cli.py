@@ -1,3 +1,8 @@
+import sys
+from pathlib import Path
+root_dir = str(Path(__file__).resolve().parent.parent.parent)
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
 """
 Admin CLI Tool for AI Memory Runtime.
 Connects directly to the dedicated Admin UDS (/run/user/1000/qdrant-bge-admin.sock).

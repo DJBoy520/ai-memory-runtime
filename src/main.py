@@ -47,19 +47,16 @@ class AMRApplication:
         logger.info("Initializing Semantic Memory Service...")
         self.memory_service = MemoryService(
             engine=self.engine,
-            qdrant=self.qdrant_manager,
+            qdrant_manager=self.qdrant_manager,
             session_store=self.session_store,
             config=self.config
         )
 
         # Dual UDS Server: Business vs Admin
         self.server = DualUDSServer(
-            business_socket=self.config.server.business_socket,
-            admin_socket=self.config.server.admin_socket,
+            config=self.config,
             business_handler=self.dispatch_business_rpc,
             admin_handler=self.dispatch_admin_rpc,
-            socket_mode=self.config.server.socket_mode,
-            max_request_bytes=self.config.server.max_request_bytes,
         )
 
     async def dispatch_business_rpc(self, method: str, params: Dict[str, Any]) -> Any:

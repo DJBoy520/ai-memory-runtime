@@ -153,14 +153,13 @@ class QdrantManager:
         """
         try:
             exists = self._client.collection_exists(collection_name=collection_name)
-        except Exception:
-            # 兼容老版本或异常返回
+        except Exception as err:
             try:
                 collections = [c.name for c in self._client.get_collections().collections]
                 exists = collection_name in collections
             except Exception as e:
-                logger.error(f"Failed to check collection {collection_name}: {e}")
-                raise
+                logger.warning(f"Could not check collection {collection_name} on startup ({e}). Will check upon request.")
+                return False
 
         if not exists:
             logger.info(f"Creating collection '{collection_name}' (dim={vector_size}, distance={distance.name})...")
