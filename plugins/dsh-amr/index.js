@@ -52,12 +52,15 @@ export function apply(ctx, config = {}) {
       if (!Array.isArray(messages) || messages.length === 0) return;
 
       const mapped = [];
+      let seq = 0;
       for (const m of messages) {
         if (!m.content) continue;
+        seq++;
         mapped.push({
+          message_id: m.id || `msg-${Date.now()}-${seq}`,
           role: m.role || "user",
           content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-          created_at: new Date().toISOString()
+          timestamp: Math.floor(Date.now() / 1000)
         });
       }
 

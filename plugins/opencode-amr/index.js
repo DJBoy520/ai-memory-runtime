@@ -118,10 +118,10 @@ export const server = async ({ project, client, $, directory, worktree }) => {
             .join("\n");
           if (text.trim()) {
             mappedMessages.push({
-              message_id: m.info?.id || `msg-${Date.now()}`,
+              message_id: m.info?.id || `msg-${Date.now()}-${mappedMessages.length + 1}`,
               role,
               content: text,
-              created_at: m.info?.createdAt || new Date().toISOString(),
+              timestamp: Math.floor((new Date(m.info?.createdAt || Date.now())).getTime() / 1000),
             });
           }
         }
