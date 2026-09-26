@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/dj/WorkSpaces/qdrant-bge-memory
-Environment="PYTHONPATH=/home/dj/WorkSpaces/qdrant-bge-memory"
+WorkingDirectory=/home/dj/WorkSpaces/ai-memory-runtime
+Environment="PYTHONPATH=/home/dj/WorkSpaces/ai-memory-runtime"
 Environment="CUDA_VISIBLE_DEVICES=0"
 ExecStart=/usr/bin/python3 src/main.py
 Restart=always
@@ -14,7 +14,7 @@ RestartSec=3s
 # Sandboxing and security
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/run/user/1000 /home/dj/WorkSpaces/qdrant-bge-memory/data
+ReadWritePaths=/run/user/1000 /home/dj/WorkSpaces/ai-memory-runtime/data
 StandardOutput=journal
 StandardError=journal
 

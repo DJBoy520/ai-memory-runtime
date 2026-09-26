@@ -5,7 +5,7 @@
 **定案日期**：2026-09-26  
 **编写方**：OpenClaw（任务拆解与审计验收）  
 **执行方**：opencode（代码编写与单步测试）  
-**工程目标根目录**：`/home/dj/WorkSpaces/openclaw/qdrant-bge-memory/`
+**工程目标根目录**：`/home/dj/WorkSpaces/openclaw/ai-memory-runtime/`
 
 ---
 
@@ -36,7 +36,7 @@
 ### STEP 1：工程脚手架与 UDS 协议层
 - **输入参考**：`DOC-AMR-02-ADD` 第 3 节，`DOC-AMR-04-API` 第 1 节。
 - **任务目标**：
-  1. 初始化 `/home/dj/WorkSpaces/openclaw/qdrant-bge-memory/` 目录；
+  1. 初始化 `/home/dj/WorkSpaces/openclaw/ai-memory-runtime/` 目录；
   2. 编写 `requirements.txt`、`config/config.example.yaml` 及配置读取加载模块 `config/settings.py`；
   3. 编写 `src/interfaces/ipc/protocol.py`，实现前 4 字节 Big-Endian `uint32` 长度前缀的双向编码/解码器，严格校验 `MAX_REQUEST_BYTES = 4,194,304`；
   4. 编写 `src/interfaces/ipc/server.py`，实现基于 `asyncio.start_unix_server` 的双 Socket 监听（业务 socket 与管理 socket，权限 `0600`）。

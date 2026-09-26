@@ -7,7 +7,7 @@
 **执行方**：opencode（代码交付）  
 **目标目录**：`/home/dj/.hermes/hermes-agent/plugins/memory/amr/`  
 **依赖参考**：
-- 设计方案：`/home/dj/WorkSpaces/qdrant-bge-memory/docs/DOC-AMR-07-HERMES-INTEGRATION.md`
+- 设计方案：`/home/dj/WorkSpaces/ai-memory-runtime/docs/DOC-AMR-07-HERMES-INTEGRATION.md`
 - 基类参考：`/home/dj/.hermes/hermes-agent/agent/memory_provider.py`
 
 ---

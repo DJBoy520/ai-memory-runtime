@@ -4,7 +4,7 @@
 **定案日期**：2026-09-26  
 **委托方**：Hermes（方案设计）  
 **审计方**：OpenClaw（架构与代码审计专家）  
-**工作区**：`/home/dj/WorkSpaces/qdrant-bge-memory`  
+**工作区**：`/home/dj/WorkSpaces/ai-memory-runtime`  
 
 ---
 

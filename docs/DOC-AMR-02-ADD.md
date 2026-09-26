@@ -14,38 +14,53 @@
 系统全面收敛为纯本机 IPC（UDS）基础设施，彻底移除任何 TCP/HTTP 网络端口：
 
 ```text
-OpenClaw / Hermes / opencode / Cursor (各 AI Agent)
-        │
-        │ stdio (标准 JSON-RPC 2.0，极轻量 ~20MB，零 PyTorch/零显存)
-        ▼
-mcp-bridge (统一 MCP 桥接客户端)
-        │
-        │ 业务 UDS: /run/user/1000/qdrant-bge.sock (权限 0600)
-        ▼
-qdrant-bge daemon (系统常驻守护进程，Systemd 用户服务托管)
-  ├── 业务核心层 (Memory Manager)
-  │     ├── memory_search / memory_record / memory_get / memory_update_status
-  │     └── memory_ingest_session (仅落盘原始流水，无脆弱规则 NLP)
-  ├── 会话存储层 (Session Store - SQLite WAL)
-  │     └── 表结构：sessions / messages / ingest_log (content_hash 识别 revision)
-  ├── 模型引擎层 (BGE-M3 Engine - Tesla P4)
-  │     ├── 6 态生命周期状态机 (300 秒 Idle 自动卸载，按需加载)
-  │     ├── 独立线程池推理队列 (MAX_BATCH=16, 线程隔离防卡死主循环)
-  │     └── 自动分块引擎 (超 8192 Token 自动切分 parent/chunk)
-  └── Qdrant 适配层 (Qdrant Manager - 官方客户端长连接复用)
-        └── collections: ai_memory, crypto_standards, project_docs
-```
-
-管理控制面（完全解耦与独立）：
-```text
-admin-cli (管理员运维 CLI)
-        │
-        │ 管理 UDS: /run/user/1000/qdrant-bge-admin.sock (权限 0600)
-        ▼
-qdrant-bge daemon
-  ├── 内部健康指标监控 (Qdrant连通、显存 allocated/reserved、P50耗时、队列深度)
-  ├── 模型强制调度 (load / unload)
-  └── 集合状态与快照备份
+┌────────────────────────────────────────────────────────────────────────┐
+│                      智能体生态层 (AI Fleet Layer)                      │
+│                                                                        │
+│   ┌─────────────────────┐   ┌───────────────────┐   ┌──────────────┐   │
+│   │    Hermes Agent     │   │   OpenClaw Host   │   │   OpenCode   │   │
+│   │ plugins/memory/amr  │   │ plugins/openclaw- │   │  MCP Client  │   │
+│   │ (AmrMemoryProvider) │   │        amr        │   │ (Code Refact)│   │
+│   └──────────┬──────────┘   └─────────┬─────────┘   └───────┬──────┘   │
+└──────────────┼────────────────────────┼─────────────────────┼──────────┘
+               │ 预取/入库              │ 预取/入库           │ 按需 MCP
+               │                        │                     │
+               ▼                        ▼                     ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                   统一客户端适配层 (Ultra-Thin Adapters)                 │
+│  - 纯原生 Node.js / Python 标准库，零 PyTorch/零 ONNX，零显存额外开销    │
+│  - 预取检索：Hard Deadline ≤ 80ms~100ms，严格 Fail-Open，绝不拖慢会话   │
+│  - 会话入库：Fire-and-forget 异步无感投递，主线程等待 0ms                │
+│  - 协议规范：4 字节 Big-Endian uint32 前缀 + UTF-8 JSON-RPC 2.0 (单帧≤4MB)│
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    │ 业务 UDS: /run/user/1000/qdrant-bge.sock (0600)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             qdrant-bge daemon (AI Memory Runtime 守护进程)             │
+│                                                                        │
+│  ├── 业务核心层 (Memory Manager)                                       │
+│  │     ├── memory.search / memory.record / memory.get                  │
+│  │     ├── memory.update_status (4态流转: active/superseded/archived/deleted) │
+│  │     └── session.ingest (原始流水落盘，时序 sequence 校验，无模型开销) │
+│  ├── 会话存储层 (Session Store - SQLite WAL)                           │
+│  │     └── 表结构：sessions / messages / ingest_log (content_hash 防重) │
+│  ├── 模型引擎层 (BGE-M3 Engine - Tesla P4 GPU Daemon)                  │
+│  │     ├── 6 态生命周期状态机 (300 秒 Idle 自动卸载回收显存，按需自愈唤醒) │
+│  │     ├── 独立线程池推理队列 (MAX_BATCH=16, 线程隔离防卡死主循环)     │
+│  │     └── 自动分块引擎 (超 8192 Token 自动切分 parent/chunk)          │
+│  └── Qdrant 适配层 (Qdrant Manager - 官方客户端长连接复用，API Key 鉴权)│
+│        └── collections: ai_memory, crypto_standards, project_docs      │
+└───────────────────────────────────▲────────────────────────────────────┘
+                                    │
+                                    │ 管理 UDS: /run/user/1000/qdrant-bge-admin.sock (0600)
+                                    │
+┌───────────────────────────────────┴────────────────────────────────────┐
+│                    管理控制面 (Admin Control Plane)                     │
+│  - admin-cli (独立运维工具，不注册进普通 Agent MCP)                     │
+│  - 内部健康指标监控 (Qdrant 连通性、显存 allocated/reserved、P50 耗时)  │
+│  - 模型生命周期强制调度 (load / unload)                                │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -81,10 +96,10 @@ qdrant-bge daemon
 
 ## 3. 目录工程组织规范
 
-工程统一落地于 `/home/dj/WorkSpaces/openclaw/qdrant-bge-memory/`：
+工程统一落地于 `/home/dj/WorkSpaces/ai-memory-runtime/`：
 
 ```text
-qdrant-bge-memory/
+ai-memory-runtime/
 ├── README.md
 ├── requirements.txt
 ├── config/

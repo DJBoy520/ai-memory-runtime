@@ -70,11 +70,19 @@
 - **FR-MOD-03 按需自愈与自动唤醒 (Auto-load)**：
   - 下次检索或写入到达时，自动触发模型冷启动载入（耗时约 3~5 秒）。
 
-### 3.4 管理与运维控制 (Admin CLI)
-- **FR-ADM-01 独立管理通道**：
-  - 管理操作走独立 Unix Domain Socket（`qdrant-bge-admin.sock`），仅供 `admin-cli` 访问，不注册进普通 Agent MCP。
-- **FR-ADM-02 原生健康巡检**：
-  - 输出系统监控指标：Qdrant 连通性、模型生命周期状态、显存分配指标、队列深度、P50 推理耗时、错误计数。
+### 3.5 智能体无感记忆运行时 (Fleet Zero-Friction Runtime Pipeline)
+- **FR-FLT-01 运行时驱动无感预取 (Zero-Friction Prefetch & Injection)**：
+  - 记忆能力从“Agent Tool Call”降级定位升级为 **Agent Runtime Context Pipeline**。
+  - 在大模型推理前由生命周期钩子（如 `before_prompt_build`）自动前置拦截用户输入，向 AMR UDS 发送 `memory.search`，硬截止时间（Hard Deadline）≤ 80ms ~ 100ms；
+  - 命中记忆通过严格的 XML 标签（`<amr_recalled_context>`）与转义进行隔离，注入 Prompt 前置上下文，模型天然携带历史决策与背景，主会话无 Tool Call 停顿。
+- **FR-FLT-02 轮次结束无感流水归档 (Zero-Friction Session Ingestion)**：
+  - 会话轮次生成完毕后，由生命周期钩子（如 `after_turn` / `on_message_complete`）触发非阻塞异步投递（Fire-and-forget，At-most-once 交付语义，主线程等待 0ms）；
+  - 自动向 AMR UDS 发送 `session.ingest`，参数包含 `session_id`, `agent_id`, `project_id`, 消息列表（带时序严格递增的 `sequence` 与 `content_hash`），自动落盘 SQLite `sessions.db`；
+  - 后台静默完成会话审计并按需触发长效事实沉淀。
+- **FR-FLT-03 全智能体极薄适配器规范 (Ultra-Thin Adapter Pattern)**：
+  - 接入 AMR 的客户端（Hermes 插件、OpenClaw 插件、OpenCode 扩展）定位为纯胶水适配层；
+  - 严格遵守 **Zero-VRAM 铁律**（0 显存额外开销），严禁在适配器内自建向量计算、本地 SQLite 或直连底层 Qdrant 数据库；
+  - 严格遵循 Fail-Open 兜底原则，AMR 离线或异常时静默降级为普通无记忆对话，绝不阻断宿主 Agent 交互。
 
 ---
 

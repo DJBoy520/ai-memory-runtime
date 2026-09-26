@@ -73,8 +73,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/DJBoy520/qdrant-bge-memory.git
-cd qdrant-bge-memory
+git clone https://github.com/DJBoy520/ai-memory-runtime.git
+cd ai-memory-runtime
 
 # 安装 Python 核心依赖
 pip install torch transformers sentence-transformers qdrant-client pyyaml
@@ -167,8 +167,8 @@ hermes config set memory.provider amr
 ```bash
 hermes mcp add qdrant-bge \
   --command /usr/bin/python3 \
-  --env PYTHONPATH=/path/to/qdrant-bge-memory AMR_SOURCE_AGENT=hermes \
-  --args /path/to/qdrant-bge-memory/src/interfaces/mcp/bridge.py
+  --env PYTHONPATH=/path/to/ai-memory-runtime AMR_SOURCE_AGENT=hermes \
+  --args /path/to/ai-memory-runtime/src/interfaces/mcp/bridge.py
 ```
 
 提供标准 MCP Tools：

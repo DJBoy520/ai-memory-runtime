@@ -34,7 +34,8 @@
   "project_id": "string (可选，限定项目范围，不传则检索该 collection 下全局)",
   "memory_type": "string (可选，fact / decision / rule / context)",
   "scope": "string (可选，global / project / agent / session，默认 global)",
-  "limit": "integer (可选，默认 5，最大 20)"
+  "limit": "integer (可选，默认 5，最大 20)",
+  "score_threshold": "number (可选，相似度门槛 0.0~1.0，默认 0.65)"
 }
 ```
 - **出参规范**：
@@ -56,7 +57,7 @@
   "total": 1
 }
 ```
-- **核心约束**：服务端底层强制注入 `status == "active"`，上层无法覆盖。
+- **核心约束**：服务端底层强制注入 `status == "active"`，上层无法覆盖。在无感预取 (Prefetch) 场景下，客户端实施 Hard Deadline 超时控制（≤ 80ms~100ms），超时立刻强行销毁连接并 Fail-open。
 
 ---
 

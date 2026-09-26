@@ -201,7 +201,7 @@ class TestConfigFileSafety:
     """测试配置文件的权限与加载安全性"""
 
     def test_config_permissions(self):
-        config_path = Path("/home/dj/WorkSpaces/qdrant-bge-memory/config/config.yaml")
+        config_path = Path("/home/dj/WorkSpaces/ai-memory-runtime/config/config.yaml")
         if config_path.exists():
             check_and_fix_file_permissions(config_path)
             mode = stat.S_IMODE(os.stat(config_path).st_mode)
