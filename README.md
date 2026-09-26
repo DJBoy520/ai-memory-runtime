@@ -14,10 +14,10 @@
 
 **AI Memory Runtime (AMR)** 是专为多 Agent 协作生态（如 Hermes Agent、OpenClaw、OpenCode、DSH 等）打造的高性能统一语义记忆底座与 GPU 显存守护调度器。
 
-在多 Agent 协同工作流中，如果各 Agent 分别加载嵌入模型或直接裸调向量数据库，极易造成 **GPU 显存暴涨、会话上下文割裂、重复提炼与跨 Agent 记忆孤岛**。AMR 通过以下核心架构彻底解决上述痛点：
+在多 Agent 协同工作流中，如果各 Agent 分别加载嵌入模型或直接裸调向量数据库，极易造成 **GPU 显存占用过高、会话上下文割裂、重复提炼与跨 Agent 记忆孤岛**。AMR 通过以下核心架构解决上述痛点：
 
 1. **共享语义中枢**：所有 Agent 不直接裸连底层数据库，统一由 AMR 提供 `memory_search`、`memory_record`、`memory_ingest_session` 等标准生命周期管理。
-2. **动静分离与溯源**：Raw Session 原始对话流水写入本地 SQLite WAL 审计库（确保存证可溯源）；原子化提炼后的高质量事实卡片（Fact/Decision/Preference）经由 BGE-M3 向量化沉淀至 Qdrant。
+2. **动静分离与溯源**：Raw Session 原始对话流水写入本地 SQLite WAL 审计库；原子化提炼后的高质量事实卡片（Fact/Decision/Preference）经由 BGE-M3 向量化沉淀至 Qdrant。
 3. **动态显存守护 (Zero-VRAM Idle)**：内建按需加载与空闲自动卸载机制（默认空闲 3600 秒未活动自动释放 GPU VRAM），在轻量 GPU（如 Tesla P4 8G / 消费级显卡）上与其他高负载推理服务和谐共存。
 4. **双通道极速接入**：
    - **Unix Domain Socket (UDS)**：首字响应延迟敏感场景，纯二进制/Big-Endian Framing 纳秒级进程间通信；
@@ -60,7 +60,7 @@
 
 ---
 
-## 🚀 快速开始与部署指南 (Deployment)
+## 🚀 部署指南 (Deployment)
 
 ### 1. 环境依赖 (Prerequisites)
 
@@ -69,7 +69,7 @@
 - NVIDIA GPU (Compute Capability 6.0+，支持 CUDA 11/12)
 - Qdrant 向量数据库实例（局域网或本地 Docker：`docker run -p 6333:6333 qdrant/qdrant`）
 
-### 2. 安装与准备 (Installation)
+### 2. 安装步骤 (Installation)
 
 ```bash
 # 克隆仓库
@@ -77,7 +77,7 @@ git clone https://github.com/DJBoy520/qdrant-bge-memory.git
 cd qdrant-bge-memory
 
 # 安装 Python 核心依赖
-pip install torch transformers sentence-transformers qdrant-client pyyaml pytest
+pip install torch transformers sentence-transformers qdrant-client pyyaml
 
 # 下载 BGE-M3 模型权重至本地 models 目录
 mkdir -p models
@@ -85,9 +85,9 @@ mkdir -p models
 # git clone https://huggingface.co/BAAI/bge-m3 models/bge-m3
 ```
 
-### 3. 配置管理 (Configuration)
+### 3. 服务配置 (Configuration)
 
-复制模板并根据实际环境调整配置（`config/config.yaml` 拥有 0600 权限保障安全）：
+配置文件位于 `config/config.yaml`（权限建议设为 0600）：
 
 ```yaml
 server:
@@ -105,23 +105,14 @@ storage:
   sqlite_path: "data/amr_sessions.db"
 ```
 
-### 4. 运行全量单元测试 (Verification)
-
-AMR 包含覆盖端到端 UDS 协议、动态加载、半包接收与 Qdrant 交互的严密测试套件：
-
-```bash
-pytest tests/ -v
-# 输出: 167 passed in 12.3s
-```
-
-### 5. 配置为 Systemd 用户守护进程 (开机自启)
+### 4. 配置开机自启 (Systemd 用户服务)
 
 ```bash
 # 复制 systemd service 配置
 mkdir -p ~/.config/systemd/user/
 cp systemd/qdrant-bge.service ~/.config/systemd/user/
 
-# 开启用户驻留（确保注销登录后依然自启运行）
+# 开启用户驻留（确保用户注销后服务依然常驻运行）
 loginctl enable-linger $USER
 
 # 激活与启动服务
@@ -135,9 +126,9 @@ systemctl --user status qdrant-bge.service
 
 ---
 
-## 🛠️ 管理与日常排障 (Admin CLI)
+## 🛠️ 管理与日常运维 (Admin CLI)
 
-AMR 提供了轻量独立的管理命令行工具：
+AMR 提供了独立的管理命令行工具：
 
 ```bash
 # 查看运行时健康状态、显存分配与加载状态
@@ -186,21 +177,6 @@ hermes mcp add qdrant-bge \
 - `memory_get`：按 ID 精确溯源原始证据；
 - `memory_update_status`：记忆版本演化管理（active / superseded / archived）；
 - `memory_ingest_session`：会话级整包清洗与事实提炼。
-
----
-
-## 🔐 权威存证与合规保障 (AEP Notarized)
-
-本工程遵循 **AEP (Attestation & Evidence Exchange Protocol)** 可信数字证据基础设施协议。
-
-- **全局统一存证中心**：`~/.aep/`
-- **签名算法**：国家密码管理局 SM2 国密数字签名 + SM3 密码杂凑算法
-- **证书合规性**：三级权威证书链（含 Root-CA、Issuing-CA）
-- **时间与链上锚定**：L3 RFC3161/GM-T 0033 时间戳 + L4 区块链不可变锚定（`https://chain.aep.org.cn`）
-- **验证指令**：
-  ```bash
-  aep --data-dir ~/.aep validate <path-to-evidence.aep>
-  ```
 
 ---
 
