@@ -69,8 +69,9 @@ export const plugin = {
     // =========================================================================
     // Hook 1: Input Prefetch & Injection (before_prompt_build)
     // =========================================================================
-    if (typeof api.registerHook === "function") {
-      api.registerHook("before_prompt_build", async (event, ctx) => {
+    const register = typeof api.on === "function" ? api.on.bind(api) : (typeof api.registerHook === "function" ? api.registerHook.bind(api) : null);
+    if (register) {
+      register("before_prompt_build", async (event, ctx) => {
         try {
           const userQuery = event?.currentUserMessage || event?.prompt || "";
           if (isHeartbeatOrNoise(userQuery)) {
@@ -129,7 +130,7 @@ export const plugin = {
       // =========================================================================
       // Hook 2: Session Ingestion (agent_end)
       // =========================================================================
-      api.registerHook("agent_end", async (event, ctx) => {
+      register("agent_end", async (event, ctx) => {
         try {
           const sessionId = ctx?.sessionId || ctx?.sessionKey || event?.runId;
           if (!sessionId) {
@@ -161,7 +162,7 @@ export const plugin = {
         }
       });
     } else {
-      logger.warn("OpenClaw plugin API did not expose registerHook");
+      logger.warn("OpenClaw plugin API did not expose on or registerHook");
     }
   },
 };
