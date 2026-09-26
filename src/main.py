@@ -81,7 +81,11 @@ class AMRApplication:
                 session_id=params.get("session_id"),
                 source_message_ids=params.get("source_message_ids"),
                 tags=params.get("tags"),
+                collection_name=params.get("collection_name", "ai_memory"),
             )
+        elif method == "embedding.generate":
+            texts = params.get("texts", [])
+            return await self.engine.embed(texts)
         elif method == "memory.get":
             return await self.memory_service.memory_get(memory_id=params.get("memory_id"))
         elif method == "memory.update_status":

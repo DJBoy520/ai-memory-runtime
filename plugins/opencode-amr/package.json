@@ -1,0 +1,8 @@
+{
+  "name": "opencode-amr",
+  "version": "1.0.0",
+  "description": "Native AI Memory Runtime (AMR) zero-friction plugin for OpenCode",
+  "main": "index.js",
+  "type": "module",
+  "dependencies": {}
+}

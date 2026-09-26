@@ -1,0 +1,11 @@
+{
+  "name": "@deepseek-ai/dsh-amr",
+  "version": "0.1.0",
+  "description": "AMR Zero-Friction Memory Plugin for DeepSeek Harness (DSH)",
+  "main": "index.js",
+  "type": "module",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.5-rc.3"
+  }
+}
