@@ -199,11 +199,13 @@ class SessionStore:
                     )
 
                 # 2. 逐条处理消息
-                for msg in messages:
-                    msg_id = msg["message_id"]
-                    role = msg["role"]
-                    content = msg["content"]
-                    seq = msg.get("sequence", 0)
+                for idx, msg in enumerate(messages):
+                    msg_id = msg.get("message_id") or msg.get("id") or f"{session_id}_{idx+1}_{now}"
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = "\n".join(str(p.get("text", p) if isinstance(p, dict) else p) for p in content)
+                    seq = msg.get("sequence", idx + 1)
                     ts = int(msg.get("timestamp", now))
                     c_hash = compute_content_hash(role, content)
 
