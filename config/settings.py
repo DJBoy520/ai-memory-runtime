@@ -53,6 +53,7 @@ class QdrantConfig(BaseModel):
     url: str = "http://localhost:6333"
     api_key: Optional[str] = ""
     timeout: float = 10.0
+    prefer_grpc: bool = True
     collections: List[str] = Field(
         default_factory=lambda: ["ai_memory", "crypto_standards", "project_docs"]
     )

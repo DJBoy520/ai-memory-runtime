@@ -5,18 +5,20 @@ AI Memory Runtime - Session Store & Idempotent Ingest Engine
 """
 
 import hashlib
+import json
 import os
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from config.settings import AppConfig, StorageConfig, DatabaseConfig, load_config
 
 
 CREATE_TABLES_SQL = """
--- 1. 会话主表
+-- 1. 兼容原版的 sessions 主表
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
@@ -27,7 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT DEFAULT 'active' -- active, closed, archived
 );
 
--- 2. 消息明细表 (联合 content_hash 识别 revision)
+-- 2. 兼容原版的消息明细表
 CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -40,7 +42,7 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
 
--- 3. 摄取审计与断点恢复表
+-- 3. 兼容原版的摄取审计与断点恢复表
 CREATE TABLE IF NOT EXISTS ingest_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -52,6 +54,106 @@ CREATE TABLE IF NOT EXISTS ingest_log (
 
 CREATE INDEX IF NOT EXISTS idx_messages_sess ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_sess ON ingest_log(session_id, message_id);
+
+-- ================= v2.2 核心存储架构 (SSOT + Outbox + Audit) =================
+
+-- 1. 原始会话表 (v2.2)
+CREATE TABLE IF NOT EXISTS raw_sessions (
+    session_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    project_id TEXT DEFAULT 'general',
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    status TEXT DEFAULT 'active'
+);
+
+-- 2. 原始消息证据表 (v2.2 支持证据分类与合成标记)
+CREATE TABLE IF NOT EXISTS raw_messages (
+    message_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES raw_sessions(session_id),
+    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'user_message' 
+        CHECK(source_type IN ('user_message', 'assistant_message', 'tool_output', 'system', 'legacy_memory', 'imported')),
+    is_synthetic INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_msg_session ON raw_messages(session_id);
+CREATE INDEX IF NOT EXISTS idx_msg_hash ON raw_messages(content_hash);
+
+-- 3. 记忆主表 (知识层 Memory SSOT)
+CREATE TABLE IF NOT EXISTS memories (
+    memory_id TEXT PRIMARY KEY,
+    qdrant_point_id TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL CHECK(type IN ('fact', 'preference', 'decision', 'task', 'episode', 'relation')),
+    conflict_policy TEXT NOT NULL DEFAULT 'coexist' 
+        CHECK(conflict_policy IN ('overwrite', 'coexist', 'state_machine', 'immutable')),
+    subject TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object TEXT,
+    content TEXT NOT NULL,
+    valid_from INTEGER NOT NULL,
+    valid_to INTEGER,
+    validity_type TEXT NOT NULL DEFAULT 'open_ended' 
+        CHECK(validity_type IN ('open_ended', 'bounded', 'unknown')),
+    confidence REAL NOT NULL DEFAULT 0.8,
+    importance REAL NOT NULL DEFAULT 0.5,
+    mention_count INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'candidate' 
+        CHECK(status IN ('candidate', 'active', 'superseded', 'archived', 'deleted')),
+    superseded_by TEXT REFERENCES memories(memory_id),
+    project_id TEXT NOT NULL DEFAULT 'general',
+    scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'project', 'agent', 'session')),
+    source_agent TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    deleted_at INTEGER,
+    deleted_by TEXT,
+    deletion_reason TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_lookup ON memories(project_id, type, status);
+CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject, predicate);
+CREATE INDEX IF NOT EXISTS idx_mem_point ON memories(qdrant_point_id);
+
+-- 4. 记忆与证据溯源多对多关联表
+CREATE TABLE IF NOT EXISTS memory_evidence (
+    memory_id TEXT NOT NULL REFERENCES memories(memory_id),
+    message_id TEXT NOT NULL REFERENCES raw_messages(message_id),
+    session_id TEXT NOT NULL,
+    evidence_strength REAL NOT NULL DEFAULT 0.5,
+    linked_at INTEGER NOT NULL,
+    PRIMARY KEY (memory_id, message_id)
+);
+
+-- 5. Transactional Outbox 异步同步发件箱队列
+CREATE TABLE IF NOT EXISTS qdrant_sync_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    qdrant_point_id TEXT NOT NULL,
+    op_type TEXT NOT NULL CHECK(op_type IN ('upsert', 'delete', 'update_payload')),
+    payload_snapshot TEXT,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'synced', 'failed')),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_status ON qdrant_sync_queue(status, retry_count);
+CREATE INDEX IF NOT EXISTS idx_sync_order ON qdrant_sync_queue(memory_id, id);
+
+-- 6. 治理与生命周期审计日志表
+CREATE TABLE IF NOT EXISTS memory_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('create', 'promote', 'merge', 'update', 'supersede', 'archive', 'delete')),
+    operator TEXT NOT NULL,
+    detail TEXT,
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mem_audit ON memory_audit_log(memory_id, timestamp);
 """
 
 
@@ -127,7 +229,7 @@ class SessionStore:
         return self._conn
 
     def _init_db(self) -> None:
-        """初始化 SQLite 数据库及 Schema"""
+        """初始化 SQLite 数据库及 Schema，支持幂等增量迁移"""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -137,7 +239,41 @@ class SessionStore:
             cursor.execute(f"PRAGMA busy_timeout = {self.busy_timeout};")
             cursor.execute("PRAGMA foreign_keys = ON;")
             cursor.executescript(CREATE_TABLES_SQL)
+            self._migrate_schema(cursor)
             conn.commit()
+
+    def _migrate_schema(self, cursor: sqlite3.Cursor) -> None:
+        """
+        幂等平滑表迁移：检查表结构字段并为旧数据库增量添加缺失列。
+        """
+        # 1. 检查 raw_messages 列 (如 source_type, is_synthetic)
+        cursor.execute("PRAGMA table_info(raw_messages);")
+        raw_msg_cols = {row["name"] for row in cursor.fetchall()}
+        if raw_msg_cols:
+            if "source_type" not in raw_msg_cols:
+                cursor.execute(
+                    "ALTER TABLE raw_messages ADD COLUMN source_type TEXT NOT NULL DEFAULT 'user_message';"
+                )
+            if "is_synthetic" not in raw_msg_cols:
+                cursor.execute(
+                    "ALTER TABLE raw_messages ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0;"
+                )
+
+        # 2. 检查 memories 列 (确保所有 v2.2 字段存在)
+        cursor.execute("PRAGMA table_info(memories);")
+        mem_cols = {row["name"] for row in cursor.fetchall()}
+        if mem_cols:
+            v2_mem_columns = {
+                "conflict_policy": "TEXT NOT NULL DEFAULT 'coexist'",
+                "validity_type": "TEXT NOT NULL DEFAULT 'open_ended'",
+                "version": "INTEGER NOT NULL DEFAULT 1",
+                "deleted_at": "INTEGER",
+                "deleted_by": "TEXT",
+                "deletion_reason": "TEXT",
+            }
+            for col_name, col_def in v2_mem_columns.items():
+                if col_name not in mem_cols:
+                    cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def};")
 
     def ingest_messages(
         self,
@@ -199,11 +335,13 @@ class SessionStore:
                     )
 
                 # 2. 逐条处理消息
-                for msg in messages:
-                    msg_id = msg["message_id"]
-                    role = msg["role"]
-                    content = msg["content"]
-                    seq = msg.get("sequence", 0)
+                for idx, msg in enumerate(messages):
+                    msg_id = msg.get("message_id") or msg.get("id") or f"{session_id}_{idx+1}_{now}"
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = "\n".join(str(p.get("text", p) if isinstance(p, dict) else p) for p in content)
+                    seq = msg.get("sequence", idx + 1)
                     ts = int(msg.get("timestamp", now))
                     c_hash = compute_content_hash(role, content)
 
@@ -364,6 +502,439 @@ class SessionStore:
                     ORDER BY id ASC
                     """,
                     (session_id,),
+                )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    # =========================================================================
+    # v2.2 SQLite SSOT & Outbox / Audit Storage Methods
+    # =========================================================================
+
+    def record_raw_session(
+        self,
+        session_id: str,
+        agent_id: str,
+        project_id: str = "general",
+        started_at: Optional[int] = None,
+        ended_at: Optional[int] = None,
+        status: str = "active",
+    ) -> Dict[str, Any]:
+        """记录或更新 raw_sessions 表中的原始会话"""
+        now = int(time.time())
+        s_at = started_at if started_at is not None else now
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO raw_sessions (session_id, agent_id, project_id, started_at, ended_at, status)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    project_id = excluded.project_id,
+                    ended_at = COALESCE(excluded.ended_at, raw_sessions.ended_at),
+                    status = excluded.status
+                """,
+                (session_id, agent_id, project_id, s_at, ended_at, status),
+            )
+            conn.commit()
+            return {
+                "session_id": session_id,
+                "agent_id": agent_id,
+                "project_id": project_id,
+                "started_at": s_at,
+                "ended_at": ended_at,
+                "status": status,
+            }
+
+    def record_raw_message(
+        self,
+        message_id: str,
+        session_id: str,
+        role: str,
+        content: str,
+        sequence: int,
+        source_type: str = "user_message",
+        is_synthetic: int = 0,
+        created_at: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """向 raw_messages 表写入一条原始消息证据"""
+        now = int(time.time())
+        c_at = created_at if created_at is not None else now
+        c_hash = compute_content_hash(role, content)
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO raw_messages (
+                    message_id, session_id, role, content, content_hash, sequence, source_type, is_synthetic, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    role = excluded.role,
+                    content = excluded.content,
+                    content_hash = excluded.content_hash,
+                    sequence = excluded.sequence,
+                    source_type = excluded.source_type,
+                    is_synthetic = excluded.is_synthetic
+                """,
+                (message_id, session_id, role, content, c_hash, sequence, source_type, is_synthetic, c_at),
+            )
+            conn.commit()
+            return {
+                "message_id": message_id,
+                "session_id": session_id,
+                "role": role,
+                "content_hash": c_hash,
+                "sequence": sequence,
+                "source_type": source_type,
+                "is_synthetic": is_synthetic,
+                "created_at": c_at,
+            }
+
+    def create_memory(
+        self,
+        memory_id: str,
+        subject: str,
+        predicate: str,
+        content: str,
+        type: str,
+        conflict_policy: str = "coexist",
+        object: Optional[str] = None,
+        valid_from: Optional[int] = None,
+        valid_to: Optional[int] = None,
+        validity_type: str = "open_ended",
+        confidence: float = 0.8,
+        importance: float = 0.5,
+        mention_count: int = 1,
+        status: str = "candidate",
+        superseded_by: Optional[str] = None,
+        project_id: str = "general",
+        scope: str = "global",
+        source_agent: str = "default_agent",
+        version: int = 1,
+        qdrant_point_id: Optional[str] = None,
+        evidence: Optional[List[Dict[str, Any]]] = None,
+        operator: str = "engine",
+        audit_detail: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        原子创建记忆实体：
+        1. 写入 memories (知识主表 SSOT)
+        2. 写入 memory_evidence (多对多关联)
+        3. 同一事务写入 qdrant_sync_queue (Transactional Outbox)
+        4. 同一事务写入 memory_audit_log (审计日志)
+        保证数据一致性与发件箱原子性。
+        """
+        now = int(time.time())
+        v_from = valid_from if valid_from is not None else now
+        point_id = qdrant_point_id or str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
+
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                # 1. 插入 memories
+                cursor.execute(
+                    """
+                    INSERT INTO memories (
+                        memory_id, qdrant_point_id, type, conflict_policy,
+                        subject, predicate, object, content,
+                        valid_from, valid_to, validity_type,
+                        confidence, importance, mention_count,
+                        status, superseded_by,
+                        project_id, scope, source_agent, version,
+                        deleted_at, deleted_by, deletion_reason,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        memory_id, point_id, type, conflict_policy,
+                        subject, predicate, object, content,
+                        v_from, valid_to, validity_type,
+                        confidence, importance, mention_count,
+                        status, superseded_by,
+                        project_id, scope, source_agent, version,
+                        now, now
+                    ),
+                )
+
+                # 2. 插入 memory_evidence (多对多关联表)
+                if evidence:
+                    for ev in evidence:
+                        cursor.execute(
+                            """
+                            INSERT INTO memory_evidence (
+                                memory_id, message_id, session_id, evidence_strength, linked_at
+                            )
+                            VALUES (?, ?, ?, ?, ?)
+                            ON CONFLICT(memory_id, message_id) DO UPDATE SET
+                                evidence_strength = excluded.evidence_strength,
+                                linked_at = excluded.linked_at
+                            """,
+                            (
+                                memory_id,
+                                ev["message_id"],
+                                ev["session_id"],
+                                float(ev.get("evidence_strength", 0.5)),
+                                int(ev.get("linked_at", now)),
+                            ),
+                        )
+
+                # 3. 构造 payload 快照并写入 qdrant_sync_queue (Transactional Outbox)
+                payload_snapshot = json.dumps({
+                    "memory_id": memory_id,
+                    "point_id": point_id,
+                    "type": type,
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": object,
+                    "content": content,
+                    "project_id": project_id,
+                    "scope": scope,
+                    "status": status,
+                    "confidence": confidence,
+                    "importance": importance,
+                    "version": version,
+                }, ensure_ascii=False)
+
+                cursor.execute(
+                    """
+                    INSERT INTO qdrant_sync_queue (
+                        memory_id, qdrant_point_id, op_type, payload_snapshot,
+                        status, retry_count, last_error, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'upsert', ?, 'pending', 0, NULL, ?, ?)
+                    """,
+                    (memory_id, point_id, payload_snapshot, now, now),
+                )
+
+                # 4. 插入 memory_audit_log
+                detail_str = json.dumps(audit_detail or {"action": "create_memory", "status": status}, ensure_ascii=False)
+                cursor.execute(
+                    """
+                    INSERT INTO memory_audit_log (
+                        memory_id, action, operator, detail, timestamp
+                    )
+                    VALUES (?, 'create', ?, ?, ?)
+                    """,
+                    (memory_id, operator, detail_str, now),
+                )
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+
+        return self.get_memory(memory_id)  # type: ignore[return-value]
+
+    def get_memory(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """读取完整的记忆实体，包含关联的 evidence 列表"""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            mem_dict = dict(row)
+
+            # 查询 evidence 列表
+            cursor.execute(
+                """
+                SELECT message_id, session_id, evidence_strength, linked_at
+                FROM memory_evidence
+                WHERE memory_id = ?
+                ORDER BY linked_at ASC
+                """,
+                (memory_id,),
+            )
+            ev_rows = cursor.fetchall()
+            mem_dict["evidence"] = [dict(ev) for ev in ev_rows]
+            return mem_dict
+
+    def update_memory_status(
+        self,
+        memory_id: str,
+        status: str,
+        superseded_by: Optional[str] = None,
+        operator: str = "engine",
+        detail: Optional[Dict[str, Any]] = None,
+        deleted_by: Optional[str] = None,
+        deletion_reason: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        更新记忆状态、替换指向，并原子追加 Outbox 任务与 audit log。
+        若状态变为 deleted，则向 Outbox 追加 op_type='delete'，否则追加 op_type='update_payload'。
+        """
+        now = int(time.time())
+        action_map = {
+            "active": "promote",
+            "superseded": "supersede",
+            "archived": "archive",
+            "deleted": "delete",
+            "candidate": "update",
+        }
+        action = action_map.get(status, "update")
+
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            point_id = row["qdrant_point_id"]
+            d_at = now if status == "deleted" else row["deleted_at"]
+            d_by = deleted_by if status == "deleted" else row["deleted_by"]
+            d_reason = deletion_reason if status == "deleted" else row["deletion_reason"]
+
+            try:
+                # 1. 更新 memories 主表
+                cursor.execute(
+                    """
+                    UPDATE memories
+                    SET status = ?,
+                        superseded_by = COALESCE(?, superseded_by),
+                        deleted_at = ?,
+                        deleted_by = ?,
+                        deletion_reason = ?,
+                        updated_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (status, superseded_by, d_at, d_by, d_reason, now, memory_id),
+                )
+
+                # 2. 追加 qdrant_sync_queue 发件箱任务
+                op_type = "delete" if status == "deleted" else "update_payload"
+                payload_snapshot = json.dumps({
+                    "memory_id": memory_id,
+                    "status": status,
+                    "superseded_by": superseded_by or row["superseded_by"],
+                    "updated_at": now,
+                }, ensure_ascii=False)
+
+                cursor.execute(
+                    """
+                    INSERT INTO qdrant_sync_queue (
+                        memory_id, qdrant_point_id, op_type, payload_snapshot,
+                        status, retry_count, last_error, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
+                    """,
+                    (memory_id, point_id, op_type, payload_snapshot, now, now),
+                )
+
+                # 3. 追加 memory_audit_log
+                audit_dict = detail or {}
+                audit_dict.update({
+                    "old_status": row["status"],
+                    "new_status": status,
+                    "superseded_by": superseded_by,
+                    "deletion_reason": d_reason,
+                })
+                cursor.execute(
+                    """
+                    INSERT INTO memory_audit_log (
+                        memory_id, action, operator, detail, timestamp
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (memory_id, action, operator, json.dumps(audit_dict, ensure_ascii=False), now),
+                )
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+
+        return self.get_memory(memory_id)
+
+    def fetch_pending_sync_tasks(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        拉取待同步发件箱队列任务。
+        按 memory_id 和 id 升序排列，保证单个 memory_id 上的操作严格保序。
+        仅拉取 status IN ('pending', 'failed') 且 retry_count < 5 的任务。
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, memory_id, qdrant_point_id, op_type, payload_snapshot,
+                       status, retry_count, last_error, created_at, updated_at
+                FROM qdrant_sync_queue
+                WHERE status = 'pending' OR (status = 'failed' AND retry_count < 5)
+                ORDER BY memory_id ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_sync_task_done(self, task_id: int) -> bool:
+        """标记同步任务已完成 (synced)"""
+        now = int(time.time())
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE qdrant_sync_queue
+                SET status = 'synced', updated_at = ?
+                WHERE id = ?
+                """,
+                (now, task_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def mark_sync_task_failed(self, task_id: int, error: str) -> bool:
+        """标记同步任务失败并增加重试计数"""
+        now = int(time.time())
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE qdrant_sync_queue
+                SET status = 'failed',
+                    retry_count = retry_count + 1,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (str(error), now, task_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_audit_logs(self, memory_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取记忆治理审计日志"""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            if memory_id:
+                cursor.execute(
+                    """
+                    SELECT id, memory_id, action, operator, detail, timestamp
+                    FROM memory_audit_log
+                    WHERE memory_id = ?
+                    ORDER BY id ASC
+                    """,
+                    (memory_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, memory_id, action, operator, detail, timestamp
+                    FROM memory_audit_log
+                    ORDER BY id ASC
+                    """
                 )
             rows = cursor.fetchall()
             return [dict(r) for r in rows]

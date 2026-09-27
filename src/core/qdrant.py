@@ -72,6 +72,7 @@ class QdrantManager:
             self.url = url or self.config.url
             self.api_key = api_key if api_key is not None else self.config.api_key
             self.timeout = timeout if timeout is not None else self.config.timeout
+            self.prefer_grpc = getattr(self.config, "prefer_grpc", True)
             self.collections = getattr(self.config, "collections", STANDARD_COLLECTIONS)
 
             if client is not None:
@@ -80,6 +81,7 @@ class QdrantManager:
                 client_kwargs: Dict[str, Any] = {
                     "url": self.url,
                     "timeout": self.timeout,
+                    "prefer_grpc": self.prefer_grpc,
                 }
                 if self.api_key:
                     client_kwargs["api_key"] = self.api_key
@@ -171,7 +173,7 @@ class QdrantManager:
                 ),
             )
             # 为常用 payload 字段建立索引以提升高并发检索性能
-            for field_name in ["status", "memory_id", "project_id", "memory_type", "scope", "parent_memory_id"]:
+            for field_name in ["status", "memory_id", "project_id", "memory_type", "type", "scope", "parent_memory_id"]:
                 try:
                     self._client.create_payload_index(
                         collection_name=collection_name,
@@ -334,3 +336,23 @@ class QdrantManager:
                 raise
 
         return updated_any
+
+    def delete_point_by_id(
+        self,
+        point_id: str,
+        collection_name: str = "ai_memory",
+        wait: bool = True,
+    ) -> bool:
+        """
+        按 Qdrant point_id 物理删除点位
+        """
+        try:
+            self._client.delete(
+                collection_name=collection_name,
+                points_selector=[point_id],
+                wait=wait,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete point {point_id} in {collection_name}: {e}")
+            raise
