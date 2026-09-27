@@ -185,14 +185,27 @@ class MemoryService:
                 items = []
                 for sp in scored_points:
                     payload = sp.payload or {}
+                    vec_score = round(float(sp.score), 4)
+                    final_score = payload.get("final_score", vec_score)
+                    if isinstance(final_score, (int, float)):
+                        final_score = round(float(final_score), 4)
+                    else:
+                        final_score = vec_score
+
                     items.append({
                         "memory_id": payload.get("memory_id"),
                         "parent_memory_id": payload.get("parent_memory_id"),
                         "chunk_index": payload.get("chunk_index", 0),
                         "total_chunks": payload.get("total_chunks", 1),
                         "content": payload.get("content", ""),
-                        "memory_type": payload.get("memory_type", "fact"),
-                        "score": round(float(sp.score), 4),
+                        "memory_type": payload.get("memory_type") or payload.get("type", "fact"),
+                        "type": payload.get("type") or payload.get("memory_type", "fact"),
+                        "subject": payload.get("subject", ""),
+                        "predicate": payload.get("predicate", ""),
+                        "object": payload.get("object"),
+                        "score": final_score,
+                        "vector_score": vec_score,
+                        "final_score": final_score,
                         "collection": col_name,
                         "project_id": payload.get("project_id"),
                         "scope": payload.get("scope", "global"),
@@ -214,8 +227,8 @@ class MemoryService:
         for res_list in search_results:
             all_results.extend(res_list)
 
-        # 按 score 降序排列
-        all_results.sort(key=lambda x: x["score"], reverse=True)
+        # 按 score / final_score 降序排列
+        all_results.sort(key=lambda x: x.get("final_score", x.get("score", 0.0)), reverse=True)
         final_results = all_results[:limit]
 
         return {

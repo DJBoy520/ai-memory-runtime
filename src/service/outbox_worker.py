@@ -52,13 +52,14 @@ class OutboxWorker:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    async def process_task(self, task: Dict[str, Any]) -> bool:
+    async def process_task(self, task: Dict[str, Any], collection_name: Optional[str] = None) -> bool:
         """
         处理单个 Outbox 任务：
         - upsert: 生成 1024 维向量并推送到 Qdrant；
         - update_payload: 更新已有 Point 的 payload；
         - delete: 从 Qdrant 中物理删除 point_id。
         """
+        target_collection = collection_name or self.default_collection
         task_id = task["id"]
         memory_id = task["memory_id"]
         point_id = task["qdrant_point_id"]
@@ -87,7 +88,7 @@ class OutboxWorker:
                     payload=payload_data,
                 )
                 self.qdrant.upsert_points(
-                    collection_name=self.default_collection,
+                    collection_name=target_collection,
                     points=[point],
                     wait=True,
                 )
@@ -97,7 +98,7 @@ class OutboxWorker:
                 self.qdrant.update_payload_by_memory_id(
                     memory_id=memory_id,
                     payload_updates=payload_data,
-                    collections=[self.default_collection],
+                    collections=[target_collection],
                     wait=True,
                 )
 
@@ -105,7 +106,7 @@ class OutboxWorker:
                 # 物理删除 point
                 self.qdrant.delete_point_by_id(
                     point_id=point_id,
-                    collection_name=self.default_collection,
+                    collection_name=target_collection,
                     wait=True,
                 )
 
@@ -122,7 +123,7 @@ class OutboxWorker:
             self.session_store.mark_sync_task_failed(task_id, str(e))
             return False
 
-    async def run_once(self) -> int:
+    async def run_once(self, collection_name: Optional[str] = None) -> int:
         """
         执行单轮同步批处理：
         从 SQLite 发件箱拉取一批 pending/failed 任务，保序执行并返回处理成功数量。
@@ -133,7 +134,7 @@ class OutboxWorker:
 
         success_count = 0
         for task in tasks:
-            success = await self.process_task(task)
+            success = await self.process_task(task, collection_name=collection_name)
             if success:
                 success_count += 1
 
