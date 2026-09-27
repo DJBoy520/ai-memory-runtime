@@ -334,3 +334,23 @@ class QdrantManager:
                 raise
 
         return updated_any
+
+    def delete_point_by_id(
+        self,
+        point_id: str,
+        collection_name: str = "ai_memory",
+        wait: bool = True,
+    ) -> bool:
+        """
+        按 Qdrant point_id 物理删除点位
+        """
+        try:
+            self._client.delete(
+                collection_name=collection_name,
+                points_selector=[point_id],
+                wait=wait,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete point {point_id} in {collection_name}: {e}")
+            raise
