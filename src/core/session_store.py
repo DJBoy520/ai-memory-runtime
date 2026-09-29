@@ -108,6 +108,9 @@ CREATE TABLE IF NOT EXISTS memories (
     scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'project', 'agent', 'session')),
     source_agent TEXT NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
+    content_hash TEXT,
+    curation_batch_id TEXT,
+    last_reconciled_at INTEGER,
     deleted_at INTEGER,
     deleted_by TEXT,
     deletion_reason TEXT,
@@ -117,6 +120,9 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_lookup ON memories(project_id, type, status);
 CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject, predicate);
 CREATE INDEX IF NOT EXISTS idx_mem_point ON memories(qdrant_point_id);
+CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);
+CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
+CREATE INDEX IF NOT EXISTS idx_memories_reconciled ON memories(last_reconciled_at);
 
 -- 4. 记忆与证据溯源多对多关联表
 CREATE TABLE IF NOT EXISTS memory_evidence (
@@ -128,7 +134,7 @@ CREATE TABLE IF NOT EXISTS memory_evidence (
     PRIMARY KEY (memory_id, message_id)
 );
 
--- 5. Transactional Outbox 异步同步发件箱队列
+-- 5. Transactional Outbox 异步同步发件箱队列 (v2.2 原版保留兼容)
 CREATE TABLE IF NOT EXISTS qdrant_sync_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL,
@@ -144,7 +150,61 @@ CREATE TABLE IF NOT EXISTS qdrant_sync_queue (
 CREATE INDEX IF NOT EXISTS idx_sync_status ON qdrant_sync_queue(status, retry_count);
 CREATE INDEX IF NOT EXISTS idx_sync_order ON qdrant_sync_queue(memory_id, id);
 
--- 6. 治理与生命周期审计日志表
+-- 6. 多投影 Outbox 队列 (RFC-003: memory_projection_outbox)
+CREATE TABLE IF NOT EXISTS memory_projection_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    projection_type TEXT NOT NULL DEFAULT 'qdrant_main',
+    op_type TEXT NOT NULL, -- upsert, delete, update_payload
+    payload_snapshot TEXT,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, processing, completed, dead_letter
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at INTEGER DEFAULT 0,
+    last_error TEXT,
+    dead_letter_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(memory_id, version, projection_type, op_type)
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_queue ON memory_projection_outbox(status, next_retry_at);
+
+-- 7. 治理候选表 (RFC-003: curation_candidates)
+CREATE TABLE IF NOT EXISTS curation_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    current_status TEXT NOT NULL,
+    proposed_status TEXT NOT NULL,
+    matched_rule_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    evidence_snapshot TEXT,
+    state TEXT NOT NULL DEFAULT 'PROPOSED', -- PROPOSED, APPROVED, REJECTED, APPLIED
+    created_at INTEGER NOT NULL,
+    processed_at INTEGER,
+    FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_curation_batch ON curation_candidates(batch_id, state);
+
+-- 8. 对账检查点与元数据表 (RFC-003: reconciliation_checkpoints)
+CREATE TABLE IF NOT EXISTS reconciliation_checkpoints (
+    batch_id TEXT PRIMARY KEY,
+    start_watermark_ts INTEGER NOT NULL,
+    end_watermark_ts INTEGER,
+    sqlite_memory_count INTEGER NOT NULL,
+    qdrant_active_count INTEGER NOT NULL,
+    proposed_count INTEGER DEFAULT 0,
+    applied_count INTEGER DEFAULT 0,
+    embedding_model TEXT NOT NULL DEFAULT 'BGE-M3',
+    embedding_dimension INTEGER NOT NULL DEFAULT 1024,
+    distance_metric TEXT NOT NULL DEFAULT 'Cosine',
+    status TEXT NOT NULL, -- RUNNING, COMPLETED, FAILED
+    error_message TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER
+);
+
+-- 9. 治理与生命周期审计日志表
 CREATE TABLE IF NOT EXISTS memory_audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL,
@@ -238,6 +298,8 @@ class SessionStore:
                 cursor.execute("PRAGMA journal_mode = WAL;")
             cursor.execute(f"PRAGMA busy_timeout = {self.busy_timeout};")
             cursor.execute("PRAGMA foreign_keys = ON;")
+            # 先跑增量迁移（若老库已存在 memories 表但缺少新列，避免 CREATE INDEX 直接报错）
+            self._migrate_schema(cursor)
             cursor.executescript(CREATE_TABLES_SQL)
             self._migrate_schema(cursor)
             conn.commit()
@@ -259,7 +321,7 @@ class SessionStore:
                     "ALTER TABLE raw_messages ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0;"
                 )
 
-        # 2. 检查 memories 列 (确保所有 v2.2 字段存在)
+        # 2. 检查 memories 列 (确保所有 v2.2 及 RFC-003 治理字段存在)
         cursor.execute("PRAGMA table_info(memories);")
         mem_cols = {row["name"] for row in cursor.fetchall()}
         if mem_cols:
@@ -267,6 +329,9 @@ class SessionStore:
                 "conflict_policy": "TEXT NOT NULL DEFAULT 'coexist'",
                 "validity_type": "TEXT NOT NULL DEFAULT 'open_ended'",
                 "version": "INTEGER NOT NULL DEFAULT 1",
+                "content_hash": "TEXT",
+                "curation_batch_id": "TEXT",
+                "last_reconciled_at": "INTEGER",
                 "deleted_at": "INTEGER",
                 "deleted_by": "TEXT",
                 "deletion_reason": "TEXT",
@@ -274,6 +339,69 @@ class SessionStore:
             for col_name, col_def in v2_mem_columns.items():
                 if col_name not in mem_cols:
                     cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def};")
+
+            # 补充索引
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_reconciled ON memories(last_reconciled_at);")
+
+        # 3. 确保 RFC-003 核心扩展表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_projection_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                projection_type TEXT NOT NULL DEFAULT 'qdrant_main',
+                op_type TEXT NOT NULL,
+                payload_snapshot TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at INTEGER DEFAULT 0,
+                last_error TEXT,
+                dead_letter_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(memory_id, version, projection_type, op_type)
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_outbox_queue ON memory_projection_outbox(status, next_retry_at);")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS curation_candidates (
+                candidate_id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                memory_id TEXT NOT NULL,
+                current_status TEXT NOT NULL,
+                proposed_status TEXT NOT NULL,
+                matched_rule_id TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                evidence_snapshot TEXT,
+                state TEXT NOT NULL DEFAULT 'PROPOSED',
+                created_at INTEGER NOT NULL,
+                processed_at INTEGER,
+                FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_batch ON curation_candidates(batch_id, state);")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reconciliation_checkpoints (
+                batch_id TEXT PRIMARY KEY,
+                start_watermark_ts INTEGER NOT NULL,
+                end_watermark_ts INTEGER,
+                sqlite_memory_count INTEGER NOT NULL,
+                qdrant_active_count INTEGER NOT NULL,
+                proposed_count INTEGER DEFAULT 0,
+                applied_count INTEGER DEFAULT 0,
+                embedding_model TEXT NOT NULL DEFAULT 'BGE-M3',
+                embedding_dimension INTEGER NOT NULL DEFAULT 1024,
+                distance_metric TEXT NOT NULL DEFAULT 'Cosine',
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
+        """)
 
     def ingest_messages(
         self,
@@ -630,6 +758,7 @@ class SessionStore:
         now = int(time.time())
         v_from = valid_from if valid_from is not None else now
         point_id = qdrant_point_id or str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
+        c_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
         with self._lock:
             conn = self._get_connection()
@@ -645,10 +774,11 @@ class SessionStore:
                         confidence, importance, mention_count,
                         status, superseded_by,
                         project_id, scope, source_agent, version,
+                        content_hash, curation_batch_id, last_reconciled_at,
                         deleted_at, deleted_by, deletion_reason,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
                     """,
                     (
                         memory_id, point_id, type, conflict_policy,
@@ -657,6 +787,7 @@ class SessionStore:
                         confidence, importance, mention_count,
                         status, superseded_by,
                         project_id, scope, source_agent, version,
+                        c_hash,
                         now, now
                     ),
                 )
