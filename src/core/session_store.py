@@ -104,6 +104,10 @@ CREATE TABLE IF NOT EXISTS memories (
     status TEXT NOT NULL DEFAULT 'candidate' 
         CHECK(status IN ('candidate', 'active', 'superseded', 'archived', 'deleted')),
     superseded_by TEXT REFERENCES memories(memory_id),
+    superseded_at INTEGER,
+    previous_version_id TEXT,
+    root_memory_id TEXT,
+    protection_level TEXT NOT NULL DEFAULT 'NONE' CHECK(protection_level IN ('NONE', 'MANUAL', 'LESSON', 'SYSTEM')),
     project_id TEXT NOT NULL DEFAULT 'general',
     scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'project', 'agent', 'session')),
     source_agent TEXT NOT NULL,
@@ -169,17 +173,32 @@ CREATE TABLE IF NOT EXISTS memory_projection_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_queue ON memory_projection_outbox(status, next_retry_at);
 
--- 7. 治理候选表 (RFC-003: curation_candidates)
+-- 7. 治理候选表 (RFC-003 & RFC-005: curation_candidates)
 CREATE TABLE IF NOT EXISTS curation_candidates (
     candidate_id TEXT PRIMARY KEY,
     batch_id TEXT NOT NULL,
-    memory_id TEXT NOT NULL,
-    current_status TEXT NOT NULL,
-    proposed_status TEXT NOT NULL,
-    matched_rule_id TEXT NOT NULL,
-    reason TEXT NOT NULL,
+    memory_id TEXT,
+    session_window_json TEXT,
+    operation TEXT NOT NULL, -- EXTRACT, MERGE, UPDATE, SUPERSEDE, LINK, ARCHIVE
+    current_status TEXT,
+    proposed_status TEXT,
+    matched_rule_id TEXT,
+    reason TEXT,
     evidence_snapshot TEXT,
+    subject TEXT,
+    predicate TEXT,
+    object TEXT,
+    content TEXT,
+    evidence_source_ids TEXT, -- JSON Array
+    extracted_spans TEXT,      -- JSON Array
+    message_disposition TEXT,  -- JSON Array
+    rationale TEXT,
+    proposed_relation_json TEXT,
+    prompt_version TEXT,
+    model_name TEXT,
+    llm_confidence REAL,
     state TEXT NOT NULL DEFAULT 'PROPOSED', -- PROPOSED, APPROVED, REJECTED, APPLIED
+    rejection_reason TEXT,
     created_at INTEGER NOT NULL,
     processed_at INTEGER,
     FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
@@ -321,7 +340,7 @@ class SessionStore:
                     "ALTER TABLE raw_messages ADD COLUMN is_synthetic INTEGER NOT NULL DEFAULT 0;"
                 )
 
-        # 2. 检查 memories 列 (确保所有 v2.2 及 RFC-003 治理字段存在)
+        # 2. 检查 memories 列 (确保所有 v2.2 及 RFC-003, RFC-005 治理与版本化字段存在)
         cursor.execute("PRAGMA table_info(memories);")
         mem_cols = {row["name"] for row in cursor.fetchall()}
         if mem_cols:
@@ -329,6 +348,11 @@ class SessionStore:
                 "conflict_policy": "TEXT NOT NULL DEFAULT 'coexist'",
                 "validity_type": "TEXT NOT NULL DEFAULT 'open_ended'",
                 "version": "INTEGER NOT NULL DEFAULT 1",
+                "previous_version_id": "TEXT",
+                "root_memory_id": "TEXT",
+                "superseded_by": "TEXT",
+                "superseded_at": "INTEGER",
+                "protection_level": "TEXT NOT NULL DEFAULT 'NONE'",
                 "content_hash": "TEXT",
                 "curation_batch_id": "TEXT",
                 "last_reconciled_at": "INTEGER",
@@ -345,7 +369,7 @@ class SessionStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_reconciled ON memories(last_reconciled_at);")
 
-        # 3. 确保 RFC-003 核心扩展表存在
+        # 3. 确保 RFC-003 / RFC-005 核心扩展表存在
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memory_projection_outbox (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -370,19 +394,59 @@ class SessionStore:
             CREATE TABLE IF NOT EXISTS curation_candidates (
                 candidate_id TEXT PRIMARY KEY,
                 batch_id TEXT NOT NULL,
-                memory_id TEXT NOT NULL,
-                current_status TEXT NOT NULL,
-                proposed_status TEXT NOT NULL,
-                matched_rule_id TEXT NOT NULL,
-                reason TEXT NOT NULL,
+                memory_id TEXT,
+                session_window_json TEXT,
+                operation TEXT NOT NULL,
+                current_status TEXT,
+                proposed_status TEXT,
+                matched_rule_id TEXT,
+                reason TEXT,
                 evidence_snapshot TEXT,
+                subject TEXT,
+                predicate TEXT,
+                object TEXT,
+                content TEXT,
+                evidence_source_ids TEXT,
+                extracted_spans TEXT,
+                message_disposition TEXT,
+                rationale TEXT,
+                proposed_relation_json TEXT,
+                prompt_version TEXT,
+                model_name TEXT,
+                llm_confidence REAL,
                 state TEXT NOT NULL DEFAULT 'PROPOSED',
+                rejection_reason TEXT,
                 created_at INTEGER NOT NULL,
                 processed_at INTEGER,
                 FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
             );
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_curation_batch ON curation_candidates(batch_id, state);")
+
+        # 检查 curation_candidates 表是否缺失 RFC-005 字段（如果表是在 RFC-003 时已创建的旧结构）
+        cursor.execute("PRAGMA table_info(curation_candidates);")
+        cand_cols = {row["name"] for row in cursor.fetchall()}
+        if cand_cols:
+            cand_new_cols = {
+                "session_window_json": "TEXT",
+                "operation": "TEXT DEFAULT 'UPDATE'",
+                "subject": "TEXT",
+                "predicate": "TEXT",
+                "object": "TEXT",
+                "content": "TEXT",
+                "evidence_source_ids": "TEXT",
+                "extracted_spans": "TEXT",
+                "message_disposition": "TEXT",
+                "rationale": "TEXT",
+                "proposed_relation_json": "TEXT",
+                "prompt_version": "TEXT",
+                "model_name": "TEXT",
+                "llm_confidence": "REAL",
+                "rejection_reason": "TEXT",
+            }
+            for c_name, c_def in cand_new_cols.items():
+                if c_name not in cand_cols:
+                    cursor.execute(f"ALTER TABLE curation_candidates ADD COLUMN {c_name} {c_def};")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS reconciliation_checkpoints (
@@ -738,6 +802,10 @@ class SessionStore:
         mention_count: int = 1,
         status: str = "candidate",
         superseded_by: Optional[str] = None,
+        superseded_at: Optional[int] = None,
+        previous_version_id: Optional[str] = None,
+        root_memory_id: Optional[str] = None,
+        protection_level: str = "NONE",
         project_id: str = "general",
         scope: str = "global",
         source_agent: str = "default_agent",
@@ -772,20 +840,22 @@ class SessionStore:
                         subject, predicate, object, content,
                         valid_from, valid_to, validity_type,
                         confidence, importance, mention_count,
-                        status, superseded_by,
+                        status, superseded_by, superseded_at,
+                        previous_version_id, root_memory_id, protection_level,
                         project_id, scope, source_agent, version,
                         content_hash, curation_batch_id, last_reconciled_at,
                         deleted_at, deleted_by, deletion_reason,
                         created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
                     """,
                     (
                         memory_id, point_id, type, conflict_policy,
                         subject, predicate, object, content,
                         v_from, valid_to, validity_type,
                         confidence, importance, mention_count,
-                        status, superseded_by,
+                        status, superseded_by, superseded_at,
+                        previous_version_id, root_memory_id or memory_id, protection_level,
                         project_id, scope, source_agent, version,
                         c_hash,
                         now, now
@@ -895,6 +965,7 @@ class SessionStore:
         detail: Optional[Dict[str, Any]] = None,
         deleted_by: Optional[str] = None,
         deletion_reason: Optional[str] = None,
+        superseded_at: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         更新记忆状态、替换指向，并原子追加 Outbox 任务与 audit log。
@@ -922,6 +993,7 @@ class SessionStore:
             d_at = now if status == "deleted" else row["deleted_at"]
             d_by = deleted_by if status == "deleted" else row["deleted_by"]
             d_reason = deletion_reason if status == "deleted" else row["deletion_reason"]
+            sup_at = superseded_at if superseded_at is not None else (now if status == "superseded" or superseded_by else row["superseded_at"])
 
             try:
                 # 1. 更新 memories 主表
@@ -930,13 +1002,14 @@ class SessionStore:
                     UPDATE memories
                     SET status = ?,
                         superseded_by = COALESCE(?, superseded_by),
+                        superseded_at = COALESCE(?, superseded_at),
                         deleted_at = ?,
                         deleted_by = ?,
                         deletion_reason = ?,
                         updated_at = ?
                     WHERE memory_id = ?
                     """,
-                    (status, superseded_by, d_at, d_by, d_reason, now, memory_id),
+                    (status, superseded_by, sup_at, d_at, d_by, d_reason, now, memory_id),
                 )
 
                 # 2. 追加 qdrant_sync_queue 发件箱任务
