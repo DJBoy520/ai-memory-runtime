@@ -148,14 +148,17 @@ export function apply(ctx, config = {}) {
         }
       } catch (_) {}
 
+      // DSH Format v4 requires producer-owned source kind (e.g. `plugin:${name}`)
+      // and explicitly forbids retired `kind: "plugin"` wrapper.
+      const producerKind = `plugin:${name}`;
+
       const memoryMessage = createUserMsgFn ? createUserMsgFn({
         content: [{
           type: "text",
           text: contextXml,
         }],
         source: {
-          kind: "plugin",
-          plugin: name,
+          kind: producerKind,
           form: "snapshot",
           sections: [{
             name,
@@ -170,8 +173,7 @@ export function apply(ctx, config = {}) {
           text: contextXml,
         }],
         source: {
-          kind: "plugin",
-          plugin: name,
+          kind: producerKind,
           form: "snapshot",
           sections: [{
             name,
