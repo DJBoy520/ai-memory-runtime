@@ -61,23 +61,64 @@ class AMRApplication:
 
     async def dispatch_business_rpc(self, method: str, params: Dict[str, Any]) -> Any:
         """Route business RPC calls strictly from business UDS."""
-        if method == "memory.search":
+        # Agent 身份检查与规范化
+        agent_id = (params.get("agent_id") or params.get("source_agent") or "system").lower()
+        allowed_agents = {"hermes", "openclaw", "opencode", "dsh", "system", "default_agent", "test_runner"}
+        if agent_id not in allowed_agents:
+            raise ValueError(f"AGENT_UNAUTHORIZED: Unknown or untrusted agent_id '{agent_id}'")
+
+        if method in ("memory.search", "memory_search"):
             return await self.memory_service.memory_search(
                 query=params.get("query"),
                 collections=params.get("collections"),
                 project_id=params.get("project_id"),
                 memory_type=params.get("memory_type"),
-                scope=params.get("scope", "global"),
+                type=params.get("type"),
+                scope=params.get("scope"),
                 limit=params.get("limit", 5),
                 score_threshold=params.get("score_threshold"),
+                include_history=params.get("include_history", False),
+                status=params.get("status"),
+            )
+        elif method in ("memory.create", "memory_create"):
+            return await self.memory_service.memory_create(
+                content=params.get("content"),
+                project_id=params.get("project_id", "global"),
+                type=params.get("type") or params.get("memory_type", "general"),
+                status=params.get("status", "ACTIVE"),
+                agent_id=agent_id,
+                source_refs=params.get("source_refs"),
+                conflicts_with=params.get("conflicts_with"),
+                collection_name=params.get("collection_name", "ai_memory"),
+            )
+        elif method in ("memory.update", "memory_update"):
+            return await self.memory_service.memory_update(
+                memory_id=params.get("memory_id"),
+                content=params.get("content"),
+                type=params.get("type"),
+                status=params.get("status"),
+                expected_version=params.get("expected_version"),
+                change_reason=params.get("change_reason"),
+                agent_id=agent_id,
+                conflicts_with=params.get("conflicts_with"),
+                collection_name=params.get("collection_name", "ai_memory"),
+            )
+        elif method in ("memory.history", "memory_history"):
+            return await self.memory_service.memory_history(memory_id=params.get("memory_id"))
+        elif method in ("memory.delete", "memory_delete"):
+            return await self.memory_service.memory_delete(
+                memory_id=params.get("memory_id"),
+                agent_id=agent_id,
+                reason=params.get("reason"),
             )
         elif method == "memory.record":
+            # 兼容老版接口
             return await self.memory_service.memory_record(
                 content=params.get("content"),
                 memory_type=params.get("memory_type", "fact"),
                 scope=params.get("scope", "global"),
                 project_id=params.get("project_id"),
-                source_agent=params.get("source_agent", "openclaw"),
+                source_agent=agent_id,
                 session_id=params.get("session_id"),
                 source_message_ids=params.get("source_message_ids"),
                 tags=params.get("tags"),
@@ -86,18 +127,18 @@ class AMRApplication:
         elif method == "embedding.generate":
             texts = params.get("texts", [])
             return await self.engine.embed(texts)
-        elif method == "memory.get":
+        elif method in ("memory.get", "memory_get"):
             return await self.memory_service.memory_get(memory_id=params.get("memory_id"))
-        elif method == "memory.update_status":
+        elif method in ("memory.update_status", "memory_update_status"):
             return await self.memory_service.memory_update_status(
                 memory_id=params.get("memory_id"),
                 new_status=params.get("new_status"),
                 superseded_by=params.get("superseded_by"),
             )
-        elif method == "session.ingest":
+        elif method in ("session.ingest", "session_ingest"):
             return await self.memory_service.memory_ingest_session(
                 session_id=params.get("session_id"),
-                agent_id=params.get("agent_id", "openclaw"),
+                agent_id=agent_id,
                 project_id=params.get("project_id"),
                 messages=params.get("messages", []),
             )

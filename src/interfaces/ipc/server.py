@@ -85,8 +85,14 @@ class UDSServer:
                     logger.exception("[%s] Handler error executing method '%s': %s", self.name, method, ex)
                     resp = make_jsonrpc_error(-32603, f"Internal error: {str(ex)}", req_id=req_id)
 
-                await write_frame(writer, resp, max_bytes=self.max_request_bytes)
+                try:
+                    await write_frame(writer, resp, max_bytes=self.max_request_bytes)
+                except (ConnectionResetError, BrokenPipeError):
+                    logger.info("[%s] Client disconnected before response could be sent", self.name)
+                    break
 
+        except (ConnectionResetError, BrokenPipeError):
+            logger.info("[%s] Client connection reset", self.name)
         except asyncio.CancelledError:
             pass
         except Exception as e:

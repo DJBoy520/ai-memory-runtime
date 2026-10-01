@@ -112,9 +112,12 @@ class MemoryService:
         collections: Optional[Union[List[str], str]] = None,
         project_id: Optional[str] = None,
         memory_type: Optional[str] = None,
+        type: Optional[Union[str, List[str]]] = None,
         scope: Optional[str] = None,
         limit: int = 5,
         score_threshold: Optional[float] = None,
+        include_history: bool = False,
+        status: Optional[Union[str, List[str]]] = None,
     ) -> Dict[str, Any]:
         """
         记忆语义检索
@@ -147,22 +150,34 @@ class MemoryService:
         embeddings = await self.engine.embed([query])
         query_vector = embeddings[0]
 
-        # 2. 构建额外过滤条件 (project_id, memory_type, scope)
+        # 2. 构建额外过滤条件 (project_id, type, scope)
         filter_conditions: List[models.FieldCondition] = []
-        if project_id:
+        if project_id and project_id != "all":
             filter_conditions.append(
                 models.FieldCondition(
                     key="project_id",
                     match=models.MatchValue(value=project_id),
                 )
             )
-        if memory_type:
-            filter_conditions.append(
-                models.FieldCondition(
-                    key="memory_type",
-                    match=models.MatchValue(value=memory_type),
+
+        # 统一 type 与 memory_type 过滤
+        req_type = type or memory_type
+        if req_type:
+            if isinstance(req_type, list):
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="type",
+                        match=models.MatchAny(any=req_type),
+                    )
                 )
-            )
+            elif isinstance(req_type, str) and not req_type.endswith("/*"):
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="type",
+                        match=models.MatchValue(value=req_type),
+                    )
+                )
+
         if scope:
             filter_conditions.append(
                 models.FieldCondition(
@@ -171,20 +186,37 @@ class MemoryService:
                 )
             )
 
-        # 3. 在 target collections 中检索（利用 asyncio.to_thread 并发查询）
+        # 确定状态过滤列表
+        if status:
+            allowed_statuses = [status] if isinstance(status, str) else list(status)
+        elif include_history:
+            allowed_statuses = ["ACTIVE", "HISTORICAL", "active", "superseded"]
+        else:
+            allowed_statuses = ["ACTIVE", "active"]
+
+        # 3. 在 target collections 中检索
         async def _search_single_collection(col_name: str) -> List[Dict[str, Any]]:
             try:
                 scored_points = await asyncio.to_thread(
                     self.qdrant.search_points,
                     collection_name=col_name,
                     query_vector=query_vector,
-                    limit=limit,
+                    limit=limit * 2 if (isinstance(req_type, str) and req_type.endswith("/*")) else limit,
                     score_threshold=score_threshold,
                     filter_conditions=filter_conditions,
+                    allowed_statuses=allowed_statuses,
                 )
                 items = []
                 for sp in scored_points:
                     payload = sp.payload or {}
+                    p_type = payload.get("type") or payload.get("memory_type", "general")
+                    
+                    # 前缀通配匹配 (如 decision/*)
+                    if isinstance(req_type, str) and req_type.endswith("/*"):
+                        prefix = req_type[:-2]
+                        if not p_type.startswith(prefix):
+                            continue
+
                     vec_score = round(float(sp.score), 4)
                     final_score = payload.get("final_score", vec_score)
                     if isinstance(final_score, (int, float)):
@@ -194,25 +226,23 @@ class MemoryService:
 
                     items.append({
                         "memory_id": payload.get("memory_id"),
-                        "parent_memory_id": payload.get("parent_memory_id"),
-                        "chunk_index": payload.get("chunk_index", 0),
-                        "total_chunks": payload.get("total_chunks", 1),
+                        "version": payload.get("version", 1),
                         "content": payload.get("content", ""),
-                        "memory_type": payload.get("memory_type") or payload.get("type", "fact"),
-                        "type": payload.get("type") or payload.get("memory_type", "fact"),
-                        "subject": payload.get("subject", ""),
-                        "predicate": payload.get("predicate", ""),
-                        "object": payload.get("object"),
+                        "project_id": payload.get("project_id", "global"),
+                        "type": p_type,
+                        "status": (payload.get("status") or "ACTIVE").upper(),
+                        "created_by_agent": payload.get("created_by_agent") or payload.get("source_agent", "system"),
+                        "updated_by_agent": payload.get("updated_by_agent") or payload.get("source_agent", "system"),
                         "score": final_score,
                         "vector_score": vec_score,
                         "final_score": final_score,
                         "collection": col_name,
-                        "project_id": payload.get("project_id"),
                         "scope": payload.get("scope", "global"),
-                        "source_agent": payload.get("source_agent"),
-                        "source_message_ids": payload.get("source_message_ids", []),
                         "created_at": payload.get("created_at"),
-                        "meta": payload.get("meta", {}),
+                        "updated_at": payload.get("updated_at"),
+                        "subject": payload.get("subject", ""),
+                        "predicate": payload.get("predicate", ""),
+                        "object": payload.get("object", None),
                     })
                 return items
             except Exception as e:
@@ -445,3 +475,188 @@ class MemoryService:
             project_id=project_id,
             messages=messages,
         )
+
+    # =========================================================================
+    # v3.0 Unified Multi-Agent Semantic Operations
+    # =========================================================================
+
+    async def memory_create(
+        self,
+        content: str,
+        project_id: str = "global",
+        type: str = "general",
+        status: str = "ACTIVE",
+        agent_id: str = "system",
+        source_refs: Optional[List[str]] = None,
+        conflicts_with: Optional[List[str]] = None,
+        collection_name: str = "ai_memory",
+    ) -> Dict[str, Any]:
+        """
+        v3.0 标准创建记忆：
+        - 校验内容与 6 态规则
+        - 由 SessionStore 生成 SQLite 实体、版本快照(v1)与发件箱任务
+        - 计算 1024 维向量并同步写入 Qdrant 9 字段 Payload
+        - 返回标准记忆对象
+        """
+        if not content or not content.strip():
+            raise ValueError("content must not be empty")
+
+        memory_id = self._generate_memory_id()
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
+
+        # 1. 向量生成 (调用 BGEM3Engine)
+        embeddings = await self.engine.embed([content.strip()])
+        vector = embeddings[0]
+
+        # 2. SQLite SSOT 原子入库 (含 Outbox 与双向冲突标记)
+        store_res = await asyncio.to_thread(
+            self.session_store.create_memory_v3,
+            memory_id=memory_id,
+            content=content.strip(),
+            project_id=project_id or "global",
+            type=type or "general",
+            status=status or "ACTIVE",
+            created_by_agent=agent_id,
+            source_refs=source_refs or [],
+            conflicts_with=conflicts_with or [],
+            qdrant_point_id=point_id,
+            operator=agent_id,
+        )
+
+        # 3. 构造 9 字段 Payload 写入 Qdrant
+        now_ts = int(time.time())
+        payload = {
+            "memory_id": memory_id,
+            "version": 1,
+            "content": content.strip(),
+            "project_id": project_id or "global",
+            "type": type or "general",
+            "status": (status or "ACTIVE").upper(),
+            "created_by_agent": agent_id,
+            "updated_by_agent": agent_id,
+            "updated_at": now_ts,
+        }
+
+        point = models.PointStruct(
+            id=point_id,
+            vector=vector,
+            payload=payload,
+        )
+
+        await asyncio.to_thread(
+            self.qdrant.upsert_points,
+            collection_name=collection_name,
+            points=[point],
+        )
+
+        return store_res
+
+    async def memory_update(
+        self,
+        memory_id: str,
+        content: Optional[str] = None,
+        type: Optional[str] = None,
+        status: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        change_reason: Optional[str] = None,
+        agent_id: str = "system",
+        conflicts_with: Optional[List[str]] = None,
+        collection_name: str = "ai_memory",
+    ) -> Dict[str, Any]:
+        """
+        v3.0 标准修改记忆：
+        - 仅修改 type / status：就地更新元数据，不递增版本，不写 revisions 表，直接更新 Qdrant Payload
+        - 修改 content：
+            - 必须校验 expected_version（乐观锁）
+            - 必须提供 change_reason
+            - version ++ 并落入 memory_revisions 表
+            - 重算 Embedding 向量并覆盖 Qdrant Point
+        """
+        # 1. 执行 SQLite SSOT 更新与校验
+        updated_item = await asyncio.to_thread(
+            self.session_store.update_memory_v3,
+            memory_id=memory_id,
+            content=content,
+            type=type,
+            status=status,
+            expected_version=expected_version,
+            change_reason=change_reason,
+            agent_id=agent_id,
+            conflicts_with=conflicts_with,
+        )
+
+        # 2. Qdrant 同步
+        point_id = updated_item["qdrant_point_id"]
+        now_ts = int(time.time())
+
+        if content is not None and content.strip() != "":
+            # 内容变更：重算向量并覆盖
+            embeddings = await self.engine.embed([content.strip()])
+            new_vector = embeddings[0]
+
+            payload = {
+                "memory_id": memory_id,
+                "version": updated_item["version"],
+                "content": content.strip(),
+                "project_id": updated_item["project_id"],
+                "type": updated_item["type"],
+                "status": (updated_item["status"] or "ACTIVE").upper(),
+                "created_by_agent": updated_item["created_by_agent"],
+                "updated_by_agent": agent_id,
+                "updated_at": now_ts,
+            }
+            point = models.PointStruct(
+                id=point_id,
+                vector=new_vector,
+                payload=payload,
+            )
+            await asyncio.to_thread(
+                self.qdrant.upsert_points,
+                collection_name=collection_name,
+                points=[point],
+            )
+        else:
+            # 仅元数据更新：update_payload
+            payload_updates = {
+                "type": updated_item["type"],
+                "status": (updated_item["status"] or "ACTIVE").upper(),
+                "updated_by_agent": agent_id,
+                "updated_at": now_ts,
+            }
+            await asyncio.to_thread(
+                self.qdrant.update_payload_by_memory_id,
+                memory_id=memory_id,
+                payload_updates=payload_updates,
+            )
+
+        return updated_item
+
+    async def memory_history(self, memory_id: str) -> Dict[str, Any]:
+        """查询某条记忆的所有历史修订版本轨迹"""
+        item = await asyncio.to_thread(self.session_store.get_memory_v3, memory_id)
+        if not item:
+            raise KeyError(f"Memory '{memory_id}' not found")
+        revisions = await asyncio.to_thread(self.session_store.get_memory_revisions, memory_id)
+        return {
+            "memory_id": memory_id,
+            "current_version": item["version"],
+            "current_content": item["content"],
+            "status": item["status"],
+            "type": item["type"],
+            "revisions": revisions,
+        }
+
+    async def memory_delete(
+        self,
+        memory_id: str,
+        agent_id: str = "system",
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """逻辑软删除记忆：状态置为 DELETED，常规与历史检索隐藏，保留底账与审计"""
+        return await self.memory_update(
+            memory_id=memory_id,
+            status="DELETED",
+            change_reason=reason or "Soft deleted via memory_delete",
+            agent_id=agent_id,
+        )
+

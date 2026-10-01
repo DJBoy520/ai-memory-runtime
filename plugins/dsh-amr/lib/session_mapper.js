@@ -5,7 +5,7 @@
  * Contract:
  * {
  *   "session_id": "string",
- *   "agent_id": "openclaw",
+ *   "agent_id": "dsh",
  *   "project_id": "string" | null,
  *   "messages": [
  *     {
@@ -39,15 +39,15 @@ export function normalizeRole(role) {
 }
 
 /**
- * Extracts plain text content from various OpenClaw / LLM message formats.
+ * Extracts plain text content from various DSH / OpenClaw / LLM message formats.
  * @param {any} raw
  * @returns {string}
  */
 export function extractContent(raw) {
   if (!raw) return "";
   if (typeof raw === "string") return raw;
-  if (typeof raw.content === "string") return raw.content;
   if (typeof raw.text === "string") return raw.text;
+  if (typeof raw.content === "string") return raw.content;
   if (Array.isArray(raw.content)) {
     // Multi-part content blocks [{ type: "text", text: "..." }]
     return raw.content
@@ -73,7 +73,7 @@ export function extractContent(raw) {
  * @returns {object} Formatted session ingest payload conforming to session_store.py
  */
 export function mapSessionToIngest(params) {
-  const { sessionId, projectId, messages, agentId = "openclaw" } = params || {};
+  const { sessionId, projectId, messages, agentId = "dsh" } = params || {};
 
   if (!sessionId || typeof sessionId !== "string") {
     throw new Error("AMR_MAPPER_INVALID_SESSION_ID: sessionId is required");

@@ -408,13 +408,17 @@ async def test_mcp_bridge_tools_list():
     resp = await bridge.handle_request(req)
     assert resp["id"] == 2
     tools = resp["result"]["tools"]
-    assert len(tools) == 5
+    assert len(tools) >= 5
     names = [t["name"] for t in tools]
     assert "memory_search" in names
     assert "memory_record" in names
     assert "memory_get" in names
     assert "memory_update_status" in names
     assert "memory_ingest_session" in names
+    assert "memory_create" in names
+    assert "memory_update" in names
+    assert "memory_history" in names
+    assert "memory_delete" in names
 
 @pytest.mark.asyncio
 async def test_mcp_bridge_invalid_tool_call():

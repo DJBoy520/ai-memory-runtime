@@ -48,8 +48,9 @@ class RuleEngine:
         current_status = memory.get("status", "active")
         memory_id = memory.get("memory_id", "")
 
-        # 仅针对 active 或 stale 进行噪音识别
-        if current_status not in ("active", "stale"):
+        # 针对 ACTIVE, active, TEMPORARY, temporary 等进行扫描识别
+        status_norm = current_status.lower()
+        if status_norm not in ("active", "stale", "temporary", "pending_verify"):
             return None
 
         # 1. 规则: 纯心跳噪音 (RULE_HEARTBEAT_NOISE) -> 建议转为 deleted 或 archived

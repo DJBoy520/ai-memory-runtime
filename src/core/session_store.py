@@ -83,34 +83,33 @@ CREATE TABLE IF NOT EXISTS raw_messages (
 CREATE INDEX IF NOT EXISTS idx_msg_session ON raw_messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_msg_hash ON raw_messages(content_hash);
 
--- 3. 记忆主表 (知识层 Memory SSOT)
+-- 3. 记忆主表 (知识层 Memory SSOT - v3.0 多 Agent 共享记忆模型)
 CREATE TABLE IF NOT EXISTS memories (
     memory_id TEXT PRIMARY KEY,
     qdrant_point_id TEXT NOT NULL UNIQUE,
-    type TEXT NOT NULL CHECK(type IN ('fact', 'preference', 'decision', 'task', 'episode', 'relation')),
-    conflict_policy TEXT NOT NULL DEFAULT 'coexist' 
-        CHECK(conflict_policy IN ('overwrite', 'coexist', 'state_machine', 'immutable')),
-    subject TEXT NOT NULL,
-    predicate TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'general',          -- 支持 namespace/name (如 decision/arch) 或扁平词
+    conflict_policy TEXT NOT NULL DEFAULT 'coexist',
+    subject TEXT DEFAULT '',
+    predicate TEXT DEFAULT '',
     object TEXT,
     content TEXT NOT NULL,
-    valid_from INTEGER NOT NULL,
+    valid_from INTEGER NOT NULL DEFAULT 0,
     valid_to INTEGER,
-    validity_type TEXT NOT NULL DEFAULT 'open_ended' 
-        CHECK(validity_type IN ('open_ended', 'bounded', 'unknown')),
-    confidence REAL NOT NULL DEFAULT 0.8,
+    validity_type TEXT NOT NULL DEFAULT 'open_ended',
+    confidence REAL NOT NULL DEFAULT 1.0,
     importance REAL NOT NULL DEFAULT 0.5,
     mention_count INTEGER NOT NULL DEFAULT 1,
-    status TEXT NOT NULL DEFAULT 'candidate' 
-        CHECK(status IN ('candidate', 'active', 'superseded', 'archived', 'deleted')),
+    status TEXT NOT NULL DEFAULT 'ACTIVE',          -- 6态: ACTIVE, PENDING_VERIFY, CONFLICT, HISTORICAL, TEMPORARY, DELETED
     superseded_by TEXT REFERENCES memories(memory_id),
     superseded_at INTEGER,
     previous_version_id TEXT,
     root_memory_id TEXT,
-    protection_level TEXT NOT NULL DEFAULT 'NONE' CHECK(protection_level IN ('NONE', 'MANUAL', 'LESSON', 'SYSTEM')),
-    project_id TEXT NOT NULL DEFAULT 'general',
-    scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'project', 'agent', 'session')),
-    source_agent TEXT NOT NULL,
+    protection_level TEXT NOT NULL DEFAULT 'NONE',
+    project_id TEXT NOT NULL DEFAULT 'global',
+    scope TEXT NOT NULL DEFAULT 'global',
+    source_agent TEXT NOT NULL DEFAULT 'system',
+    created_by_agent TEXT DEFAULT 'system',
+    updated_by_agent TEXT DEFAULT 'system',
     version INTEGER NOT NULL DEFAULT 1,
     content_hash TEXT,
     curation_batch_id TEXT,
@@ -118,9 +117,24 @@ CREATE TABLE IF NOT EXISTS memories (
     deleted_at INTEGER,
     deleted_by TEXT,
     deletion_reason TEXT,
+    source_refs TEXT DEFAULT '[]',                 -- 弱引用 JSON 数组，记录关联会话与来源
+    conflicts_with TEXT DEFAULT '[]',              -- 冲突对立记忆 ID 列表 (JSON)
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- 3.1 记忆修订历史快照表 (v3.0 Append-only 内容版本快照)
+CREATE TABLE IF NOT EXISTS memory_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    updated_by_agent TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    change_reason TEXT,
+    FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_revisions_mem ON memory_revisions(memory_id);
 CREATE INDEX IF NOT EXISTS idx_mem_lookup ON memories(project_id, type, status);
 CREATE INDEX IF NOT EXISTS idx_mem_subject ON memories(subject, predicate);
 CREATE INDEX IF NOT EXISTS idx_mem_point ON memories(qdrant_point_id);
@@ -359,6 +373,10 @@ class SessionStore:
                 "deleted_at": "INTEGER",
                 "deleted_by": "TEXT",
                 "deletion_reason": "TEXT",
+                "created_by_agent": "TEXT DEFAULT 'system'",
+                "updated_by_agent": "TEXT DEFAULT 'system'",
+                "source_refs": "TEXT DEFAULT '[]'",
+                "conflicts_with": "TEXT DEFAULT '[]'",
             }
             for col_name, col_def in v2_mem_columns.items():
                 if col_name not in mem_cols:
@@ -368,6 +386,21 @@ class SessionStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_reconciled ON memories(last_reconciled_at);")
+
+        # 2.1 确保 memory_revisions 快照表存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                updated_by_agent TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                change_reason TEXT,
+                FOREIGN KEY(memory_id) REFERENCES memories(memory_id)
+            );
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_revisions_mem ON memory_revisions(memory_id);")
 
         # 3. 确保 RFC-003 / RFC-005 核心扩展表存在
         cursor.execute("""
@@ -1152,6 +1185,442 @@ class SessionStore:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(f"PRAGMA wal_checkpoint({mode});")
+
+    # =========================================================================
+    # v3.0 AMR Core Methods (6-State, Revision History, Optimistic Lock, Outbox)
+    # =========================================================================
+
+    def record_memory_revision(
+        self,
+        memory_id: str,
+        version: int,
+        content: str,
+        updated_by_agent: str,
+        change_reason: Optional[str] = None,
+        updated_at: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """记录一条不可变的记忆修订历史快照"""
+        now = updated_at or int(time.time())
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memory_revisions (
+                    memory_id, version, content, updated_by_agent, updated_at, change_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (memory_id, version, content, updated_by_agent, now, change_reason),
+            )
+            conn.commit()
+            return {
+                "id": cursor.lastrowid,
+                "memory_id": memory_id,
+                "version": version,
+                "content": content,
+                "updated_by_agent": updated_by_agent,
+                "updated_at": now,
+                "change_reason": change_reason,
+            }
+
+    def get_memory_revisions(self, memory_id: str) -> List[Dict[str, Any]]:
+        """获取某条记忆的所有历史修订版本，按版本号升序排列"""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, memory_id, version, content, updated_by_agent, updated_at, change_reason
+                FROM memory_revisions
+                WHERE memory_id = ?
+                ORDER BY version ASC
+                """,
+                (memory_id,),
+            )
+            rows = cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    def create_memory_v3(
+        self,
+        memory_id: str,
+        content: str,
+        project_id: str = "global",
+        type: str = "general",
+        status: str = "ACTIVE",
+        created_by_agent: str = "system",
+        source_refs: Optional[List[str]] = None,
+        conflicts_with: Optional[List[str]] = None,
+        qdrant_point_id: Optional[str] = None,
+        operator: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        v3.0 标准记忆创建：
+        - 验证 6 态合法性与非空规则
+        - 初始版本固定为 version=1
+        - 写入 memories 主表与 revisions 表 (v1 快照)
+        - 写入 qdrant_sync_queue (Transactional Outbox)
+        - 若声明 conflicts_with，原子双向标记目标记忆为 CONFLICT
+        """
+        valid_statuses = {"ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"}
+        status_norm = status.upper() if status else "ACTIVE"
+        if status_norm not in valid_statuses:
+            raise ValueError(f"Invalid memory status: '{status}'. Must be one of {valid_statuses}")
+        if status_norm == "HISTORICAL":
+            raise ValueError("Cannot directly create memory in HISTORICAL state. HISTORICAL is for superseded records.")
+
+        if not content or not content.strip():
+            raise ValueError("Memory content cannot be empty")
+        if len(content.strip()) < 5:
+            raise ValueError("Memory content too short (min 5 chars)")
+        if len(content) > 16000:
+            raise ValueError("Memory content too long (max 16000 chars)")
+
+        now = int(time.time())
+        point_id = qdrant_point_id or str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
+        c_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        refs_json = json.dumps(source_refs or [], ensure_ascii=False)
+        conflicts_list = conflicts_with or []
+        conflicts_json = json.dumps(conflicts_list, ensure_ascii=False)
+        agent = created_by_agent or "system"
+        op = operator or agent
+
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                # 1. 插入 memories 主表
+                cursor.execute(
+                    """
+                    INSERT INTO memories (
+                        memory_id, qdrant_point_id, type, conflict_policy,
+                        subject, predicate, object, content,
+                        valid_from, valid_to, validity_type,
+                        confidence, importance, mention_count,
+                        status, superseded_by, superseded_at,
+                        previous_version_id, root_memory_id, protection_level,
+                        project_id, scope, source_agent, created_by_agent, updated_by_agent, version,
+                        content_hash, curation_batch_id, last_reconciled_at,
+                        deleted_at, deleted_by, deletion_reason,
+                        source_refs, conflicts_with,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 'coexist', '', '', NULL, ?, 0, NULL, 'open_ended', 1.0, 0.5, 1,
+                            ?, NULL, NULL, NULL, ?, 'NONE', ?, 'global', ?, ?, ?, 1,
+                            ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?)
+                    """,
+                    (
+                        memory_id, point_id, type, content,
+                        status_norm, memory_id, project_id, agent, agent, agent,
+                        c_hash, refs_json, conflicts_json, now, now
+                    ),
+                )
+
+                # 2. 写入 memory_revisions (v1 初始快照)
+                cursor.execute(
+                    """
+                    INSERT INTO memory_revisions (
+                        memory_id, version, content, updated_by_agent, updated_at, change_reason
+                    )
+                    VALUES (?, 1, ?, ?, ?, 'Initial creation')
+                    """,
+                    (memory_id, content, agent, now),
+                )
+
+                # 3. 若有冲突目标，进行双向原子打标
+                if conflicts_list:
+                    for target_id in conflicts_list:
+                        cursor.execute("SELECT conflicts_with, status FROM memories WHERE memory_id = ?", (target_id,))
+                        t_row = cursor.fetchone()
+                        if t_row:
+                            try:
+                                t_conflicts = json.loads(t_row["conflicts_with"] or "[]")
+                            except Exception:
+                                t_conflicts = []
+                            if memory_id not in t_conflicts:
+                                t_conflicts.append(memory_id)
+                            cursor.execute(
+                                """
+                                UPDATE memories
+                                SET status = 'CONFLICT',
+                                    conflicts_with = ?,
+                                    updated_at = ?
+                                WHERE memory_id = ?
+                                """,
+                                (json.dumps(t_conflicts, ensure_ascii=False), now, target_id),
+                            )
+                            # 同步入发件箱更新 target 状态
+                            target_payload = json.dumps({
+                                "memory_id": target_id,
+                                "status": "CONFLICT",
+                                "updated_at": now,
+                            }, ensure_ascii=False)
+                            cursor.execute(
+                                """
+                                INSERT INTO qdrant_sync_queue (
+                                    memory_id, qdrant_point_id, op_type, payload_snapshot,
+                                    status, retry_count, last_error, created_at, updated_at
+                                )
+                                VALUES (?, ?, 'update_payload', ?, 'pending', 0, NULL, ?, ?)
+                                """,
+                                (target_id, target_id, target_payload, now, now),
+                            )
+
+                # 4. 构造 Qdrant 9 字段 Payload 并入发件箱
+                payload_snapshot = json.dumps({
+                    "memory_id": memory_id,
+                    "version": 1,
+                    "content": content,
+                    "project_id": project_id,
+                    "type": type,
+                    "status": status_norm,
+                    "created_by_agent": agent,
+                    "updated_by_agent": agent,
+                    "updated_at": now,
+                }, ensure_ascii=False)
+
+                cursor.execute(
+                    """
+                    INSERT INTO qdrant_sync_queue (
+                        memory_id, qdrant_point_id, op_type, payload_snapshot,
+                        status, retry_count, last_error, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'upsert', ?, 'pending', 0, NULL, ?, ?)
+                    """,
+                    (memory_id, point_id, payload_snapshot, now, now),
+                )
+
+                # 5. 记录审计日志
+                audit_dict = {
+                    "action": "create_memory_v3",
+                    "status": status_norm,
+                    "type": type,
+                    "project_id": project_id,
+                    "conflicts_with": conflicts_list,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO memory_audit_log (
+                        memory_id, action, operator, detail, timestamp
+                    )
+                    VALUES (?, 'create', ?, ?, ?)
+                    """,
+                    (memory_id, op, json.dumps(audit_dict, ensure_ascii=False), now),
+                )
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+
+        return self.get_memory_v3(memory_id)
+
+    def get_memory_v3(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """获取 v3.0 记忆实体详情及历史修订版本列表"""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            res = dict(row)
+            try:
+                res["source_refs"] = json.loads(res.get("source_refs") or "[]")
+            except Exception:
+                res["source_refs"] = []
+            try:
+                res["conflicts_with"] = json.loads(res.get("conflicts_with") or "[]")
+            except Exception:
+                res["conflicts_with"] = []
+
+            cursor.execute(
+                """
+                SELECT version, content, updated_by_agent, updated_at, change_reason
+                FROM memory_revisions
+                WHERE memory_id = ?
+                ORDER BY version ASC
+                """,
+                (memory_id,),
+            )
+            res["revisions"] = [dict(r) for r in cursor.fetchall()]
+            return res
+
+    def update_memory_v3(
+        self,
+        memory_id: str,
+        content: Optional[str] = None,
+        type: Optional[str] = None,
+        status: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        change_reason: Optional[str] = None,
+        agent_id: str = "system",
+        conflicts_with: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        v3.0 记忆修改：
+        - 仅修改 type / status：元数据就地更新，不递增版本，不写 revisions 表，不重算向量。
+        - 修改 content：
+            - 必须校验 expected_version（乐观锁防止并发踩踏），不匹配抛 ValueError("VERSION_CONFLICT")
+            - 必须提供 change_reason 说明
+            - version ++
+            - 写入 memory_revisions 快照
+            - 入发件箱触发向量重算 (op_type='upsert')
+        - 状态流转合法性校验：严禁从 DELETED 逆向流转为其他状态
+        """
+        valid_statuses = {"ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"}
+        now = int(time.time())
+
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM memories WHERE memory_id = ?", (memory_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise KeyError(f"Memory '{memory_id}' not found")
+
+            curr_status = (row["status"] or "ACTIVE").upper()
+            curr_version = row["version"] or 1
+            point_id = row["qdrant_point_id"]
+
+            # 状态流转守卫
+            new_status = status.upper() if status else curr_status
+            if new_status not in valid_statuses:
+                raise ValueError(f"Invalid status: '{status}'. Must be one of {valid_statuses}")
+            if curr_status == "DELETED" and new_status != "DELETED":
+                raise ValueError("Illegal status transition: DELETED state is terminal and cannot be reverted.")
+
+            new_type = type if type is not None else (row["type"] or "general")
+            content_changed = content is not None and content.strip() != row["content"].strip()
+
+            new_version = curr_version
+            op_type = "update_payload"
+
+            try:
+                if content_changed:
+                    # 乐观锁验证
+                    if expected_version is None:
+                        raise ValueError("Content modification requires 'expected_version' for optimistic concurrency control.")
+                    if expected_version != curr_version:
+                        raise ValueError(f"VERSION_CONFLICT: Expected version {expected_version}, but current version is {curr_version}.")
+                    if not change_reason or not change_reason.strip():
+                        raise ValueError("Content modification requires a non-empty 'change_reason'.")
+
+                    clean_content = content.strip()
+                    if len(clean_content) < 5:
+                        raise ValueError("Memory content too short (min 5 chars)")
+                    if len(clean_content) > 16000:
+                        raise ValueError("Memory content too long (max 16000 chars)")
+
+                    new_version = curr_version + 1
+                    c_hash = hashlib.sha256(clean_content.encode("utf-8")).hexdigest()
+
+                    # 1. 插入新 revision
+                    cursor.execute(
+                        """
+                        INSERT INTO memory_revisions (
+                            memory_id, version, content, updated_by_agent, updated_at, change_reason
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (memory_id, new_version, clean_content, agent_id, now, change_reason),
+                    )
+
+                    # 2. 更新 memories 主表
+                    cursor.execute(
+                        """
+                        UPDATE memories
+                        SET content = ?,
+                            content_hash = ?,
+                            version = ?,
+                            type = ?,
+                            status = ?,
+                            updated_by_agent = ?,
+                            updated_at = ?
+                        WHERE memory_id = ?
+                        """,
+                        (clean_content, c_hash, new_version, new_type, new_status, agent_id, now, memory_id),
+                    )
+                    op_type = "upsert"
+                    final_content = clean_content
+                else:
+                    # 仅元数据更新
+                    final_content = row["content"]
+                    deleted_at = now if new_status == "DELETED" else row["deleted_at"]
+                    deleted_by = agent_id if new_status == "DELETED" else row["deleted_by"]
+                    cursor.execute(
+                        """
+                        UPDATE memories
+                        SET type = ?,
+                            status = ?,
+                            updated_by_agent = ?,
+                            updated_at = ?,
+                            deleted_at = ?,
+                            deleted_by = ?
+                        WHERE memory_id = ?
+                        """,
+                        (new_type, new_status, agent_id, now, deleted_at, deleted_by, memory_id),
+                    )
+                    op_type = "delete" if new_status == "DELETED" else "update_payload"
+
+                # 3. 处理冲突
+                if conflicts_with is not None:
+                    conflicts_json = json.dumps(conflicts_with, ensure_ascii=False)
+                    cursor.execute(
+                        "UPDATE memories SET conflicts_with = ? WHERE memory_id = ?",
+                        (conflicts_json, memory_id),
+                    )
+
+                # 4. Outbox 同步
+                payload_snapshot = json.dumps({
+                    "memory_id": memory_id,
+                    "version": new_version,
+                    "content": final_content,
+                    "project_id": row["project_id"] or "global",
+                    "type": new_type,
+                    "status": new_status,
+                    "created_by_agent": row["created_by_agent"] or row["source_agent"] or "system",
+                    "updated_by_agent": agent_id,
+                    "updated_at": now,
+                }, ensure_ascii=False)
+
+                cursor.execute(
+                    """
+                    INSERT INTO qdrant_sync_queue (
+                        memory_id, qdrant_point_id, op_type, payload_snapshot,
+                        status, retry_count, last_error, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
+                    """,
+                    (memory_id, point_id, op_type, payload_snapshot, now, now),
+                )
+
+                # 5. 审计记录
+                audit_dict = {
+                    "action": "update_memory_v3",
+                    "content_changed": content_changed,
+                    "old_version": curr_version,
+                    "new_version": new_version,
+                    "status": new_status,
+                    "type": new_type,
+                    "change_reason": change_reason,
+                }
+                cursor.execute(
+                    """
+                    INSERT INTO memory_audit_log (
+                        memory_id, action, operator, detail, timestamp
+                    )
+                    VALUES (?, 'update', ?, ?, ?)
+                    """,
+                    (memory_id, agent_id, json.dumps(audit_dict, ensure_ascii=False), now),
+                )
+
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+
+        return self.get_memory_v3(memory_id)
 
     def close(self) -> None:
         """关闭数据库长连接"""

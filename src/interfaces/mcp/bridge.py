@@ -96,8 +96,12 @@ class MCPBridge:
                 # Map MCP tool calls to Daemon RPC methods
                 rpc_method_map = {
                     "memory_search": "memory.search",
-                    "memory_record": "memory.record",
+                    "memory_create": "memory.create",
+                    "memory_update": "memory.update",
+                    "memory_history": "memory.history",
+                    "memory_delete": "memory.delete",
                     "memory_get": "memory.get",
+                    "memory_record": "memory.record",
                     "memory_update_status": "memory.update_status",
                     "memory_ingest_session": "session.ingest",
                 }
@@ -106,12 +110,11 @@ class MCPBridge:
                 if not rpc_method:
                     raise ValueError(f"Unsupported tool: {tool_name}")
 
-                # Automatically inject immutable source_agent provenance
-                if tool_name == "memory_record":
+                # Automatically inject immutable agent_id / source_agent provenance
+                if not arguments.get("agent_id"):
+                    arguments["agent_id"] = self.source_agent
+                if not arguments.get("source_agent"):
                     arguments["source_agent"] = self.source_agent
-                elif tool_name == "memory_ingest_session":
-                    if not arguments.get("agent_id"):
-                        arguments["agent_id"] = self.source_agent
 
                 res = await self._call_daemon(rpc_method, arguments, req_id)
                 formatted_text = json.dumps(res, ensure_ascii=False, indent=2)

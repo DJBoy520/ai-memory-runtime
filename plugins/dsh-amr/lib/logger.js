@@ -20,7 +20,7 @@ export class AmrLogger {
    * @param {number} [options.throttleWindowMs=5000]
    */
   constructor(options = {}) {
-    this.prefix = options.prefix || "[openclaw-amr]";
+    this.prefix = options.prefix || "[dsh-amr]";
     this.levelStr = options.level || (process.env.AMR_LOG_LEVEL || "info").toLowerCase();
     this.level = LOG_LEVELS[this.levelStr] || LOG_LEVELS.info;
     this.hostLogger = options.hostLogger || null;

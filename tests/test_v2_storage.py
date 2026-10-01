@@ -159,15 +159,19 @@ def test_foreign_key_and_check_constraints(temp_v2_store):
                 """
             )
 
-    # 2. 检查 CHECK 约束：非法 type
+    # 2. 检查 CHECK 约束：非法 role in raw_messages
+    temp_v2_store.record_raw_session("sess_for_check", "agent")
     with pytest.raises(sqlite3.IntegrityError):
-        temp_v2_store.create_memory(
-            memory_id="mem_invalid_type",
-            subject="a",
-            predicate="b",
-            content="invalid type",
-            type="non_existent_type",  # 非法类型
-        )
+        with temp_v2_store.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO raw_messages (
+                    message_id, session_id, role, content, content_hash, sequence, source_type, is_synthetic, created_at
+                )
+                VALUES ('msg_bad_role', 'sess_for_check', 'invalid_role', 'hi', 'hash1', 1, 'user_message', 0, 1000)
+                """
+            )
 
     # 3. 检查 CHECK 约束：非法 source_type
     with pytest.raises(sqlite3.IntegrityError):

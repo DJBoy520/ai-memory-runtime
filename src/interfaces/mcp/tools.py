@@ -1,10 +1,14 @@
 """
-MCP Tools Definition for AI Memory Runtime.
-Defines the 5 standard semantic memory tools exposed to AI Agents:
+MCP Tools Definition for AI Memory Runtime (v3.0 Multi-Agent Memory Hub).
+Defines standard semantic memory tools exposed to AI Agents:
 - memory_search
-- memory_record
+- memory_create
+- memory_update
+- memory_history
+- memory_delete
 - memory_get
-- memory_update_status
+- memory_record (compat)
+- memory_update_status (compat)
 - memory_ingest_session
 
 STRICT SAFETY: Zero torch/CUDA imports.
@@ -12,11 +16,10 @@ STRICT SAFETY: Zero torch/CUDA imports.
 
 from typing import Any, Dict, List, Optional
 
-
 TOOL_DEFINITIONS = [
     {
         "name": "memory_search",
-        "description": "Semantic search across long-term memories, decisions, and knowledge collections. Automatically filters out inactive/superseded/deleted records.",
+        "description": "Semantic search across long-term memories. By default returns current valid facts (status=ACTIVE). Supports history lookup (include_history=true) and domain filtering.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -24,24 +27,23 @@ TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "The natural language query or technical problem statement to search for."
                 },
-                "collections": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Collections to search across. Defaults to ['ai_memory']. Options: ['ai_memory', 'crypto_standards', 'project_docs', 'all']."
-                },
                 "project_id": {
                     "type": "string",
-                    "description": "Optional project identifier to narrow down project-specific context (e.g. 'Reduction-Go')."
+                    "description": "Optional project identifier to narrow down context (e.g. 'aep-chain', 'global'). Defaults to searching active scope."
                 },
-                "memory_type": {
+                "type": {
                     "type": "string",
-                    "enum": ["fact", "decision", "rule", "context"],
-                    "description": "Optional memory category filter."
+                    "description": "Optional category filter. Supports namespace wildcard (e.g. 'decision/*', 'design/arch') or exact type."
                 },
-                "scope": {
+                "include_history": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When true, includes historical valid facts (ACTIVE + HISTORICAL) to understand design evolution. Defaults to false (current facts only)."
+                },
+                "status": {
                     "type": "string",
-                    "enum": ["global", "project", "agent", "session"],
-                    "description": "Visibility scope. Defaults to 'global'."
+                    "enum": ["ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"],
+                    "description": "Optional explicit status filter for governance/audit queries."
                 },
                 "limit": {
                     "type": "integer",
@@ -61,52 +63,88 @@ TOOL_DEFINITIONS = [
         }
     },
     {
-        "name": "memory_record",
-        "description": "Explicitly store a durable long-term memory, architectural decision, code standard, or verified fact. Automatically chunks long inputs.",
+        "name": "memory_create",
+        "description": "Create a new durable shared memory. AMR automatically tracks version=1, timestamps, and caller agent_id.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The substantive fact, decision, rule, or learning to preserve."
+                    "description": "Substantive knowledge text, architectural decision, rule, or learned fact (min 5 chars)."
                 },
-                "memory_type": {
+                "type": {
                     "type": "string",
-                    "enum": ["fact", "decision", "rule", "context"],
-                    "default": "fact",
-                    "description": "Classification of the memory."
+                    "default": "general",
+                    "description": "Knowledge domain namespace/name (e.g. 'decision/arch', 'lesson/git', 'general')."
                 },
-                "scope": {
+                "status": {
                     "type": "string",
-                    "enum": ["global", "project", "agent", "session"],
-                    "default": "global",
-                    "description": "Visibility scope."
+                    "enum": ["ACTIVE", "PENDING_VERIFY", "CONFLICT", "TEMPORARY"],
+                    "default": "ACTIVE",
+                    "description": "Initial lifecycle state. Default ACTIVE. Use PENDING_VERIFY for unverified candidate knowledge."
                 },
                 "project_id": {
                     "type": "string",
-                    "description": "Associated project identifier."
+                    "default": "global",
+                    "description": "Project identifier. Defaults to 'global'."
                 },
-                "session_id": {
-                    "type": "string",
-                    "description": "Source conversation/session ID for traceability."
-                },
-                "source_message_ids": {
+                "source_refs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of specific message IDs that originated this memory."
+                    "description": "Optional list of source session IDs or document references."
                 },
-                "tags": {
+                "conflicts_with": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Searchable topic keywords or tags."
+                    "description": "If in conflict with existing ACTIVE memories, list target memory_ids. AMR will atomically mark both as CONFLICT."
                 }
             },
             "required": ["content"]
         }
     },
     {
-        "name": "memory_get",
-        "description": "Retrieve precise memory details by memory_id, including raw dialogue message provenance if available.",
+        "name": "memory_update",
+        "description": "Update an existing memory. Content changes require expected_version and change_reason (triggers version increment). Pure metadata updates (type/status) update in-place without versioning.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "The unique memory ID to update."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "New revised memory content text. Required if updating substantive fact."
+                },
+                "expected_version": {
+                    "type": "integer",
+                    "description": "Required when content is provided: the version expected by caller to prevent concurrent overwrite."
+                },
+                "change_reason": {
+                    "type": "string",
+                    "description": "Required when content is provided: explanation of why this memory was updated/refined."
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Optional updated type namespace."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"],
+                    "description": "Optional updated lifecycle status."
+                },
+                "conflicts_with": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of memory IDs this record conflicts with."
+                }
+            },
+            "required": ["memory_id"]
+        }
+    },
+    {
+        "name": "memory_history",
+        "description": "Retrieve the complete revision history timeline for a memory by memory_id, showing content evolution and change reasons.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -119,24 +157,63 @@ TOOL_DEFINITIONS = [
         }
     },
     {
-        "name": "memory_update_status",
-        "description": "Update memory lifecycle state across 4 states: active, superseded, archived, deleted. Preserves historical decision timelines.",
+        "name": "memory_delete",
+        "description": "Soft delete a memory (sets status to DELETED). Hidden from standard and historical search, preserved in SQLite for audit and recovery.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "memory_id": {
                     "type": "string",
-                    "description": "The unique memory ID to transition."
+                    "description": "The memory ID to soft delete."
                 },
-                "new_status": {
+                "reason": {
                     "type": "string",
-                    "enum": ["active", "superseded", "archived", "deleted"],
-                    "description": "Target lifecycle state."
-                },
-                "superseded_by": {
-                    "type": "string",
-                    "description": "Required when new_status is 'superseded': the new memory_id that replaces this one."
+                    "description": "Optional explanation for why this memory was deleted."
                 }
+            },
+            "required": ["memory_id"]
+        }
+    },
+    {
+        "name": "memory_get",
+        "description": "Retrieve precise memory details and current state by memory_id.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {
+                    "type": "string",
+                    "description": "The unique memory ID."
+                }
+            },
+            "required": ["memory_id"]
+        }
+    },
+    {
+        "name": "memory_record",
+        "description": "Legacy compatibility tool for storing durable memory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The substantive fact to preserve."},
+                "memory_type": {"type": "string", "default": "fact"},
+                "scope": {"type": "string", "default": "global"},
+                "project_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "source_message_ids": {"type": "array", "items": {"type": "string"}},
+                "tags": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["content"]
+        }
+    },
+    {
+        "name": "memory_update_status",
+        "description": "Legacy compatibility tool for updating memory status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string"},
+                "new_status": {"type": "string"},
+                "superseded_by": {"type": "string"}
             },
             "required": ["memory_id", "new_status"]
         }
@@ -147,14 +224,8 @@ TOOL_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Unique session identifier."
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Optional project identifier."
-                },
+                "session_id": {"type": "string"},
+                "project_id": {"type": "string"},
                 "messages": {
                     "type": "array",
                     "items": {
@@ -167,8 +238,7 @@ TOOL_DEFINITIONS = [
                             "timestamp": {"type": "integer"}
                         },
                         "required": ["message_id", "role", "content"]
-                    },
-                    "description": "List of dialogue messages to ingest idempotently."
+                    }
                 }
             },
             "required": ["session_id", "messages"]
@@ -185,22 +255,35 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     if name == "memory_search":
         if "query" not in args or not isinstance(args["query"], str) or not args["query"].strip():
             raise ValueError("Parameter 'query' is required and must be a non-empty string.")
-        if "limit" in args and (not isinstance(args["limit"], int) or args["limit"] < 1):
-            raise ValueError("Parameter 'limit' must be a positive integer.")
+        if "limit" in args and args["limit"] is not None:
+            if not isinstance(args["limit"], int) or isinstance(args["limit"], bool) or args["limit"] <= 0:
+                raise ValueError("Parameter 'limit' must be a positive integer.")
+    elif name == "memory_create":
+        if "content" not in args or not isinstance(args["content"], str) or not args["content"].strip():
+            raise ValueError("Parameter 'content' is required and must be a non-empty string.")
+    elif name == "memory_update":
+        if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
+            raise ValueError("Parameter 'memory_id' is required.")
+        if "content" in args and args["content"] is not None:
+            if "expected_version" not in args or args["expected_version"] is None:
+                raise ValueError("Parameter 'expected_version' is required when updating content.")
+            if "change_reason" not in args or not args.get("change_reason"):
+                raise ValueError("Parameter 'change_reason' is required when updating content.")
+    elif name == "memory_history" or name == "memory_get" or name == "memory_delete":
+        if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
+            raise ValueError("Parameter 'memory_id' is required.")
     elif name == "memory_record":
         if "content" not in args or not isinstance(args["content"], str) or not args["content"].strip():
             raise ValueError("Parameter 'content' is required and must be a non-empty string.")
-    elif name == "memory_get":
-        if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
-            raise ValueError("Parameter 'memory_id' is required and must be a non-empty string.")
     elif name == "memory_update_status":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
-        valid_statuses = ["active", "superseded", "archived", "deleted"]
-        if args.get("new_status") not in valid_statuses:
-            raise ValueError(f"Parameter 'new_status' must be one of {valid_statuses}.")
-        if args["new_status"] == "superseded" and not args.get("superseded_by"):
-            raise ValueError("Parameter 'superseded_by' is required when new_status is 'superseded'.")
+        valid_statuses = {"active", "superseded", "archived", "deleted", "ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"}
+        new_stat = args.get("new_status")
+        if new_stat not in valid_statuses:
+            raise ValueError(f"Invalid status '{new_stat}'")
+        if new_stat.lower() == "superseded" and not args.get("superseded_by"):
+            raise ValueError("Parameter 'superseded_by' is required when new_status is 'superseded'")
     elif name == "memory_ingest_session":
         if "session_id" not in args or not isinstance(args["session_id"], str) or not args["session_id"].strip():
             raise ValueError("Parameter 'session_id' is required.")

@@ -173,7 +173,7 @@ class QdrantManager:
                 ),
             )
             # 为常用 payload 字段建立索引以提升高并发检索性能
-            for field_name in ["status", "memory_id", "project_id", "memory_type", "type", "scope", "parent_memory_id"]:
+            for field_name in ["status", "memory_id", "project_id", "memory_type", "type", "scope", "parent_memory_id", "created_by_agent", "updated_by_agent"]:
                 try:
                     self._client.create_payload_index(
                         collection_name=collection_name,
@@ -210,16 +210,21 @@ class QdrantManager:
         score_threshold: Optional[float] = None,
         filter_conditions: Optional[List[models.FieldCondition]] = None,
         extra_filter: Optional[models.Filter] = None,
+        allowed_statuses: Optional[List[str]] = None,
     ) -> List[models.ScoredPoint]:
         """
-        向量相似度搜索：底层服务端强制注入 status == "active" 过滤器
-        支持通过 filter_conditions 或 extra_filter 叠加业务条件（如 project_id, memory_type 等）
+        向量相似度搜索：
+        - 默认只召回 ACTIVE (当前有效事实，并兼容小写 active)
+        - 若传入 allowed_statuses (如 ["ACTIVE", "HISTORICAL"])，则按 MatchAny 过滤
+        - 支持通过 filter_conditions 或 extra_filter 叠加业务条件（如 project_id, type 等）
         """
-        # 强制底层约束：status 必须为 active
+        statuses = allowed_statuses or ["active", "ACTIVE"]
+        # 统一大小写集合匹配
+        normalized_statuses = list(set([s.lower() for s in statuses] + [s.upper() for s in statuses]))
         must_conditions: List[Union[models.FieldCondition, models.Filter]] = [
             models.FieldCondition(
                 key="status",
-                match=models.MatchValue(value="active"),
+                match=models.MatchAny(any=normalized_statuses),
             )
         ]
 
