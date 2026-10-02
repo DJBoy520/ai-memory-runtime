@@ -25,10 +25,11 @@ const DEFAULT_MAX_TOTAL_CHARS = 4000;
  * @returns {string}
  */
 export function escapeXml(str) {
-  if (typeof str !== "string") {
+  if (str === null || str === undefined) {
     return "";
   }
-  return str
+  const s = typeof str === "string" ? str : String(str);
+  return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -86,7 +87,8 @@ export function buildMemoryContext(items, options = {}) {
       sanitized = sanitized.slice(0, maxItemChars) + "... [truncated]";
     }
 
-    const line = `- [Memory ${i + 1} | Score: ${score} | Source: ${escapeXml(source)}${memType}] ${sanitized}`;
+    const memoryNum = lines.length + 1;
+    const line = `- [Memory ${memoryNum} | Score: ${score} | Source: ${escapeXml(source)}${memType}] ${sanitized}`;
 
     // Check if adding this line violates total budget
     const additionLen = (lines.length > 0 ? 1 : 0) + line.length;

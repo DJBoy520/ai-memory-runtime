@@ -101,12 +101,16 @@ class AmrMemoryProvider(MemoryProvider):
             self._hermes_home = Path(home_arg)
 
         self._config = _load_amr_config(self._hermes_home)
-        self._socket_path = self._config.get("socket_path", DEFAULT_SOCKET_PATH)
-        self._project_id = self._config.get("project_id", _DEFAULT_PROJECT_ID)
-        self._top_k = int(self._config.get("top_k", 3))
-        self._auto_extract = bool(self._config.get("auto_extract", True))
+        self._socket_path = kwargs.get("socket_path") or self._config.get("socket_path", DEFAULT_SOCKET_PATH)
+        self._project_id = kwargs.get("project_id") or self._config.get("project_id", _DEFAULT_PROJECT_ID)
+        self._top_k = int(kwargs.get("top_k") or self._config.get("top_k", 3))
+        self._auto_extract = bool(kwargs.get("auto_extract", self._config.get("auto_extract", True)))
 
-        self._client = AmrUdsClient(socket_path=self._socket_path, request_timeout=1.0)
+        client_arg = kwargs.get("client")
+        if client_arg:
+            self._client = client_arg
+        else:
+            self._client = AmrUdsClient(socket_path=self._socket_path, request_timeout=1.0)
         logger.info("AMR MemoryProvider initialized (socket=%s, project=%s)", self._socket_path, self._project_id)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -172,7 +176,7 @@ class AmrMemoryProvider(MemoryProvider):
         for item in res:
             if isinstance(item, dict):
                 content = item.get("content") or item.get("text") or item.get("fact")
-                if content:
+                if content and str(content).strip():
                     items.append(str(content).strip())
             elif isinstance(item, str) and item.strip():
                 items.append(item.strip())

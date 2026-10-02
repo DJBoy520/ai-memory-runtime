@@ -37,6 +37,7 @@ export function isNoiseOrHeartbeat(text) {
   if (trimmed.length === 0) return true;
   if (/^HEARTBEAT/i.test(trimmed)) return true;
   if (/^PING/i.test(trimmed)) return true;
+  if (/^PONG/i.test(trimmed)) return true;
   return false;
 }
 

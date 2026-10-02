@@ -29,10 +29,10 @@ import crypto from "node:crypto";
 export function normalizeRole(role) {
   if (typeof role !== "string") return "user";
   const lower = role.toLowerCase();
-  if (lower.includes("assistant") || lower.includes("bot") || lower.includes("model")) {
+  if (lower.includes("assistant") || lower.includes("bot") || lower.includes("model") || lower === "ai") {
     return "assistant";
   }
-  if (lower.includes("system")) {
+  if (lower.includes("system") || lower === "sys") {
     return "system";
   }
   return "user";
@@ -51,6 +51,17 @@ export function extractContent(raw) {
   if (Array.isArray(raw.content)) {
     // Multi-part content blocks [{ type: "text", text: "..." }]
     return raw.content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part.text === "string") return part.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (Array.isArray(raw.parts)) {
+    // Multi-part parts array ["...", { type: "text", text: "..." }]
+    return raw.parts
       .map((part) => {
         if (typeof part === "string") return part;
         if (part && typeof part.text === "string") return part.text;
@@ -97,7 +108,7 @@ export function mapSessionToIngest(params) {
       rawMsg.message_id ||
       rawMsg.messageId ||
       rawMsg.id ||
-      `msg_${sessionId}_${seq}_${crypto.randomBytes(4).toString("hex")}`;
+      `${sessionId}_${seq}_${crypto.randomBytes(4).toString("hex")}`;
 
     let timestamp = nowSec;
     if (typeof rawMsg.timestamp === "number") {

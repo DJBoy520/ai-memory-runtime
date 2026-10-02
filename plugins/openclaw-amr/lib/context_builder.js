@@ -67,6 +67,7 @@ export function buildMemoryContext(items, options = {}) {
   const lines = [];
   let currentTotalChars = header.length + footer.length;
 
+  let validIndex = 0;
   for (let i = 0; i < selectedItems.length; i++) {
     const item = selectedItems[i];
     if (!item) continue;
@@ -76,6 +77,7 @@ export function buildMemoryContext(items, options = {}) {
       continue;
     }
 
+    validIndex++;
     const score = typeof item.score === "number" ? item.score.toFixed(2) : "N/A";
     const source = item.scope || item.source || item.project_id || "global";
     const memType = item.memory_type ? ` | Type: ${item.memory_type}` : "";
@@ -86,7 +88,7 @@ export function buildMemoryContext(items, options = {}) {
       sanitized = sanitized.slice(0, maxItemChars) + "... [truncated]";
     }
 
-    const line = `- [Memory ${i + 1} | Score: ${score} | Source: ${escapeXml(source)}${memType}] ${sanitized}`;
+    const line = `- [Memory ${validIndex} | Score: ${score} | Source: ${escapeXml(source)}${memType}] ${sanitized}`;
 
     // Check if adding this line violates total budget
     const additionLen = (lines.length > 0 ? 1 : 0) + line.length;
