@@ -1,0 +1,14 @@
+[Unit]
+Description=AI Memory Runtime Daily Reconciliation Service
+After=network.target amr.service
+Wants=amr.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+ExecStart=/usr/bin/python3 %h/WorkSpaces/ai-memory-runtime/scripts/daily_memory_reconciliation.py --dry-run
+TimeoutSec=1800
+Nice=19
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

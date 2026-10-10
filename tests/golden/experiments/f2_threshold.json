@@ -1,0 +1,796 @@
+{
+  "experiment": "F2-2a dense-only 检索默认阈值 ROC 校准",
+  "generated_by": "scripts/analyze_f2_threshold.py",
+  "inputs": {
+    "dump": "tests/golden/experiments/f2_dense_dump.jsonl",
+    "golden": "tests/golden/retrieval_golden.jsonl"
+  },
+  "config": {
+    "t_min": 0.3,
+    "t_max": 0.7,
+    "t_step": 0.02,
+    "filter_rule": "keep score >= T (drop score < T)",
+    "loss_budget_pp": 2.0,
+    "dedupe": true,
+    "noise_rule": "no_result top-1 存活即噪（存活列表非空）"
+  },
+  "diagnostics": {
+    "dump_rows": 530,
+    "golden_rows": 530,
+    "golden_categories": {
+      "semantic": 300,
+      "exact_id": 150,
+      "no_result": 40,
+      "identifier": 40
+    },
+    "dump_categories": {
+      "semantic": 300,
+      "exact_id": 150,
+      "no_result": 40,
+      "identifier": 40
+    },
+    "scored_queries": 490,
+    "no_result_queries": 40,
+    "missing_in_dump": [],
+    "relevant_flag_mismatches": 0,
+    "no_result_top1_scores": [
+      0.4601,
+      0.4626,
+      0.4747,
+      0.4779,
+      0.4928,
+      0.4953,
+      0.4977,
+      0.4999,
+      0.5002,
+      0.5015,
+      0.5043,
+      0.5073,
+      0.509,
+      0.5091,
+      0.5113,
+      0.5114,
+      0.5114,
+      0.5138,
+      0.5143,
+      0.5165,
+      0.5168,
+      0.5201,
+      0.5221,
+      0.5252,
+      0.5293,
+      0.531,
+      0.5317,
+      0.5357,
+      0.5371,
+      0.5395,
+      0.5421,
+      0.5446,
+      0.5542,
+      0.5547,
+      0.5594,
+      0.5612,
+      0.5714,
+      0.5825,
+      0.5836,
+      0.5866
+    ],
+    "no_result_unseparable_in_sweep": false
+  },
+  "baseline_t0": {
+    "threshold": 0.0,
+    "n_scored": 490,
+    "recall5": 0.777551,
+    "mrr": 0.722185,
+    "no_result_total": 40,
+    "no_result_noise_count": 40,
+    "noise_rate": 1.0,
+    "by_category": {
+      "exact_id": {
+        "n": 150,
+        "recall5": 0.846667,
+        "mrr": 0.846667
+      },
+      "identifier": {
+        "n": 40,
+        "recall5": 0.475,
+        "mrr": 0.353611
+      },
+      "semantic": {
+        "n": 300,
+        "recall5": 0.783333,
+        "mrr": 0.709087
+      }
+    }
+  },
+  "roc_table": [
+    {
+      "threshold": 0.3,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.32,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.34,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.36,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.38,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.4,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.42,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.44,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.46,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.48,
+      "noise_rate": 0.9,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.5,
+      "noise_rate": 0.8,
+      "recall5": 0.777551,
+      "mrr": 0.722185,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.709087
+        }
+      }
+    },
+    {
+      "threshold": 0.52,
+      "noise_rate": 0.475,
+      "recall5": 0.777551,
+      "mrr": 0.721845,
+      "recall5_loss_pp": 0.0,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.783333,
+          "mrr": 0.708532
+        }
+      }
+    },
+    {
+      "threshold": 0.54,
+      "noise_rate": 0.25,
+      "recall5": 0.773469,
+      "mrr": 0.719124,
+      "recall5_loss_pp": 0.4082,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.776667,
+          "mrr": 0.704087
+        }
+      }
+    },
+    {
+      "threshold": 0.56,
+      "noise_rate": 0.125,
+      "recall5": 0.759184,
+      "mrr": 0.711006,
+      "recall5_loss_pp": 1.8367,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.353611
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.753333,
+          "mrr": 0.690828
+        }
+      }
+    },
+    {
+      "threshold": 0.58,
+      "noise_rate": 0.075,
+      "recall5": 0.736735,
+      "mrr": 0.698625,
+      "recall5_loss_pp": 4.0816,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.475,
+          "mrr": 0.350833
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.716667,
+          "mrr": 0.670976
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "noise_rate": 0.0,
+      "recall5": 0.689796,
+      "mrr": 0.667891,
+      "recall5_loss_pp": 8.7755,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.35,
+          "mrr": 0.259167
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.656667,
+          "mrr": 0.633
+        }
+      }
+    },
+    {
+      "threshold": 0.62,
+      "noise_rate": 0.0,
+      "recall5": 0.64898,
+      "mrr": 0.63483,
+      "recall5_loss_pp": 12.8571,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.3,
+          "mrr": 0.221667
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.596667,
+          "mrr": 0.584
+        }
+      }
+    },
+    {
+      "threshold": 0.64,
+      "noise_rate": 0.0,
+      "recall5": 0.604082,
+      "mrr": 0.598639,
+      "recall5_loss_pp": 17.3469,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.225,
+          "mrr": 0.183333
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.533333,
+          "mrr": 0.53
+        }
+      }
+    },
+    {
+      "threshold": 0.66,
+      "noise_rate": 0.0,
+      "recall5": 0.559184,
+      "mrr": 0.557143,
+      "recall5_loss_pp": 21.8367,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.175,
+          "mrr": 0.15
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.466667,
+          "mrr": 0.466667
+        }
+      }
+    },
+    {
+      "threshold": 0.68,
+      "noise_rate": 0.0,
+      "recall5": 0.522449,
+      "mrr": 0.522449,
+      "recall5_loss_pp": 25.5102,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.025,
+          "mrr": 0.025
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.426667,
+          "mrr": 0.426667
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "noise_rate": 0.0,
+      "recall5": 0.493878,
+      "mrr": 0.493878,
+      "recall5_loss_pp": 28.3673,
+      "by_category": {
+        "exact_id": {
+          "n": 150,
+          "recall5": 0.846667,
+          "mrr": 0.846667
+        },
+        "identifier": {
+          "n": 40,
+          "recall5": 0.0,
+          "mrr": 0.0
+        },
+        "semantic": {
+          "n": 300,
+          "recall5": 0.383333,
+          "mrr": 0.383333
+        }
+      }
+    }
+  ],
+  "robustness_no_dedupe": [
+    {
+      "threshold": 0.3,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.32,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.34,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.36,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.38,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.4,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.42,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.44,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.46,
+      "noise_rate": 1.0,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.48,
+      "noise_rate": 0.9,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.5,
+      "noise_rate": 0.8,
+      "recall5": 0.777551,
+      "mrr": 0.722114,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.52,
+      "noise_rate": 0.475,
+      "recall5": 0.777551,
+      "mrr": 0.721822,
+      "recall5_loss_pp": 0.0
+    },
+    {
+      "threshold": 0.54,
+      "noise_rate": 0.25,
+      "recall5": 0.773469,
+      "mrr": 0.719101,
+      "recall5_loss_pp": 0.4082
+    },
+    {
+      "threshold": 0.56,
+      "noise_rate": 0.125,
+      "recall5": 0.759184,
+      "mrr": 0.710983,
+      "recall5_loss_pp": 1.8367
+    },
+    {
+      "threshold": 0.58,
+      "noise_rate": 0.075,
+      "recall5": 0.736735,
+      "mrr": 0.698625,
+      "recall5_loss_pp": 4.0816
+    },
+    {
+      "threshold": 0.6,
+      "noise_rate": 0.0,
+      "recall5": 0.689796,
+      "mrr": 0.667891,
+      "recall5_loss_pp": 8.7755
+    },
+    {
+      "threshold": 0.62,
+      "noise_rate": 0.0,
+      "recall5": 0.64898,
+      "mrr": 0.63483,
+      "recall5_loss_pp": 12.8571
+    },
+    {
+      "threshold": 0.64,
+      "noise_rate": 0.0,
+      "recall5": 0.604082,
+      "mrr": 0.598639,
+      "recall5_loss_pp": 17.3469
+    },
+    {
+      "threshold": 0.66,
+      "noise_rate": 0.0,
+      "recall5": 0.559184,
+      "mrr": 0.557143,
+      "recall5_loss_pp": 21.8367
+    },
+    {
+      "threshold": 0.68,
+      "noise_rate": 0.0,
+      "recall5": 0.522449,
+      "mrr": 0.522449,
+      "recall5_loss_pp": 25.5102
+    },
+    {
+      "threshold": 0.7,
+      "noise_rate": 0.0,
+      "recall5": 0.493878,
+      "mrr": 0.493878,
+      "recall5_loss_pp": 28.3673
+    }
+  ],
+  "recommendation": {
+    "mode": "loss_constrained_min_noise",
+    "feasible_count": 14,
+    "feasible_thresholds": [
+      0.3,
+      0.32,
+      0.34,
+      0.36,
+      0.38,
+      0.4,
+      0.42,
+      0.44,
+      0.46,
+      0.48,
+      0.5,
+      0.52,
+      0.54,
+      0.56
+    ],
+    "threshold": 0.56,
+    "noise_rate": 0.125,
+    "recall5": 0.759184,
+    "mrr": 0.711006,
+    "recall5_loss_pp": 1.8367,
+    "noise_before": 1.0,
+    "recall5_before": 0.777551,
+    "mrr_before": 0.722185,
+    "zero_noise_threshold": 0.6,
+    "zero_noise_loss_pp": 8.78,
+    "rule": "在 Recall@5 损失 <= 2pp 约束下取噪声率最低的 T；并列取更小 T；若无可行解则取(噪声最低, 损失最小, T 最小)。"
+  },
+  "notes": [
+    "no_result 噪声在 T=0.60 才降到 0（该类 top-1 最高分 0.5866），但此时 Recall@5 损失 8.78 pp，超出 2 pp 预算，故未被推荐。",
+    "本 dump 为 dense-only top-10（未叠加 F2-1 ID 短路重排），其 T=0 基线 Recall@5=0.7776 / MRR=0.7222；损失预算以本 dump 的 T=0 为锚。"
+  ]
+}

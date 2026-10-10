@@ -1,0 +1,118 @@
+{"qid": "q_0001", "action": "keep", "reason": "relevant mem_20261005_e8f415 记录 2026-10-05 TSA 免费签发门户、ESSCertIDv2/OCSP 修复、chain-client SDK、refimpl REST 上链四子项目增量与修复；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0002", "action": "keep", "reason": "同为 mem_20261005_e8f415：夜间收官后白天推进、PKI/TSA/refimpl 修复与 IAM 统一 API Key 认证实装；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0003", "action": "keep", "reason": "relevant mem_20261007_495f96 即配置分离架构（config.yaml 保 local 默认 / config.runtime.yaml 生产 / systemd drop-in），针对 iam 模式污染导致 401；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0004", "action": "keep", "reason": "同 mem_20261007_495f96 的环境参数隔离策略（避开 401/config.runtime.yaml 特征词后语义仍指向该条）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0005", "action": "keep", "reason": "relevant mem_20261007_bfde44 给免费无鉴权公开查询 + 同 IP 1 分钟 2 次 + rateLimit/429/Retry-After；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0006", "action": "keep", "reason": "同 mem_20261007_bfde44 的流控上限与超限反馈方式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0007", "action": "keep", "reason": "relevant mem_20261007_d97ce8 给文案红线（不得夸大/国家认可/司法）与视觉风格规范；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0008", "action": "keep", "reason": "同 mem_20261007_d97ce8 的禁用词与措辞规范；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0009", "action": "keep", "reason": "relevant mem_20261007_2b594a 即三重门禁（源文件与导出符号校验/构建类型检查/全量回归）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0010", "action": "keep", "reason": "同 mem_20261007_2b594a 的三道防线设计；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0011", "action": "keep", "reason": "relevant mem_20261007_6b8e2e 即 DriverError 根因与任务拆分+断点缓存对策；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0012", "action": "keep", "reason": "同 mem_20261007_6b8e2e 的工序切分与阶段性状态持久化；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0013", "action": "keep", "reason": "relevant mem_20261007_c1d0d0 即 pnpm test --retry 被包管理器误识别报 Unknown options 与双横线透传解法；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0014", "action": "keep", "reason": "同 mem_20261007_c1d0d0 的正确传参格式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0015", "action": "keep", "reason": "relevant mem_20261007_334f9d 给「配置一律写配置文件、禁环境变量回退」+ 本地/远程仓库必须同步；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0016", "action": "keep", "reason": "同 mem_20261007_334f9d 的工程守则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0017", "action": "keep", "reason": "relevant mem_20261007_1e76e5 给 PKI 3 次/月、TSA 15 次/月、链上 15 条/月的新额度；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0018", "action": "keep", "reason": "同 mem_20261007_1e76e5 的月度上限缩减数值（含「防滥用」动机）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0019", "action": "keep", "reason": "relevant mem_20261007_27cf0f 给 iam_plans.quotas 唯一修改生效点 + 管理台/PUT 实时改、无需重启；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0020", "action": "keep", "reason": "同 mem_20261007_27cf0f 的表名与免重启结论；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0021", "action": "keep", "reason": "relevant mem_20261007_379b8b 给密码 8 位含数字/大写/小写 + 清理门户口语化文案；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0022", "action": "keep", "reason": "同 mem_20261007_379b8b 的口令校验规则与前端去冗余提示；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0023", "action": "keep", "reason": "relevant mem_20261007_49b85d 给禁环境变量覆盖（AEP_IAM_CONFIG）、禁硬编码、收敛 config.yaml；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0024", "action": "keep", "reason": "同 mem_20261007_49b85d 的静态 config.yaml 与动态 iam_settings 表分工及禁路径覆盖要求；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0025", "action": "keep", "reason": "relevant mem_20261007_a97764 给主 agent 总控职责与子 agent 小步并行、统一 Gemini 模型；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0026", "action": "keep", "reason": "同 mem_20261007_a97764 的职责划分与执行模型选型准则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0027", "action": "keep", "reason": "relevant mem_20261007_f965ed 给 onSend 三安全头（nosniff/DENY/no-referrer）与不加 CSP 的原因；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0028", "action": "keep", "reason": "同 mem_20261007_f965ed 的响应头字段与不引入 CSP 的考虑；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0029", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261001_6e2ddf"], "notes_update": "剔除后仅剩 1 条 HN，notes 需注明 hard negative 凑不齐 2 条（门禁 scripts/build_golden_set.py:306 允许 notes 说明）"}, "reason": "relevant mem_20261001_59c983 即 07dc49 记录原文；HN mem_20261001_6e2ddf 正文与 relevant 除尾部标记外逐字相同（同为「AEP-IAM 采用基于零知识证明的访问控制架构」，仅 07dc49→796e3a，两条 created_at 仅差 16 秒），按 AUDIT-README §3「同一事实新旧版本任一命中即算相关」，该条已构成对 query 的真实命中，不能作负例。"}
+{"qid": "q_0030", "action": "keep", "reason": "relevant mem_20261001_59c983 陈述「IAM 采用基于零知识证明的访问控制架构」，与该 query 所指匿名凭证/零知鉴权体系同题（条目内容极简，仅一句，属全批最薄相关，但语义可对上，且为该主题唯一条目）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0031", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261001_59c983"], "notes_update": "剔除后仅剩 1 条 HN，notes 需注明 hard negative 凑不齐 2 条"}, "reason": "与 q_0029 对称：HN mem_20261001_59c983 与 relevant mem_20261001_6e2ddf 是同一句事实的重复记录（仅末尾标记 796e3a/07dc49 不同），query 问「796e3a 条目内容」，该条即同一事实的另一份记录，按版本链规则算命中，不能作负例。"}
+{"qid": "q_0032", "action": "keep", "reason": "relevant mem_20261001_6e2ddf 即「基于零知识证明的访问控制架构 796e3a」条目本身，query 的「七九六」即对应 796 标记（同属极简条目，内容可对上）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0033", "action": "keep", "reason": "relevant mem_20261001_e35fe2 即「MCP 链路验证架构测试 123456」原文，query 逐字引用其标识与内容；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0034", "action": "keep", "reason": "同 mem_20261001_e35fe2：MCP=模型上下文协议、链路验证=通道联通性演练、架构测试=架构桩数据，语义可对上；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0035", "action": "keep", "reason": "relevant mem_20261007_355896 给 8086 端口/内网限定、admin+REDACTED、/api 与 /iam 代理至 8088；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0036", "action": "keep", "reason": "同 mem_20261007_355896 的监听端口、初始特权凭据与上游转发规则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0037", "action": "keep", "reason": "relevant mem_20261007_ea2040 给 8085/8088 保持在线、开发中禁止改动进程；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0038", "action": "keep", "reason": "同 mem_20261007_ea2040 的两个守护端口与禁止改动要求；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0039", "action": "keep", "reason": "relevant mem_20261007_093e60 给 SubscriptionPage.tsx 由后端 plan.quotas 渲染、文件内无硬编码；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0040", "action": "keep", "reason": "同 mem_20261007_093e60 的动态填充机制与无写死数值结论；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0041", "action": "keep", "reason": "relevant mem_20261007_44a266 给设计文档位于 aep-designs 仓库、AMR 中存有部分项目记忆；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0042", "action": "keep", "reason": "同 mem_20261007_44a266 的文档归档位置与可取用知识库；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0043", "action": "keep", "reason": "relevant mem_20261007_09556d 给大粒度子 agent 任务 20~48 分钟零落盘停滞与细粒度拆分对策；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0044", "action": "keep", "reason": "同 mem_20261007_09556d 的调度与干预经验；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0045", "action": "keep", "reason": "relevant mem_20261007_0f2968 给 iam_quotas 镜像覆盖行导致改套餐不生效 + 删除镜像写入并清存量覆盖行；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0046", "action": "keep", "reason": "同 mem_20261007_0f2968 的排查与修复方案；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0047", "action": "keep", "reason": "relevant mem_20261007_34209d 给 tenant_id 全 NULL 与 pki/ca% 前缀不匹配两因，query 逐条对应；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0048", "action": "keep", "reason": "同 mem_20261007_34209d 的归属标识缺失与计量类型模糊匹配异常；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0049", "action": "keep", "reason": "relevant mem_20261003_6062be 给「必须 memory_update（带 expected_version/change_reason），不得用 create 新建替代」；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0050", "action": "keep", "reason": "同 mem_20261003_6062be 的防重复插入与版本冲突约束；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0051", "action": "keep", "reason": "relevant mem_20261005_15465e 给域划分重构、对话全文污染检索、明文口令红线三项教训与处置；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0052", "action": "keep", "reason": "同 mem_20261005_15465e 的巨石会话挤占权重与令牌入共享库治理原则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0053", "action": "keep", "reason": "relevant mem_20261002_20c121 给 DSH 插件先改 AMR 源仓库再同步、重启服务与端到端闭环验证全过程；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0054", "action": "keep", "reason": "同 mem_20261002_20c121 的交付汇报内容；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0055", "action": "keep", "reason": "relevant mem_20261002_6c8fb1 给 2026-10-01 两条 DSH 会话（含 44 轮）明细与设计推演内容；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0056", "action": "keep", "reason": "同 mem_20261002_6c8fb1 的 Qdrant Payload 精简、SQLite 双表结构、6 态状态机等讨论纪要；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0057", "action": "keep", "reason": "relevant mem_20261002_70678c 给 502 upstream_error 根因（13 万 token + 网关约 180s 超时）与三条解决方案；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0058", "action": "keep", "reason": "同 mem_20261002_70678c 的超时排障与压缩上下文/换轻量模型建议；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0059", "action": "keep", "reason": "relevant mem_20261003_7c99ac 给三种获取 openclaw 回复的方式（重定向/stdout/--json）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0060", "action": "keep", "reason": "同 mem_20261003_7c99ac 的三种捕获方式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0061", "action": "keep", "reason": "relevant mem_20261006_2baf1c 给 init→project create→notarize→validate 指令流与 state=valid、.aep 包路径；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0062", "action": "keep", "reason": "同 mem_20261006_2baf1c 的命令行完整指令流；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0063", "action": "keep", "reason": "relevant mem_20261006_941ee4 给 aep__aep_identity_info 返回的 DID 与 keyId；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0064", "action": "keep", "reason": "同 mem_20261006_941ee4 的 MCP 接口取公钥标识符与国密 keyId；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0065", "action": "keep", "reason": "relevant mem_20261003_49e58a 给 ZCode CLI v0.16.9 程序路径与 ~/.local/bin/zcode 启动器；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0066", "action": "keep", "reason": "同 mem_20261003_49e58a 的远端 Ubuntu 部署与三种可用调用方式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0067", "action": "keep", "reason": "relevant mem_20261003_567a87 给 aep-refimpl 真实工作目录与 ~/WorkSpaces/aep-refimpl-work 运行时数据目录；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0068", "action": "keep", "reason": "同 mem_20261003_567a87 的源码仓库路径与证书/存证/trust-anchors 数据目录区分；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0069", "action": "keep", "reason": "relevant mem_20261004_3a6eb3 给 cron 表达式与 pki_fix→…→done 阶段顺序；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0070", "action": "keep", "reason": "同 mem_20261004_3a6eb3 的阶段跳转规则与 refimpl ≥10000 条用例全绿验收标准；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0071", "action": "keep", "reason": "relevant mem_20261004_10d5a1 给八阶段闭环成果与 report-scale5-final-20261005-053243.json 路径；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0072", "action": "keep", "reason": "同 mem_20261004_10d5a1 的 11502 条/14 组/100% 全绿与六仓推送交付清单；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0073", "action": "keep", "reason": "relevant mem_20261002_cca2c9 给豆包经 SSH stdio 技能、Windows opencode 经 mcp.ai-memory 同走 bridge；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0074", "action": "keep", "reason": "同 mem_20261002_cca2c9 的共享枢纽配置与「不部署嵌入模型、零额外显存」方案；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0075", "action": "keep", "reason": "relevant mem_20261003_a52dd6 给当日归档 340 条、amr_archive_ids.py 用法与 amr.py status 大小写坑；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0076", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261002_208299"], "notes_update": "剔除后仅剩 1 条 HN，notes 需注明 hard negative 凑不齐 2 条"}, "reason": "query 明写「旧接口状态大小写兼容问题」，HN mem_20261002_208299 第 3 条即该事实原文（legacy memory_update_status 只接受小写四态、必填参数名 new_status、传 HISTORICAL 报错），可直接回答该子问题，不能作负例。"}
+{"qid": "q_0077", "action": "keep", "reason": "relevant mem_20261002_1ad9a8 给 opencode run -m 命令形态与四档模型选择建议；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0078", "action": "keep", "reason": "同 mem_20261002_1ad9a8 的分级模型策略与桌面版不展示 CLI 会话的限制；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0079", "action": "keep", "reason": "relevant mem_20261003_7cf25a 给 allowed_agents 白名单登记 + ~/.zcode/cli/config.json 的 mcp.servers.amr stdio 配置；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0080", "action": "keep", "reason": "同 mem_20261003_7cf25a 的 stdio/SSH 通道挂接 AMR 守护进程方式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0081", "action": "keep", "reason": "relevant mem_20261002_208299 给 score_threshold 建议 0.45/0.60 与六态/四态状态词汇规范；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0082", "action": "keep", "reason": "同 mem_20261002_208299 的阈值标定与 BGE-M3 冷启动 2~3 分钟避坑；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0083", "action": "keep", "reason": "relevant mem_20261002_ec1f0b 给多 agent 同仓并发改写被覆盖的实测与纪律；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0084", "action": "keep", "reason": "同 mem_20261002_ec1f0b 的协作纪律（先 git status、配置优先、改后重读现状）；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0085", "action": "keep", "reason": "relevant mem_20261003_f02395 给 MEMORY.md replace 命中子串导致整条被覆盖的坑与对策；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0086", "action": "keep", "reason": "同 mem_20261003_f02395 的防整段误替换机制；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0087", "action": "keep", "reason": "relevant mem_20261002_985b05 给出「严禁 Agent 直接读写 sessions.db/memory.db，必须走 AMR UDS」的铁律；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0088", "action": "keep", "reason": "同 mem_20261002_985b05 的接口协议硬性规范；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0089", "action": "keep", "reason": "relevant mem_20261003_be4e14 给失效/作废条目就地 update 标 superseded、冲突闭环处理原则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0090", "action": "keep", "reason": "同 mem_20261003_be4e14 的「非本人条目不得修改」与修订链保留要求；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0091", "action": "keep", "reason": "relevant mem_20261002_adadca 给本地 MEMORY.md 与 AMR 共享库分层及每晚 23:30 双向同步任务；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0092", "action": "keep", "reason": "同 mem_20261002_adadca 的同步触发时机与「密码/token/API key 严禁写入 AMR」过滤要求；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0093", "action": "keep", "reason": "relevant mem_20261005_0cb3218a 给 chain-client SDK(step16)+refimpl §11 REST 直连与 232 测试全绿状态；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0094", "action": "keep", "reason": "同 mem_20261005_0cb3218a 的 IAM Key 上链 201/401 验证与 useMock 本地仿真链需如实披露；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0095", "action": "keep", "reason": "relevant mem_20261003_1d484d 列出 Reinforce 模块 5 项主要 Bug 与涉事文件；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0096", "action": "keep", "reason": "同 mem_20261003_1d484d 的 reinforce_dialog 控件类型不匹配、兵力/人力可为负缺陷；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0097", "action": "keep", "reason": "relevant mem_20261003_ad90ed 给核心循环（侦察→通信→情报→指挥→战斗→反馈）与关键系统架构；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0098", "action": "keep", "reason": "同 mem_20261003_ad90ed 的 Tick 确定性仿真与链路状态机等工程全貌；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0099", "action": "keep", "reason": "relevant mem_20261002_f949a4 给 HQ/中继站/前哨站形状与尺寸规格；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0100", "action": "keep", "reason": "同 mem_20261002_f949a4 的据点与兵种符号标识及耐久条颜色阈值；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0101", "action": "keep", "reason": "relevant mem_20261002_6f0732 给全局配色板与「状态色优先于阵营色」原则；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0102", "action": "keep", "reason": "同 mem_20261002_6f0732 的我方蓝/敌方红与链路预警色定义；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0103", "action": "keep", "reason": "relevant mem_20261002_2b2b99 给军事地图×信息终端×冷峻克制的基调与禁止项；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0104", "action": "keep", "reason": "同 mem_20261002_2b2b99 的拒绝过度拟真与严禁单色指示状态约束；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0105", "action": "keep", "reason": "relevant mem_20261002_4d96ab 给 NORMAL/DEGRADED/JAMMED/CUT 线型、颜色与闪烁动画规格；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0106", "action": "keep", "reason": "同 mem_20261002_4d96ab 的线宽与脉冲动画规范；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0107", "action": "keep", "reason": "relevant mem_20261003_819dd5 列出 11 项 P0/P1/P2 修复与 4 套测试通过；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0108", "action": "keep", "reason": "同 mem_20261003_819dd5 的波次重复生成、节点受损陷落等阶段性交付改动；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0109", "action": "keep", "reason": "relevant mem_20261002_fe3e92 给每 Tick 损失公式与有效战力构成；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0110", "action": "keep", "reason": "同 mem_20261002_fe3e92 的地形/防御/通信修正系数折损推导；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0111", "action": "keep", "reason": "relevant mem_20261002_39145b 给来源可信度分档、时间衰减系数与 0.4/0.3/0.2/0.1 加权公式；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0112", "action": "keep", "reason": "同 mem_20261002_39145b 的时效性衰减与来源置信度加权评估；relevant 已逐条读原文核对，hard_negative 逐条读原文核对：均不含 query 所问的事实/数值/条目。"}
+{"qid": "q_0113", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261002_6e9b9d"]}, "reason": "HN mem_20261002_6e9b9d 正文即「玩家初始具备人力100、设备100、电力100、带宽100，研究点为0…每波次结算补给人力+30、设备+20、电力+25、带宽+10、研究点+5」，与 query 所问（开局初始资源设定 + 每波补给产出）一一对应，是与 relevant f7c160 同事实的重复记录（仅初始设备 100 vs 120 数值冲突，故不宜并入 relevant），不能作负例。"}
+{"qid": "q_0114", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261002_6e9b9d"]}, "reason": "同 q_0113：HN mem_20261002_6e9b9d 完整给出「底仓资产与各轮次增量补给」的数值，属命中而非负例。"}
+{"qid": "q_0115", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261003_592237"]}, "reason": "HN mem_20261003_592237 即裁定 C5 原文，含 LOAD_LOSS_MODEL 四段式（≤0.7:0.02；≤1.0:0.02+(r-0.7)×0.1；≤1.5:0.05+(r-1.0)×0.2；>1.5:0.15+(r-1.5)×0.3），正是 query 所问「不同负载 load_ratio 下的分段总丢包模型公式」，且 relevant mem_20261002_5bf129 正文自述其基准即来自该裁定（版本链同一事实），不能作负例。"}
+{"qid": "q_0116", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261003_592237"]}, "reason": "同 q_0115：HN mem_20261003_592237 同时给出「各区间报文损耗折算规则」与「最终损耗融合算法 total_loss=max(STATUS_BASE_LOSS[状态], LOAD_LOSS_MODEL(ratio))×优先级修正」，与 query 两问完全重合，不能作负例。"}
+{"qid": "q_0117", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261002_6c7791"]}, "reason": "HN mem_20261002_6c7791 兵种属性表含「侦察兵(兵力10,攻2,防2,速度75,生产15s耗20人力,侦察半径20)」，直接给出 query 明问的「移速属性」（速度 75），属部分命中（缺 Tick 周期），不能作负例。"}
+{"qid": "q_0118", "action": "fix", "fixed": {"remove_hard_negatives": ["mem_20261002_6c7791"]}, "reason": "同 q_0117：query 明问「行军速率」，HN mem_20261002_6c7791 的侦察兵速度 75 即该数值，属部分命中，不能作负例。"}

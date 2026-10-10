@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Memory Runtime (AMR) - Unified Semantic Memory Operating System
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+Environment="PYTHONPATH=%h/WorkSpaces/ai-memory-runtime"
+Environment="CUDA_VISIBLE_DEVICES=0"
+ExecStart=/usr/bin/python3 src/main.py
+Restart=always
+RestartSec=3s
+
+# Sandboxing and security
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/run/user/%U %h/WorkSpaces/ai-memory-runtime/data
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

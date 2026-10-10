@@ -1,0 +1,303 @@
+{
+  "experiment": "F2-0a full-text 通道召回（dense vs dense+fulltext RRF 融合）",
+  "generated_at": "2026-10-07T11:22:49.306115+00:00",
+  "golden_set": {
+    "path": "tests/golden/retrieval_golden.jsonl",
+    "total": 530,
+    "by_category": {
+      "semantic": 300,
+      "exact_id": 150,
+      "identifier": 40,
+      "no_result": 40
+    }
+  },
+  "config": {
+    "collection": "ai_memory",
+    "dense_call": "await svc.memory_search(query, limit=20)  # 无 project 过滤，实验口径",
+    "fulltext_call": "client.scroll(Filter(must=[FieldCondition(content, MatchText(query))]), limit=50, with_vectors=True) + 本地余弦排序",
+    "rrf_k": 60,
+    "top_k": 10,
+    "noise_threshold": 0.4,
+    "fulltext_index": {
+      "collection": "ai_memory",
+      "field": "content",
+      "api_notes": "qdrant-client 1.19.1: tokenizer enum = models.TokenizerType.MULTILINGUAL",
+      "tokenizer": "multilingual",
+      "min_token_len": 2,
+      "max_token_len": 20,
+      "lowercase": true,
+      "already_existed": true,
+      "created_now": false,
+      "error": null,
+      "verified_present": true,
+      "payload_schema_before": [
+        "content",
+        "memory_id",
+        "memory_type",
+        "project_id",
+        "scope",
+        "status",
+        "type"
+      ]
+    }
+  },
+  "dense_only": {
+    "overall": {
+      "n_queries": 530,
+      "n_scored": 490,
+      "recall_at_5": 0.7776,
+      "recall_at_10": 0.7939,
+      "mrr": 0.7222,
+      "no_result_noise_rate": 1.0,
+      "no_result_noise_note": null
+    },
+    "by_category": {
+      "semantic": {
+        "n_queries": 300,
+        "n_scored": 300,
+        "recall_at_5": 0.7833,
+        "recall_at_10": 0.8067,
+        "mrr": 0.7091
+      },
+      "exact_id": {
+        "n_queries": 150,
+        "n_scored": 150,
+        "recall_at_5": 0.8467,
+        "recall_at_10": 0.8467,
+        "mrr": 0.8467
+      },
+      "identifier": {
+        "n_queries": 40,
+        "n_scored": 40,
+        "recall_at_5": 0.475,
+        "recall_at_10": 0.5,
+        "mrr": 0.3536
+      },
+      "no_result": {
+        "n_queries": 40,
+        "n_scored": 0,
+        "recall_at_5": null,
+        "recall_at_10": null,
+        "mrr": null,
+        "no_result_noise_rate": 1.0
+      }
+    }
+  },
+  "fused_rrf": {
+    "overall": {
+      "n_queries": 530,
+      "n_scored": 490,
+      "recall_at_5": 0.7776,
+      "recall_at_10": 0.7959,
+      "mrr": 0.7112,
+      "no_result_noise_rate": null,
+      "no_result_noise_note": "N/A (RRF 分数量纲与向量余弦不可比，噪声率对比只对 dense 通道有效)"
+    },
+    "by_category": {
+      "semantic": {
+        "n_queries": 300,
+        "n_scored": 300,
+        "recall_at_5": 0.7867,
+        "recall_at_10": 0.81,
+        "mrr": 0.7085
+      },
+      "exact_id": {
+        "n_queries": 150,
+        "n_scored": 150,
+        "recall_at_5": 0.84,
+        "recall_at_10": 0.8467,
+        "mrr": 0.8118
+      },
+      "identifier": {
+        "n_queries": 40,
+        "n_scored": 40,
+        "recall_at_5": 0.475,
+        "recall_at_10": 0.5,
+        "mrr": 0.3536
+      },
+      "no_result": {
+        "n_queries": 40,
+        "n_scored": 0,
+        "recall_at_5": null,
+        "recall_at_10": null,
+        "mrr": null,
+        "no_result_noise_rate": null
+      }
+    }
+  },
+  "dense_project_filtered_aux": {
+    "overall": {
+      "n_queries": 530,
+      "n_scored": 490,
+      "recall_at_5": 0.8265,
+      "recall_at_10": 0.8367,
+      "mrr": 0.7802,
+      "no_result_noise_rate": null,
+      "no_result_noise_note": "N/A (RRF 分数量纲与向量余弦不可比，噪声率对比只对 dense 通道有效)"
+    },
+    "by_category": {
+      "semantic": {
+        "n_queries": 300,
+        "n_scored": 300,
+        "recall_at_5": 0.8233,
+        "recall_at_10": 0.83,
+        "mrr": 0.767
+      },
+      "exact_id": {
+        "n_queries": 150,
+        "n_scored": 150,
+        "recall_at_5": 0.8467,
+        "recall_at_10": 0.8467,
+        "mrr": 0.8467
+      },
+      "identifier": {
+        "n_queries": 40,
+        "n_scored": 40,
+        "recall_at_5": 0.775,
+        "recall_at_10": 0.85,
+        "mrr": 0.6298
+      },
+      "no_result": {
+        "n_queries": 40,
+        "n_scored": 0,
+        "recall_at_5": null,
+        "recall_at_10": null,
+        "mrr": null,
+        "no_result_noise_rate": null
+      }
+    }
+  },
+  "deltas_fused_minus_dense": {
+    "semantic": {
+      "recall_at_5": 0.0034,
+      "recall_at_10": 0.0033,
+      "mrr": -0.0006
+    },
+    "exact_id": {
+      "recall_at_5": -0.0067,
+      "recall_at_10": 0.0,
+      "mrr": -0.0349
+    },
+    "identifier": {
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mrr": 0.0
+    },
+    "overall": {
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.002,
+      "mrr": -0.011
+    }
+  },
+  "fulltext_channel_yield": {
+    "by_category": {
+      "semantic": {
+        "n": 300,
+        "zero": 289,
+        "candidates": 11,
+        "zero_rate": 0.9633
+      },
+      "exact_id": {
+        "n": 150,
+        "zero": 142,
+        "candidates": 123,
+        "zero_rate": 0.9467
+      },
+      "no_result": {
+        "n": 40,
+        "zero": 40,
+        "candidates": 0,
+        "zero_rate": 1.0
+      },
+      "identifier": {
+        "n": 40,
+        "zero": 40,
+        "candidates": 0,
+        "zero_rate": 1.0
+      }
+    },
+    "overall": {
+      "n": 530,
+      "zero_candidate_queries": 511,
+      "zero_rate": 0.9642
+    }
+  },
+  "tokenizer_probes": [
+    {
+      "probe": "8086",
+      "matches": 0
+    },
+    {
+      "probe": "2026",
+      "matches": 0
+    },
+    {
+      "probe": "20261007",
+      "matches": 0
+    },
+    {
+      "probe": "495f96",
+      "matches": 0
+    },
+    {
+      "probe": "REDACTED",
+      "matches": 2
+    },
+    {
+      "probe": "web-admin",
+      "matches": 4
+    },
+    {
+      "probe": "端口",
+      "matches": 20
+    },
+    {
+      "probe": "内网",
+      "matches": 0
+    },
+    {
+      "probe": "运维",
+      "matches": 0
+    },
+    {
+      "probe": "运行",
+      "matches": 85
+    },
+    {
+      "probe": "AEP",
+      "matches": 179
+    },
+    {
+      "probe": "QuantumCryptoVault Kafka",
+      "matches": 0
+    },
+    {
+      "probe": "8086 端口",
+      "matches": 20
+    },
+    {
+      "probe": "AEP 端口",
+      "matches": 9
+    },
+    {
+      "probe": "仅限内网访问",
+      "matches": 2
+    }
+  ],
+  "conclusion": {
+    "accepted": false,
+    "verdict": "放弃：融合未能在 identifier/semantic 上取得 >=2pp 的 Recall@5/MRR 提升（回退项: semantic/MRR -0.06pp）；fulltext 通道 96.4% 的 query 零候选，融合在多数 query 上退化为 dense-only",
+    "criteria": "identifier / semantic 的 Recall@5 或 MRR 提升 >= 2pp"
+  },
+  "diagnostics": {
+    "elapsed_sec": 39.0,
+    "fulltext_candidates_avg": 0.25,
+    "fulltext_candidates_max": 20,
+    "fulltext_cap_hit_queries": 0,
+    "fulltext_zero_candidate_queries": 511,
+    "dense_empty_queries": 0,
+    "avg_fused_top10_items_already_in_dense_top10": 9.94,
+    "latency_dense_avg_ms": 56.2,
+    "latency_fulltext_avg_ms": 1.9
+  }
+}

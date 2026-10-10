@@ -1,0 +1,22 @@
+{
+  "name": "openclaw-amr",
+  "version": "1.0.0",
+  "description": "Native AI Memory Runtime (AMR) plugin for OpenClaw with Zero-VRAM and Fail-Open guarantees",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/test_*.js"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "amr",
+    "memory",
+    "zero-vram"
+  ],
+  "author": "OpenClaw Auditor & AMR Team",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,3 @@
+- insert:
+    - id: amr
+      name: '@deepseek-ai/dsh-amr'

@@ -1,0 +1,84 @@
+{
+  "id": "openclaw-amr",
+  "name": "AMR Memory",
+  "description": "Native AI Memory Runtime (AMR) plugin for OpenClaw with Zero-VRAM prefetch and session ingestion",
+  "version": "1.0.0",
+  "categories": [
+    "memory"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "configGroups": [
+    {
+      "id": "amr-connection",
+      "title": "AMR Connection",
+      "order": 10,
+      "properties": [
+        "socketPath",
+        "deadlineMs"
+      ]
+    },
+    {
+      "id": "amr-context",
+      "title": "AMR Context Policy",
+      "order": 20,
+      "properties": [
+        "scoreThreshold",
+        "limit",
+        "maxItemChars",
+        "maxTotalChars",
+        "projectId"
+      ]
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "socketPath": {
+        "type": "string",
+        "description": "Path to AMR Unix Domain Socket. Defaults to $AMR_SOCKET_PATH or /run/user/<uid>/qdrant-bge.sock"
+      },
+      "deadlineMs": {
+        "type": "number",
+        "default": 80,
+        "minimum": 10,
+        "maximum": 5000,
+        "description": "Hard deadline in milliseconds for memory prefetch before socket destruction"
+      },
+      "scoreThreshold": {
+        "type": "number",
+        "default": 0.65,
+        "minimum": 0.0,
+        "maximum": 1.0,
+        "description": "Minimum similarity score threshold for recalling memories"
+      },
+      "limit": {
+        "type": "number",
+        "default": 3,
+        "minimum": 1,
+        "maximum": 10,
+        "description": "Maximum number of memories recalled"
+      },
+      "maxItemChars": {
+        "type": "number",
+        "default": 1000,
+        "minimum": 50,
+        "maximum": 4000,
+        "description": "Maximum characters allowed per single memory item before truncation"
+      },
+      "maxTotalChars": {
+        "type": "number",
+        "default": 4000,
+        "minimum": 100,
+        "maximum": 16000,
+        "description": "Hard upper bound of characters allowed for total injected recalled context"
+      },
+      "projectId": {
+        "type": "string",
+        "description": "Optional default project ID to scope memory recall and ingestion"
+      }
+    }
+  }
+}

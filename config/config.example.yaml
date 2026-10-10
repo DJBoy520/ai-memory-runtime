@@ -1,0 +1,48 @@
+# AI Memory Runtime (AMR) 配置文件范例
+server:
+  business_socket: "/run/user/1000/qdrant-bge.sock"
+  admin_socket: "/run/user/1000/qdrant-bge-admin.sock"
+  socket_mode: 0o600
+  max_request_bytes: 4194304  # 4MB
+  allowed_agents:
+    - "hermes"
+    - "openclaw"
+    - "opencode"
+    - "dsh"
+    - "qwenwork"
+    - "doubao"
+    - "zcode"
+    - "claude_code"
+    - "kle"
+    - "system"
+    - "default_agent"
+    - "test_runner"
+
+model:
+  name_or_path: "BAAI/bge-m3"
+  device: "cuda"  # 支持 "cuda" 或 "cpu"
+  fp16: true
+  max_batch: 16
+  max_queue_size: 64
+  idle_timeout_seconds: 3600
+  max_token_length: 8192
+
+storage:
+  sqlite_path: "data/sessions.db"
+  busy_timeout: 5000
+  wal_enabled: true
+
+qdrant:
+  url: "http://127.0.0.1:6333"
+  api_key: ""
+  timeout: 10.0
+  collections:
+    - "ai_memory"
+    - "crypto_standards"
+    - "project_docs"
+
+search:
+  default_score_threshold: 0.52  # 生产推荐召回过滤阈值（兼顾准确率与召回率）
+  project_fallback_ids:
+    - "global"
+    - "general"

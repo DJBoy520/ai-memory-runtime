@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local configuration & secrets (绝不上库安全红线)
+config/config.yaml
+config/*.local.yaml
+!config/config.example.yaml
+.env*
+*.aep
+*.log
+
+# Data & database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Sockets & runtimes
+*.sock
+
+# Virtual environments
+venv/
+.venv/
+models/
+
+# Local config backups
+config/*.bak-*

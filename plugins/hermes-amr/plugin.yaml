@@ -1,0 +1,4 @@
+name: amr
+version: 1.0.0
+description: "AI Memory Runtime (AMR) — native UDS integration with unified Qdrant-BGE memory engine."
+kind: memory-provider
