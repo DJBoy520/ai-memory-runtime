@@ -1313,10 +1313,16 @@ class SessionStore:
         now = int(time.time())
         point_id = qdrant_point_id or str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
         c_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        refs_json = json.dumps(source_refs or [], ensure_ascii=False)
+        agent = created_by_agent or "system"
+        # 记忆治理宪法第 3 条「任何卡片可溯源」：客户端未带溯源时不留空，
+        # 打诚实占位标记（可 grep 审计、可批量追补），而非伪装成已溯源
+        refs = [r for r in (source_refs or []) if isinstance(r, str) and r.strip()]
+        if not refs:
+            refs = ["provenance-missing:%s:%s"
+                    % (agent, time.strftime("%Y%m%d_%H%M%S", time.gmtime()))]
+        refs_json = json.dumps(refs, ensure_ascii=False)
         conflicts_list = conflicts_with or []
         conflicts_json = json.dumps(conflicts_list, ensure_ascii=False)
-        agent = created_by_agent or "system"
         op = operator or agent
 
         with self._lock:

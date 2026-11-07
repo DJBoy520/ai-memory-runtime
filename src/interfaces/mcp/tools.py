@@ -91,7 +91,7 @@ TOOL_DEFINITIONS = [
                 "source_refs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional list of source session IDs or document references."
+                    "description": "Optional list of source session IDs or document references. If omitted, the card is stamped 'provenance-missing:<agent>:<utc-ts>' so untraced cards stay auditable — always pass e.g. ['zcode:<session_id>:<message_id>']."
                 },
                 "conflicts_with": {
                     "type": "array",

@@ -33,6 +33,49 @@ def test_v3_create_and_revisions(store):
     assert res["revisions"][0]["version"] == 1
     assert res["revisions"][0]["content"] == "AEP-Chain 强制采用 SM2 128-hex 双层签名架构"
 
+def test_v3_source_refs_provenance_stamp(store):
+    # 治理宪法第 3 条：裸建卡（缺 source_refs）必须被打上可审计的诚实占位标记
+    bare_id = f"mem_test_{uuid.uuid4().hex[:6]}"
+    bare = store.create_memory_v3(
+        memory_id=bare_id,
+        content="测试裸建卡：无任何溯源引用的创建",
+        project_id="aep-chain",
+        type="fact",
+        status="ACTIVE",
+        created_by_agent="dsh",
+    )
+    assert len(bare["source_refs"]) == 1
+    assert bare["source_refs"][0].startswith("provenance-missing:dsh:")
+    stamp = bare["source_refs"][0].rsplit(":", 1)[-1]
+    assert len(stamp) == 15 and stamp[8] == "_"
+
+    # 显式传入 source_refs 时原样保留，不打标
+    traced_id = f"mem_test_{uuid.uuid4().hex[:6]}"
+    traced = store.create_memory_v3(
+        memory_id=traced_id,
+        content="测试带溯源卡：显式传入会话级引用",
+        project_id="aep-chain",
+        type="fact",
+        status="ACTIVE",
+        created_by_agent="zcode",
+        source_refs=["zcode:sess_abc:msg_def"],
+    )
+    assert traced["source_refs"] == ["zcode:sess_abc:msg_def"]
+
+    # 全空白/非字符串引用视同缺失，同样打标
+    blank_id = f"mem_test_{uuid.uuid4().hex[:6]}"
+    blank = store.create_memory_v3(
+        memory_id=blank_id,
+        content="测试空白引用卡：引用为空串与 None 混合",
+        project_id="aep-chain",
+        type="fact",
+        status="ACTIVE",
+        created_by_agent="opencode",
+        source_refs=["", "   ", None],
+    )
+    assert len(blank["source_refs"]) == 1
+    assert blank["source_refs"][0].startswith("provenance-missing:opencode:")
+
 def test_v3_optimistic_lock_and_version_increment(store):
     mem_id = f"mem_test_{uuid.uuid4().hex[:6]}"
     store.create_memory_v3(
