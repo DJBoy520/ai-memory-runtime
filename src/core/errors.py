@@ -7,8 +7,12 @@
 from typing import Iterable, Optional
 
 
-class VersionConflictError(Exception):
-    """乐观锁冲突：content 修改时 expected_version 与当前版本不一致。"""
+class VersionConflictError(ValueError):
+    """乐观锁冲突：content 修改时 expected_version 与当前版本不一致。
+
+    继承 ValueError 以兼容既有契约测试（tests/test_v3_contracts.py 的
+    pytest.raises(ValueError, match="VERSION_CONFLICT")）与消息前缀约定。
+    """
 
     def __init__(
         self,

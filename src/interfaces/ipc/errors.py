@@ -12,7 +12,10 @@
 from typing import Any, Dict, Optional
 
 
-class RpcError(Exception):
+class RpcError(ValueError):
+    """继承 ValueError：兼容既有契约测试（pytest.raises(ValueError, ...)）
+    与 main.py 历史 ValueError 消息前缀约定（AGENT_UNAUTHORIZED: 等）。"""
+
     code: int = -32603
     error_code: str = "INTERNAL"
 
