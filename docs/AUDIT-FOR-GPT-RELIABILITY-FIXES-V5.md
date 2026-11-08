@@ -40,7 +40,7 @@ AMR（AI Memory Runtime）是部署于本机环境下的多智能体统一语义
 
 ## 2. 故障日志与第一手核验证据
 
-### 2.1 模型冷启动自旋超时（占比 > 80%）
+### 2.1 模型冷启动自旋超时（近 7 天 journald：`ModelLoadingTimeoutError` 7 次、`Client disconnected before response could be sent` 40 次；次数为直接计数，未推算占比）
 ```text
 2026-11-03 19:35:42,097 [ERROR] [src.core.engine] Inference error in embed: Timed out waiting for READY (25.0s)
   File "/home/dj/WorkSpaces/ai-memory-runtime/src/core/engine.py", line 325, in embed
@@ -49,7 +49,7 @@ src.core.engine.ModelLoadingTimeoutError: Timed out waiting for READY (25.0s)
 2026-11-07 18:30:37,725 [INFO] [ipc.server] [business] Client disconnected before response could be sent
 ```
 
-### 2.2 事务先提交、后续调用超时引发的假 OCC 冲突
+### 2.2 版本冲突现场（该日志证明冲突存在；"假失败"的判定依据是源码链路分析——`memory_service.py:728-769` 先提交 SQLite 后同步 embed/Qdrant，日志本身不构成独立证明）
 ```text
 2026-11-07 18:30:30,858 [ERROR] [ipc.server] [business] Handler error executing method 'memory.update': VERSION_CONFLICT: Expected version 2, but current version is 3.
   File "/home/dj/WorkSpaces/ai-memory-runtime/src/core/session_store.py", line 1545, in update_memory_v3
