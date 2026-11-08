@@ -1,217 +1,167 @@
-# RFC: AMR 可靠性修复（P0 写链路一致性 + 冷启动并发控制，P1 契约统一与可观测性）
+# RFC: AMR 可靠性修复 v3（外部审计后的实施规格）
 
-- 状态: v2（2026-11-08 修订，吸收第一轮评审 22 条意见后重审）
-- 作者: zcode（编排），基于 2026-11-07 用户复核结论与源码核验
-- 影响面: 守护进程 `amr.service`，需重启后生效；含增量 DDL（幂等表、outbox 加列）与可选数据迁移
+- 状态: v3（2026-11-08，按外部审计意见全面改写；v1 曾被双模型评审拦截 22 条，v2 吸收后又被外部审计纠正关键设计）
+- 规范性输入: `docs/rfcs/GPT-AUDIT-RELIABILITY.md`（审计原文，逐条对照本文件核查覆盖）
+- 实施顺序（用户指定，硬性）: **阶段 A 写入一致性 → 阶段 B 模型加载 → 阶段 C 接口与观测**
+- 影响面: 守护进程 `amr.service`；含增量 DDL 与可重复迁移脚本；**不触碰生产 `data/sessions.db` 与运行中服务**，迁移在数据库副本上预演，上线步骤单独成文
+- 分支: `fix/amr-reliability-v3`
 
-## v2 变更摘要（相对 v1）
+## 0. 与 v2 的关键差异（审计纠正项）
 
-1. **D1 推翻重写**：v1 用 `asyncio.Future` 做 single-flight——engine 实例被 main 事件循环与 Outbox Worker 的独立线程+事件循环共享（`src/main.py:64-69`、`src/service/outbox_worker.py:161-171`），跨 loop await Future 会挂起/报错，executor 线程 `set_result` 亦非线程安全。v2 改为**线程原语方案**（执行锁 + 状态轮询 + epoch 代次），完全 loop 无关。
-2. **D2 纠正投影队列事实**：v1 误以 `memory_projection_outbox` 为在用队列——实测该表 0 行且**无消费者**（仅 `src/reconciliation/engine.py:230-245` 写入）；真实链路是 `qdrant_sync_queue`（3587 行，全 synced），且它**没有 version / next_retry_at / dead_letter_at 列**，`retry_count>=5` 的行永久不再拉取。v2 指定 `memory_projection_outbox` 为规范队列（该表本就具备 version/retry/死信字段，补 `target_collection` 列），Worker 切换消费者，`qdrant_sync_queue` 仅保留给 legacy `memory_record` 排水。
-3. **D2 幂等键重设计**：PK 改为 `(agent_id_raw, op, idem_key)` 并校验 memory_id 一致（v1 的 `(agent_id, idem_key)` 会跨操作重放、且 agent_type 归一后同类型多实例共享键空间）。
-4. **D2 明确删除 create 路径的 `engine.embed`**（v1 文字只写了删 Qdrant 写，`memory_service.py:628-630` 的同步向量计算被漏掉）。
-5. **D2 新增**：`memory_get` 改 SQLite SSOT 优先（v1 未处理投影滞后窗口内 `memory_get=null` / `update_status NOT_FOUND`）；陈旧行跳过规则（v1 无，迟到旧行会用旧 payload 覆盖新版本）。
-6. **D3/D6 兼容性修正**：映射链首位加 `RpcError` 直通分支（否则业务异常漏入 -32603）；`RpcError`/`VersionConflictError` 改继承 `ValueError`（现有 `tests/test_v3_contracts.py:91,226` 的 `pytest.raises(ValueError, ...)` 必须继续通过）；bridge 保留 daemon 错误的 `data`。
-7. **D4 从"值改写"改为"映射层 + 条件修正"**：`memory_search` 的 superseded_by 重定向条件从 `status=="SUPERSEDED"` 改为按 `superseded_by` 字段判定（否则折叠成 HISTORICAL 会打断重定向）；真正写库的是 `session_store.update_memory_status`（仍写小写 superseded），接入点在那里；迁移脚本扩到 SQLite + Qdrant payload；越界文件（reconciliation/cognitive_engine）只清点报告不改。
-8. **验收与测试可执行性**：single-flight 测试必须同时注入 Dummy 模型/tokenizer 并 mock `_infer_batch_sync`（照 `tests/test_step3_engine.py` 既有模式）；`idle_timeout_seconds<=0` 时 embed 的 finally 不再把 READY 降为 IDLE；admin metrics 测试禁止用生产 `AMRApplication()`。
+1. **队列任务语义反转**：队列行表达"某条记忆需要重新投影"，Worker 处理时**读取 SQLite 最新完整状态**执行完整 upsert/delete——**不复放 payload_snapshot**（v2 的快照重放存在旧覆盖新风险，审计 A2 否决）。
+2. **projection_revision 独立于 version**：`version` 仅正文修改递增，metadata-only 更新不递增，不能充当投影版本。新增 `memories.projection_revision`，任何影响投影的变更（内容/状态/类型/冲突/集合）都在同事务递增。
+3. **幂等增加请求摘要**：相同 key 不同参数 → `IDEMPOTENCY_CONFLICT`（新错误码 -32006），不再是简单重放；并发首请求靠唯一约束 + 败方回读校验。
+4. **看门狗独立于等待者**：加载超时判定由后台 watchdog 独立完成，不依赖"仍有请求在等"；卡死线程**不能**被 epoch 终止——标记 unhealthy 后走受控进程退出，由 systemd `Restart=always` 恢复。
+5. **request_id 持久化到投影任务行**：ContextVar 无法跨越持久队列与进程重启，队列行增加 `request_id` 关联列。
+6. **双队列迁移独立成步**：先盘点生产者清单，迁移可重复、可恢复、不删历史行，数据库副本演练并输出前后对账。
+7. **错误码往返验证**：必须通过真实 IPC（进程内 UDS Server）+ MCP 桥接往返测试，不只测异常继承。
+8. **状态迁移先盘点后迁移**：迁移脚本先只读统计（`--inventory`），再可重复迁移（`--apply`），副本演练。
 
-## 0. 背景与已核验证据
+## 1. 阶段 A：写入与投影一致性（最高优先级）
 
-近 7 天 journald：7 次推理等待超时、40 次客户端提前断开；单次冷启动超时窗口约 100s。
+### A1 写入成功语义
 
-### 源码与数据库证据（2026-11-07/08 核验）
+`memory_create / memory_update / memory_delete`（`src/service/memory_service.py` + `src/core/session_store.py`）同步路径在同一 SQLite 事务内完成：主表 + `memory_revisions` + 审计 + 投影任务 + 幂等记录及响应快照，**提交后立即返回**。请求路径零 `engine.embed`、零 `qdrant.*` 调用（`_create_v3_memory` 约 628-630 的同步向量计算一并删除）。响应含 `projection_status: "pending"`。`memory_get` 改为 SQLite SSOT 优先（`get_memory_v3` 命中即返回）；`memory_search` 保持查 Qdrant，弱一致性写入 `tools.py` 的工具描述与 `docs/DOC-AMR-04-API.md`。
 
-| 问题 | 位置 | 证据 |
-| --- | --- | --- |
-| 无 single-flight | `src/core/engine.py:209-232` | `load_model()` 对 `LOADING` 态无分支，并发第二个调用者会再次进入 `_load_model_sync` |
-| 请求等待超时硬编码 25s | `src/core/engine.py:250,325` | `_wait_for_ready(timeout=25.0)`，实测冷启动 28~100s |
-| `idle_timeout_seconds<=0` 危险 | `src/core/engine.py:145-158` | `threading.Timer(self.idle_timeout_seconds, ...)`，0 = 立即卸载 |
-| 假失败链路 | `src/service/memory_service.py:728-769` | 先 `update_memory_v3`（SQLite 提交）→ 再 `engine.embed`(746) + `qdrant.upsert_points`(765)；embed 超时异常在提交后抛出 |
-| 双写者 | `src/service/memory_service.py:666,765` | 请求路径直接写 Qdrant，同时队列行也会被 Worker 投影 |
-| 错误全被包成 -32603 | `src/interfaces/ipc/server.py:84-86` | `except Exception → make_jsonrpc_error(-32603, ...)` |
-| 队列表分裂 | `src/core/session_store.py:156-188,1410-1431,1627-1637`；`src/service/outbox_worker.py:63-141` | Worker 实际消费 `qdrant_sync_queue`（无 version/重试调度/死信列，retry_count>=5 永久停拉）；`memory_projection_outbox` 0 行、无消费者（仅 reconciliation 写入）。实测去重分析：按 (memory_id, op_type) 只剩 1657 组，同 version 重复行大量存在（metadata-only 更新不递增 version） |
-| 状态枚举分裂 | `src/service/memory_service.py:205-216,231-234,535-581`；`src/core/session_store.py:1004-1103` | `memory_search` 仅在 `status=="SUPERSEDED"` 时按 superseded_by 重定向；`memory_service.memory_update_status` 只写 Qdrant payload，真正写库的 `session_store.update_memory_status` 仍落小写 `superseded`；`scripts/normalize_status_schema.py` 既有 superseded→SUPERSEDED（仅 Qdrant）脚本 |
+### A2 规范队列与单写者
 
-DB 现状（2026-11-07 实测）：`memories.status` 分布 ACTIVE 605 / DELETED 28 / HISTORICAL 522，SQLite 无 legacy 值；Qdrant payload 中可能残留 SUPERSEDED/ARCHIVED（迁移脚本覆盖）。
+**第 0 步（强制，写入 deviations）**：盘点所有 Qdrant 写入口（v3 写路径、legacy `memory_record`、reconciliation、脚本、后台任务），形成生产者清单。未纳入统一顺序控制的入口必须在清单中标注。
 
-## 1. 目标 / 非目标
+**队列 DDL（在既有 `memory_projection_outbox` 上幂等升级；该表当前 0 行、无消费者，由 reconciliation 写入）**：
 
-**目标**
-- G1 任意并发冷启动只发生一次模型加载；等待方共享同一次加载结果；跨线程/跨事件循环安全。
-- G2 SQLite 是唯一同步提交点；Qdrant 唯一写者是 Outbox Worker；写响应可确定（projection_status）。
-- G3 写接口幂等：同 (agent, op, idempotency_key) 重试不产生第二次版本递增/投影，且不跨操作/跨目标重放。
-- G4 JSON-RPC 返回稳定业务错误码 + 结构化 data；**既有契约测试全部保持通过**。
-- G5 状态枚举单一事实来源，legacy 值在兼容层映射，superseded_by 重定向行为保留。
-- G6 request_id 贯穿日志；关键耗时进入内存指标，admin UDS 可读。
-- G7 agent 身份拆分 agent_type（参与授权）与 instance_id（仅审计）。
-- G8 `amr doctor` 一键诊断（含死信可见性）。
-
-**非目标（本轮明确不做）**
-- 不加文件日志/RotatingFileHandler（journald 已覆盖）。
-- 不做白名单通配符；不改变"agent_id 客户端自声明"的信任模型（真正边界是 UDS 0600 同用户）。
-- 不做内容语义自动合并；OCC 冲突如实返回 current_version。
-- 不放宽插件 80–150ms 预取预算；插件侧零改动。
-- 不动 `memory_record` legacy 路径及其 `qdrant_sync_queue` 排水（另行废弃排期）。
-- 不引入 Prometheus；不改 `scripts/normalize_status_schema.py`（既有脚本保持原样，仅在新迁移脚本中说明关系）。
-- 不重构 reconciliation / cognitive_engine（只清点其 legacy 状态引用并报告）。
-
-## 2. 设计
-
-### D1 引擎并发治理（W1，gemini）—— 线程原语方案
-
-`src/core/engine.py`：
-
-1. **single-flight 用执行锁，不用 asyncio.Future**（engine 被 main loop 与 Outbox Worker 的独立 loop 共享，Future 跨 loop 会挂起）：
-   - 新增 `self._load_exec_lock = threading.Lock()`、`self._loader_active = False`、`self._load_epoch = 0`、`self._load_started_at: Optional[float]`，均受 `_state_lock` 保护。
-   - **加载发起**（`_try_become_loader_locked()`，持 `_state_lock` 调用）：状态在 `UNLOADED/ERROR/UNLOADING`，或 `LOADING` 但 `_loader_active is False`（兼容既有测试手工置 LOADING 的路径，如 `tests/test_step3_engine.py` 的 `test_loading_spin_queue_success`）时：`_load_exec_lock.acquire(blocking=False)` 成功 → 置 `LOADING`、`_loader_active=True`、`_load_started_at=now`、`_load_epoch` 不变，向 executor 提交 `_load_and_finalize(epoch)`；acquire 失败 → 本调用方是等待者。
-   - **加载执行**（`_load_and_finalize(epoch)`，跑在 executor 线程）：调用重构后的 `_load_model_sync()`（**改为返回 `(tokenizer, model)`，不直接挂到 self**，修掉超时后线程仍装 model 的竞态）；随后持 `_state_lock` 收尾：若 `epoch == self._load_epoch` → 赋值 `self.tokenizer/self.model`、状态 READY、观测 `model_load_duration_ms`/`model_loads_total`；若 epoch 已过期 → 丢弃加载产物（del + `torch.cuda.empty_cache()`）、不动状态。任何路径finally：`_loader_active=False`、释放 `_load_exec_lock`。异常 → 仅在 epoch 未过期时置 `ERROR`（`_last_error` 记录），等待者轮询可见。
-   - **等待方**（async 协程，任意 loop 可用）：轮询 `while True: 持锁读状态；READY/IDLE→返回；ERROR→raise EngineError；LOADING→检查 (now - _load_started_at) > load_timeout_seconds → 若 epoch 未过期则 epoch+=1、置 ERROR("load timeout")（首个到达者执行，收敛点）；超出本请求 `request_load_wait_seconds` 预算 → raise ModelLoadingPendingError；否则 await asyncio.sleep(0.05)`。轮询周期 50ms，远小于加载耗时，无性能问题。
-2. **`load_timeout_seconds` 收敛语义**：超时不试图取消不可取消的 executor 线程，而是"标记本次尝试失败 + epoch 递增"——完成线程发现 epoch 过期即丢弃产物；executor `max_workers=1` 保证同一时刻至多一个 `_load_model_sync` 在跑，新请求可发起新 epoch 的加载（排队在 executor 后面，仍是单飞）。
-3. **`embed()` finally 与 idle 语义**（修 `engine.py:352-361`）：`remaining==0 且 state==READY` 时：`idle_timeout_seconds > 0` → 转 IDLE 并 `_schedule_idle_unload()`；`<= 0` → **保持 READY**（不降 IDLE、不定时器）。`_schedule_idle_unload` 入口对 `<= 0` 直接短路（双保险）。
-4. `embed()` 开头调用上述等待逻辑（替代 `_wait_for_ready` 的 25s 硬编码）；预算超时抛 `core/errors.ModelLoadingPendingError`（映射 MODEL_LOADING，可重试），与加载失败（`EngineError`，映射 MODEL_ERROR）严格区分。
-5. 新增 `async def preload(self) -> None`（幂等，READY 时 no-op，等待用 `load_timeout_seconds` 全额预算），供 main.py `create_task` 调用。
-6. 队列满语义不变（`QueueFullError`）。
-
-`config/settings.py` 的 `ModelConfig` 新增（W1）：
-
-```python
-preload_on_start: bool = False        # 启动时后台预热，不阻塞 UDS 就绪
-load_timeout_seconds: int = 120       # 单次加载尝试的收敛上限（覆盖实测 100s 窗口）
-request_load_wait_seconds: int = 30   # 单个请求愿意等加载的时间；超时→MODEL_LOADING
+```sql
+ALTER TABLE memory_projection_outbox ADD COLUMN target_collection TEXT;      -- 既有行回填 'ai_memory'
+ALTER TABLE memory_projection_outbox ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memory_projection_outbox ADD COLUMN request_id TEXT;             -- C3 跨重启关联
+ALTER TABLE memory_projection_outbox ADD COLUMN projected_revision INTEGER;  -- done 时记录实际投影到的 revision
+ALTER TABLE memory_projection_outbox ADD COLUMN task_class TEXT NOT NULL DEFAULT 'legacy'; -- 既有行=legacy
+-- 既有列 version/projection_type/op_type/payload_snapshot 保留但标记 deprecated（reconciliation 兼容）
+CREATE UNIQUE INDEX IF NOT EXISTS ux_outbox_pending_key
+    ON memory_projection_outbox(target_collection, memory_id) WHERE status = 'pending';
+ALTER TABLE memories ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0;
 ```
 
-`idle_timeout_seconds` 语义修订：`<= 0` = 永不自动卸载。本机 `config/config.yaml`（git 忽略，直接改）与 `config/config.example.yaml`：
+**入队（合并语义）**：每次影响投影的写事务内，`INSERT ... ON CONFLICT(target_collection, memory_id) WHERE status='pending' DO UPDATE SET projection_revision=excluded.projection_revision, request_id=excluded.request_id, updated_at=...`——同键至多一条 pending，新变更只刷新 revision，不堆积任务。
 
-```yaml
-model:
-  preload_on_start: true
-  load_timeout_seconds: 120
-  request_load_wait_seconds: 30
-  idle_timeout_seconds: 0   # 常驻显存；<=0 表示永不自动卸载
+**Worker 算法（`src/service/outbox_worker.py` 重写消费端）**：
+1. **单实例防护**：启动时 `fcntl.flock` 独占 `data/outbox_worker.lock`，第二个 Worker 拒绝启动（第一版单 Worker；多 Worker 需租约+fencing，明确不在本次范围）。
+2. 认领 pending 任务 → **以 (target_collection, memory_id) 为投影键，实时读取 SQLite 最新完整状态**：
+   - `memories` 行存在且 `status != 'DELETED'` → 按当前内容/状态/元数据构造 payload，完整 upsert（向量现算，经 engine.embed）；
+   - `memories` 行存在且 `status == 'DELETED'` → 按 `qdrant_point_id` 删除 point；
+   - 行不存在 → 删除 point（防御性清理）。
+   - **路由规则统一**：legacy 队列（`qdrant_sync_queue`）任务若其 memory 在 SQLite 有行，同样走上述"读最新态"路径；无行（legacy 孤儿卡）才沿用原 payload 重放。两队列由同一 Worker 线程串行消费，满足审计 A3.3"同一串行投影器"。
+3. 成功后：任务标 `done` 并记录 `projected_revision`；随后**复查** `memories.projection_revision`——若大于已投影值（处理期间发生了新写入），靠合并索引保证的 pending 任务（或本轮重新入队）接管，不丢更新。
+4. **至少一次投递 + 最终状态幂等**：Qdrant 写成功但标记 done 前崩溃 → 重试重做完整 upsert（幂等，point id 稳定）；绝不承诺网络恰好一次。
+5. 重试退避 `min(2^retry_count, 60)s`（`next_retry_at`）；`retry_count >= 8` → `dead_letter_at` 置位、状态 `dead_letter`，可查询、可经 admin RPC `outbox.replay` 人工重放。绝不静默丢弃。
+6. METRICS：`outbox_lag_seconds`（最老 pending 年龄）、积压/失败/死信计数、`embedding_duration_ms`、`qdrant_duration_ms`。
+
+**审计特别检查矩阵（必须各有测试断言）**：upsert→metadata 更新（同 version 连续变更）、upsert→delete、同正文版本连续状态更新、不同 collection 同 memory、处理期间出现新写入。
+
+### A3 双队列迁移（独立迁移步骤）
+
+`scripts/migrate_projection_queue.py`（新建，A 轨交付）：
+1. `--inventory`（只读）：统计 `qdrant_sync_queue` 各状态行数、全部生产者清单、`memory_projection_outbox` 现状。
+2. `--apply`（可重复执行）：将旧队列 `pending/failed` 行映射为新队列 pending 任务（键 (回填 collection, memory_id)，revision 从 memories 现值取），旧行标 `migrated`——**不删除旧队列与历史行**；已 `synced` 行不动。
+3. `--rehearse`（演练）：对**数据库副本**执行（`sqlite3 .backup` 到 tmp 或测试夹具构造），输出任务数量与前后一致性对账报告（JSON + 人读摘要）。
+4. 失败恢复步骤写入脚本 `--help` 与上线手册；切换屏障 = 本次部署（v3 写路径切换入队目标即为屏障，legacy `memory_record` 生产者保留在旧队列由 Worker 继续排水）。
+5. 测试旧任务延迟重试不覆盖新状态、不复活已删除记录。
+
+### A4 幂等
+
+`idempotency_keys` 表（业务写同事务写入）：
+
+```sql
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    agent_id_raw   TEXT NOT NULL,     -- 客户端自声明命名空间，非认证凭据
+    op             TEXT NOT NULL,     -- create | update | delete
+    idem_key       TEXT NOT NULL,
+    request_digest TEXT NOT NULL,     -- sha256(canonical_json(op, memory_id, content, type, status, expected_version, change_reason, collection_name, project_id, ...))
+    memory_id      TEXT NOT NULL,
+    response_json  TEXT NOT NULL,     -- 完整首次响应快照（含 projection_status、服务端生成的 memory_id）
+    created_at     INTEGER NOT NULL,
+    PRIMARY KEY (agent_id_raw, op, idem_key)
+);
 ```
 
-### D2 事务性 Outbox 单写者 + 幂等（W2，deepseek）
+规则：同 key 同摘要 → 事务内重放（附 `idempotent_replay: true`，pending 含义=首次提交时状态，当前投影状态用独立查询）；同 key 不同摘要 → `IDEMPOTENCY_CONFLICT`(-32006)；并发首请求 → 唯一约束仲裁，败方回读并校验摘要一致后重放；create 的服务端 ID 在事务内生成并进快照；保留 7 天（`idempotency_retention_days`），过期视为不存在重新执行（文档说明）。`tools.py` 补 `idempotency_key` 参数与契约说明。
 
-**第 0 步（强制）**：先 grep `session_store` 的全部入队 helper 与 `outbox_worker` 的 fetch/mark 函数，绘制真实 enqueue/consume 配对表，写进 deviations，再动手。
+**阶段 A 交付文件**：
+- A写轨（deepseek）：`src/service/memory_service.py`、`src/core/session_store.py`、`src/interfaces/mcp/tools.py`、`tests/test_outbox_single_writer.py`、`tests/test_idempotency.py`、`tests/test_memory_get_ssot.py`
+- A投影轨（gemini）：`src/service/outbox_worker.py`、`scripts/migrate_projection_queue.py`、`tests/test_projection_ordering.py`、`tests/test_dual_queue_migration.py`
 
-**响应契约变更**：`memory.create/update/delete` 在 SQLite 事务提交 + 规范队列行落库后**立即返回**，响应带 `projection_status: "pending"`。请求路径删除**全部** `engine.embed` 与 `qdrant.*` 调用（`_create_v3_memory` 的 628-630 同步向量计算一并删除；Qdrant 向量由 Worker 从 payload content 现算）。`memory_record` 旧路径本轮不动。
+## 2. 阶段 B：模型冷启动（线程原语 + 独立看门狗）
 
-**规范队列 = `memory_projection_outbox`**（它已具备 version/op_type/retry_count/next_retry_at/last_error/dead_letter_at；v1 误认的 `qdrant_sync_queue` 无这些列）：
+`src/core/engine.py`（B 轨，gemini）：
 
-- 迁移（幂等 DDL，启动时执行）：`ALTER TABLE memory_projection_outbox ADD COLUMN target_collection TEXT`（已存在则跳过）；v3 写入路径入队时填 `target_collection`（消费 `collection_name` 参数——修复 v1 中 collection_name 变无人消费、非默认集合被静默错投的问题）。
-- `src/service/outbox_worker.py` 改为消费 `memory_projection_outbox`；**同时保留**既有 `qdrant_sync_queue` 排水循环给 legacy `memory_record`（行为不变）。reconciliation 往规范队列写的行从此有了消费者（该表的设计意图）。
-- **重试与死信**：规范队列行失败 → `next_retry_at = now + min(2^retry_count, 60)s`，`retry_count >= 8` → 置 `dead_letter_at`（不再重试，doctor 可见）；legacy 队列行为不变。
-- **陈旧行跳过（单写者正确性的关键）**：Worker 每轮按 memory_id 分组，同组只应用 id 最大的 pending 行；被跳过的旧行标 done 并在 last_error 记 "superseded by newer projection"。附加版本护栏：`op=upsert 且 row.version < memories.version（SQLite 当前值）` → 跳过。杜绝迟到旧行用旧 payload 覆盖新版本。
-- **不建** `(memory_id, version, op_type)` 唯一索引：metadata-only 更新不递增 version，同键重复行是合法业务形态（实测同 version 重复组大量存在），唯一约束反而制造 IntegrityError 新假失败。
+1. **跨线程/跨 Loop 单次加载**：`_load_exec_lock = threading.Lock()` 非阻塞 acquire 定唯一加载者（替代 v1 的 asyncio.Future——engine 被 main loop 与 Worker 独立 loop 共享）；加载线程在**局部变量**构造 (tokenizer, model)，完成后持 `_state_lock` 校验 `_load_epoch` 仍有效才挂载，过期则 `del` + `torch.cuda.empty_cache()` 丢弃；`_loader_active`/`_load_started_at` 受锁保护。等待方任意 loop 以 50ms 轮询状态。
+2. **状态转换矩阵（逐一测试）**：加载中、等待、失败、卸载、关闭（daemon stop 与加载并发）、**加载完成但结果已过期**（epoch 已推进→丢弃且不动状态）。
+3. **请求预算与加载生命周期分离**：请求等满 `request_load_wait_seconds` → `ModelLoadingPendingError`（映射 MODEL_LOADING 可重试），绝不取消共享加载。
+4. **独立 watchdog**：守护线程按 `_load_started_at` 独立判定，不依赖等待请求存在：
+   - 超过 `load_timeout_seconds` → 判定本次尝试失败：epoch+1、状态 ERROR（此后完成线程丢弃产物）；若加载线程仍卡住，状态标 **unhealthy**（admin 状态与 RPC 错误可见）；
+   - 超过 `load_stall_exit_seconds`（新增配置，默认 `load_timeout_seconds + 60`）→ journald CRITICAL 后 `os._exit(1)` 受控退出，由 systemd `Restart=always`（`systemd/amr.service:11-12` 已配）拉起恢复。**明确：epoch 不能终止卡住线程，文档不得如此描述。**
+5. `idle_timeout_seconds <= 0` = 禁用自动卸载：`_schedule_idle_unload` 入口短路 + `embed()` finally 不降 READY→IDLE。
+6. 新配置：`preload_on_start`（false）、`load_timeout_seconds`（120）、`request_load_wait_seconds`（30）、`load_stall_exit_seconds`；本机 `config/config.yaml` 设 `preload_on_start: true`、`idle_timeout_seconds: 0`；记录实际加载耗时到 METRICS（`model_load_duration_ms`/`model_loads_total`）。
+7. 插件 80–300ms fail-open 契约零改动（B3）：服务端在模型未就绪时返回 MODEL_LOADING 并继续后台加载。
+8. 既有 `tests/test_step3_engine.py`（手工置 LOADING 的用例）必须保持通过：LOADING 但无活动加载者时，新请求可成为加载者。
 
-**幂等（重设计）**：
+**交付文件（B 轨）**：`src/core/engine.py`、`config/settings.py`、`config/config.yaml`、`config/config.example.yaml`、`tests/test_engine_singleflight.py`、`tests/test_engine_lifecycle.py`、`tests/test_idle_timeout_disabled.py`
 
-- 表：`CREATE TABLE IF NOT EXISTS idempotency_keys (agent_id_raw TEXT NOT NULL, op TEXT NOT NULL, idem_key TEXT NOT NULL, memory_id TEXT NOT NULL, response_json TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (agent_id_raw, op, idem_key))`。
-- `op ∈ {create, update, delete}`，防跨操作重放；`agent_id_raw` 用**归一化前的原始调用方标识**（如 `zcode-win`），同类型多实例键空间隔离。
-- 命中且 `memory_id` 一致 → 重放 `response_json`（附 `idempotent_replay: true`）；命中但 `memory_id` 不一致 → 抛 `RpcInvalidArgument`（"idempotency_key reused for different target"）。
-- **快照闭环在 session_store 事务内**：完整响应（含 `projection_status`）在 `create_memory_v3/update_memory_v3` 事务内组装并写入 `response_json` 后才 COMMIT；service 层不得事后追加字段（否则重放响应缺字段）。
-- 保留 7 天（`getattr(config.storage, "idempotency_retention_days", 7)`），Worker 顺带清理。
+## 3. 阶段 C：接口、状态与可观测性
 
-**其他**：
+### C1 稳定业务错误（C 接口轨，gemini）
 
-- `update_memory_v3` 的 VERSION_CONFLICT 改抛 `core/errors.VersionConflictError`（**继承 ValueError**，消息保留 `VERSION_CONFLICT: ...` 前缀，`tests/test_v3_contracts.py:91` 的 `pytest.raises(ValueError, match=...)` 无需改动即通过）。
-- `memory_get` 改 **SQLite SSOT 优先**（`get_memory_v3` 命中即返回，Qdrant 仅作向量检索源）——消除投影滞后窗口内 `memory_get=null`、`memory_update_status NOT_FOUND` 的新故障面。
-- `tools.py`：`memory_create/update/delete` 增加 `idempotency_key` 参数与 projection_status 契约说明。
+映射表（`src/interfaces/ipc/errors.py` 已有基座，增补 `RpcIdempotencyConflict` code=-32006）：AGENT_UNAUTHORIZED(-32001)、VERSION_CONFLICT(-32002，data 带 current_version)、MODEL_LOADING(-32003)、QUEUE_FULL(-32004)、NOT_FOUND(-32005)、INVALID_ARGUMENT(-32602)、**IDEMPOTENCY_CONFLICT(-32006)**、INTERNAL(-32603 兜底)。
 
-### D3 稳定业务错误码（W3，gemini）
+- `server.py` 映射首位 `isinstance(exc, RpcError)` 直通；随后领域异常→码；其余 ValueError 消息前缀解析兜底。
+- **审计所有 `except ValueError`**（grep src/）：领域异常现继承 ValueError，宽泛捕获会提前吞掉——逐处核对处理顺序与日志，发现吞掉处修复并在 deviations 报告清单。
+- **真实往返测试**（`tests/test_rpc_roundtrip.py`）：进程内 `DualUDSServer` 绑 tmp socket（禁触生产 daemon/生产 socket）+ `bridge.py` 以 `AMR_SOCKET_PATH` env 指向 tmp socket 跑子进程，断言 AGENT_UNAUTHORIZED/VERSION_CONFLICT(含 current_version)/IDEMPOTENCY_CONFLICT/MODEL_LOADING 端到端可区分。
+- `main.py` dispatch 改用 `auth.authorize_agent`（RPC 规则见 RFC v2 D6：精确命中→(raw,None)；`<type>-<instance>` 且 type 命中→(type,instance)；否则未授权）。
 
-`src/interfaces/ipc/errors.py` 映射表（**`RpcError` 已改继承 `ValueError`**，编排方已更新，兼容既有 `raises(ValueError)` 契约）：
+### C2 状态统一（C 状态轨，deepseek）
 
-| code | error_code | data |
+- `src/core/memory_status.py`：6 态 + `normalize_status`（legacy SUPERSEDED/ARCHIVED→HISTORICAL，保留 `superseded_by` 指针）。
+- **先盘点后迁移**：`scripts/migrate_status_enum.py --inventory`（只读统计 SQLite/Qdrant payload 样本/legacy 接口/reconciliation 现有语义，输出报告）→ `--apply`（可重复，先 SQLite 后 Qdrant payload，默认 dry-run）。
+- 重定向修正（`memory_service.py:231-234,205-216`）：条件从 `status=="SUPERSEDED"` 改为 **`superseded_by` 非空即重定向**，且重定向前校验：目标存在、非 DELETED、可见性与作用域；链环深度上限 5 + 环检测；目标不存在→返回原记录并标注 `redirect_broken`；跨项目/跨 collection 行为写入文档（同 collection 内重定向，跨集合仅提示）。
+- 写库真相源 `session_store.update_memory_status`（现落小写 superseded）接 normalize；`memory_service.memory_update_status`（只写 Qdrant）补规范队列入队 + normalize，消除分叉。
+- reconciliation / cognitive_engine 等越界文件只盘点不改（deviations 报告）。
+
+### C3 可观测性（C 状态轨）
+
+- `request_id`：server 每请求生成（服务端生成为主，客户端 ID 仅关联字段）；**持久化到队列行 `request_id` 列**（A 轨已建列，此处确保写入与 doctor 呈现）——ContextVar 只覆盖进程内同请求，跨持久队列/重启靠落库。
+- `main.py`：logging.Filter 注入 request_id、preload 接线（`preload_on_start`）、admin `status.metrics`（METRICS + 引擎状态 + 队列积压/最老任务年龄/失败/死信）。
+- `scripts/amr_doctor.py`：服务/模型/SQLite/Qdrant/队列/近 24h journald 分类错误；**输出脱敏：不含记忆正文与凭据**；`--json`；对未升级 daemon 优雅降级。
+
+**交付文件（C 轨）**：
+- C接口轨（gemini）：`src/interfaces/ipc/server.py`、`src/interfaces/ipc/auth.py`、`src/interfaces/mcp/bridge.py`、`tests/test_rpc_errors.py`、`tests/test_auth_normalization.py`、`tests/test_rpc_roundtrip.py`
+- C状态轨（deepseek）：`src/core/memory_status.py`、`src/service/memory_service.py`、`src/core/session_store.py`、`src/main.py`、`scripts/amr_doctor.py`、`scripts/migrate_status_enum.py`、`tests/test_status_unification.py`、`tests/test_admin_metrics.py`
+
+## 4. 文件归属与阶段纪律
+
+- 阶段串行：A 全部完成并通过定向测试门后，B 才开工；C 在 B 之后。同阶段内两轨文件互斥（上表）。
+- 越界禁改：共享契约（`src/core/errors.py`、`src/core/request_context.py`、`src/service/metrics.py`、`src/interfaces/ipc/errors.py`）编码轨只读。
+- 测试隔离硬约束：一切测试用 tmp_path 内存 SQLite / 临时 socket / fake engine+qdrant；**禁止打开生产 `data/sessions.db`、连接生产 Qdrant、触碰运行中 daemon**。
+- 插件目录（`plugins/`）与 `memory_record` legacy 路径零改动。
+
+## 5. 交付验收 ↔ 测试映射（审计"五、交付验收"10 条）
+
+| # | 审计验收 | 测试/产物 |
 | --- | --- | --- |
-| -32001 | AGENT_UNAUTHORIZED | `{agent_id}` |
-| -32002 | VERSION_CONFLICT | `{memory_id, current_version, expected_version}` |
-| -32003 | MODEL_LOADING | `{model_state, retry_after_ms}` |
-| -32004 | QUEUE_FULL | `{active_requests, max_queue_size}` |
-| -32005 | NOT_FOUND | `{memory_id}` |
-| -32602 | INVALID_ARGUMENT | `{field?, reason}` |
-| -32603 | INTERNAL | `{}`（兜底） |
+| 1 | 并发冷启动只加载一次；请求超时不取消共享加载 | `tests/test_engine_singleflight.py` |
+| 2 | 卡死→unhealthy+受控退出、迟到完成、卸载/关闭竞态确定行为 | `tests/test_engine_lifecycle.py` |
+| 3 | SQLite 提交后 Qdrant 不可用，写请求仍返回已提交+pending | `tests/test_outbox_single_writer.py` |
+| 4 | 同幂等键并发重试单次提交；不同参数同 key → 冲突 | `tests/test_idempotency.py` |
+| 5 | 投影乱序/元数据连续更新/删除后旧任务重试/Qdrant 成功后崩溃恢复 | `tests/test_projection_ordering.py` |
+| 6 | pending 期 memory_get 读到最新事实；search 弱一致性写入文档 | `tests/test_memory_get_ssot.py` + `tools.py`/`DOC-AMR-04` 说明 |
+| 7 | 新旧队列并存最终一致 | `tests/test_dual_queue_migration.py` |
+| 8 | IPC/MCP 往返可区分错误码；插件预算不变 | `tests/test_rpc_roundtrip.py` + 既有插件测试 |
+| 9 | 副本迁移演练 + 前后对账 | `scripts/migrate_projection_queue.py --rehearse` 输出报告 |
+| 10 | 上线顺序/重启步骤/回退条件 | `docs/ROLLOUT-AMR-RELIABILITY.md`（预演轨产出） |
 
-`server.py` `_handle_client` 映射顺序（**第一条是直通**，否则业务异常漏入兜底）：
-
-1. `isinstance(exc, RpcError)` → 原样 `to_jsonrpc_error(req_id)`；
-2. `core.errors.VersionConflictError` → `RpcVersionConflict`（data 取异常字段）；
-3. `core.errors.ModelLoadingPendingError` → `RpcModelLoading`；
-4. `engine.QueueFullError` → `RpcQueueFull`；
-5. `core.errors.InvalidStatusError` → `RpcInvalidArgument`；
-6. `KeyError` → `RpcNotFound`；
-7. 其余 `ValueError` 按消息前缀解析（`AGENT_UNAUTHORIZED:` / `VERSION_CONFLICT:` / `Invalid status:`，向后兼容未迁移路径）；
-8. 兜底 INTERNAL。
-
-`bridge.py`：`_call_daemon` 不再把 daemon 错误折叠成裸 `RuntimeError`——透传 `error.{code,message,data}`（新增异常类型携带 data），`handle_request` 的 isError 文本首行 `[error_code] message`，data JSON 附后（error_code 取 message `XXX:` 前缀或 `data.error_code`）。
-
-### D4 状态枚举统一——映射层 + 条件修正（W2）
-
-- `src/core/memory_status.py`（新建）：`VALID = {TEMPORARY, ACTIVE, CONFLICT, DELETED, HISTORICAL, PENDING_VERIFY}`；`LEGACY_MAP = {SUPERSEDED→HISTORICAL, ARCHIVED→HISTORICAL, 小写同映射}`；`normalize_status()`：upper → legacy 映射 → 校验，非法抛 `core/errors.InvalidStatusError`。
-- **superseded_by 重定向保留**：`memory_search`（`memory_service.py:231-234,205-216`）的重定向条件从 `status == "SUPERSEDED"` 改为「`superseded_by` 非空即重定向（与 status 解耦）」——折叠枚举后重定向行为不变。
-- **接入点修正**：真正写库的是 `session_store.update_memory_status`（仍落小写 superseded）→ 在此接 `normalize_status`（HISTORICAL + 保留 superseded_by）；`memory_service.memory_update_status`（只写 Qdrant payload 的那个）→ 补规范队列 `update_payload` 入队 + normalize，消除 SQLite/Qdrant 分叉。
-- 迁移脚本 `scripts/migrate_status_enum.py`：SQLite 行 + **Qdrant payload 扫描修正**（默认 `--dry-run`）；文档注明与既有 `scripts/normalize_status_schema.py` 的关系（后者保持不动）。
-- 边界纪律：reconciliation / cognitive_engine 等**不在所有权矩阵内**的 legacy 状态引用只 grep 清点并写进 deviations 报告，不修改——它们的兼容性由边界处的 normalize 与 `superseded_by` 解耦条件保证。
-
-### D5 request_id + 指标 + doctor（W3 + 集成轨）
-
-- `src/core/request_context.py`（已预置）：server.py 每请求 set/finally reset；id 取 JSON-RPC `id`（字符串化），缺失则 `new_request_id()`。
-- `main.py`（集成轨）：`logging.Filter` 注入 `request_id`，格式串加 `%(request_id)s`。
-- `src/service/metrics.py`（已预置）：server 观测 `request_duration_ms{method}` 与 error_code 计数；engine 观测 `model_load_duration_ms`/`model_loads_total`；worker 观测 embedding/qdrant 耗时与 `outbox_lag_seconds` gauge。
-- `main.py` `dispatch_admin_rpc` 新增 `status.metrics`：`METRICS.snapshot()` + 引擎状态 + 规范队列积压/死信统计。
-- `scripts/amr_doctor.py`：systemd 活性、UDS socket、admin `status.metrics`、**规范队列积压/死信/最老滞后**、SQLite quick_check、Qdrant 连通、journald 近 24h 错误分类；`--json`；对未升级 daemon 优雅降级。
-- **测试隔离硬约束**：`test_admin_metrics.py` 禁止用生产 `AMRApplication()`（会开生产 `data/sessions.db` 并连真实 Qdrant）——用 tmp_path 内存库 + fake engine/qdrant 注入构造被测对象。
-
-### D6 agent 身份拆分（W3 定义 + 集成轨接线）
-
-`src/interfaces/ipc/auth.py`（新建）：
-
-```python
-def authorize_agent(raw_agent_id: str, allowed: set[str]) -> tuple[str, Optional[str]]:
-    """1) 精确命中白名单 → (raw, None)
-       2) raw 形如 <type>-<instance> 且 type 命中 → (type, instance)
-       3) 否则抛 RpcAgentUnauthorized(data={"agent_id": raw})"""
-```
-
-`RpcAgentUnauthorized` 继承 `RpcError`（即 ValueError），`main.py` 换用它后既有 `pytest.raises(ValueError, match="AGENT_UNAUTHORIZED")` 兼容。service 收归一化 agent_type；instance_id 只进日志/审计；幂等键空间用归一化前 raw（见 D2）。真实安全边界仍是 UDS 0600 同用户。
-
-### D7 凭据治理（最小落地）
-
-`QdrantConfig` 支持 `api_key_file` 与环境变量 `AMR_QDRANT_API_KEY`（优先级 env > file > 明文）；`config.example.yaml` 注明并提示轮换（轮换由用户在 Qdrant 侧执行）。
-
-## 3. 文件归属矩阵（并行编码的硬边界）
-
-| 轨道 | 模型 | 拥有文件（不得越界） |
-| --- | --- | --- |
-| W1 引擎单飞 | gemini | `src/core/engine.py`、`config/settings.py`、`config/config.yaml`、`config/config.example.yaml`、`tests/test_engine_singleflight.py`、`tests/test_idle_timeout_disabled.py` |
-| W2 写链路 | deepseek | `src/service/memory_service.py`、`src/core/session_store.py`、`src/service/outbox_worker.py`、`src/core/memory_status.py`（新建）、`src/interfaces/mcp/tools.py`、`scripts/migrate_status_enum.py`（新建）、`tests/test_outbox_single_writer.py`、`tests/test_idempotency.py`、`tests/test_status_unification.py`、`tests/test_v3_contracts.py`（仅当异常继承变更需要适配） |
-| W3 IPC | gemini | `src/interfaces/ipc/server.py`、`src/interfaces/ipc/auth.py`（新建）、`src/interfaces/mcp/bridge.py`、`tests/test_rpc_errors.py`、`tests/test_auth_normalization.py` |
-| 集成 | deepseek | `src/main.py`、`scripts/amr_doctor.py`（新建）、`tests/test_admin_metrics.py`（新建）、`src/core/qdrant.py`（仅 D7 凭据读取）、`config/settings.py`（仅 QdrantConfig 追加）、`config/config.example.yaml`（仅凭据注释） |
-| 共享契约（编排方维护，编码轨**只读**） | — | `src/core/errors.py`、`src/core/request_context.py`、`src/service/metrics.py`、`src/interfaces/ipc/errors.py`（v2 已按评审改为 ValueError 继承） |
-
-交叉审核：gemini 审 deepseek 系（W2+集成），deepseek 审 gemini 系（W1+W3）；修复由原轨作者执行。
-
-## 4. 验收标准（对应测试）
-
-1. 20 并发触发冷启动（注入 Dummy 模型/tokenizer + 慢 `_load_model_sync` + mock `_infer_batch_sync`，照 `tests/test_step3_engine.py` 模式）：加载恰好一次，全部请求成功 —— `tests/test_engine_singleflight.py`。
-2. `idle_timeout_seconds=0` 与 `=-1`：请求完成后状态**保持 READY**（finally 不降 IDLE）、无卸载定时器 —— `tests/test_idle_timeout_disabled.py`。
-3. SQLite 提交后模拟下游全故障：`memory_update` 响应成功 + `projection_status:"pending"`，version 递增恰好一次；同 `(agent, op, key)` 重试 → 同 version、无新 revision、无新队列行、`idempotent_replay:true`；同 key 换 memory_id → INVALID_ARGUMENT —— `tests/test_outbox_single_writer.py`、`tests/test_idempotency.py`。
-4. 一次 create 全链路（含 Worker 投影）恰好一次 qdrant upsert；陈旧行（同 memory 更早 id / 旧 version）被跳过不覆盖 —— `tests/test_outbox_single_writer.py`。
-5. 真 OCC 冲突返回 `VERSION_CONFLICT` + `data.current_version`；既有 `test_v3_contracts.py` 全部保持通过 —— `tests/test_rpc_errors.py`。
-6. legacy `superseded/archived` 归一 HISTORICAL 且 `superseded_by` 重定向不断；非法值 INVALID_ARGUMENT —— `tests/test_status_unification.py`。
-7. 投影滞后窗口内 `memory_get` 返回 SQLite SSOT 数据 —— `tests/test_outbox_single_writer.py`。
-8. 请求日志可用 request_id 串联 —— `tests/test_rpc_errors.py`。
-9. 插件 80–150ms 预取 fail-open 零改动（既有插件测试通过）。
-10. `tests/` 全量 pytest 与基线一致（不新增失败；基线仅 `test_v2_end_to_end` E2E 延迟用例已知失败）。
-
-## 5. 实施顺序与回滚
-
-顺序：评审 v2 → 并行三路 → 集成 → 全量测试门 → 交叉审核 → 修复 → 终验。
-回滚：`fix/amr-reliability` 分支单基线，修复改动集中在其上工作区 diff，`git checkout -- <file>` 或回退基线 commit 即整体撤销。守护进程需 `systemctl --user restart amr` 后生效（用户择机执行）。
+全量门：`python3 -m pytest tests/ -q`（deselect 基线既有失败 `test_v2_end_to_end` E2E 延迟用例），不新增失败。
 
 ## 6. 已知风险
 
-- `memory_search` 对新卡片的可见性变为"投影后"（亚秒级）；`projection_status` 即提示；`memory_get` 已 SSOT 化不受影响。
-- Worker 切换规范队列后，reconciliation 写入的行开始被消费——预期行为（该表设计意图），doctor 监控积压。
-- `bridge.py` 错误文本格式变化对依赖旧文本的调用方可感知（首行保留 message，前缀新增）。
-- 幂等键空间用 raw agent_id：同一物理 Agent 若每次会话随机化 instance 后缀，键不复用（安全方向的失败）。
+- Worker 改为"读最新态"后，单次任务成本略增（实时读 + 现算向量），但消除快照陈旧类缺陷；合并索引防任务堆积。
+- `os._exit(1)` 受控退出会瞬断在途请求（MODEL_LOADING/连接重置），属卡死场景的兜底，常态不触发。
+- `bridge.py` 错误文本格式变化（首行 `[error_code]` 前缀）对旧调用方可感知。
+- 幂等键空间按 raw agent_id：实例随机化后缀的 Agent 键不复用（安全方向的失败）。

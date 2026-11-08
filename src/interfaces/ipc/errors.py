@@ -64,3 +64,14 @@ class RpcNotFound(RpcError):
 class RpcInvalidArgument(RpcError):
     code = -32602
     error_code = "INVALID_ARGUMENT"
+
+
+class RpcIdempotencyConflict(RpcError):
+    """幂等键被不同请求复用（同 key、不同请求摘要）。
+
+    data 约定: {op, idem_key, existing_memory_id}
+    （RFC v3 §A4 / 外部审计 C1 错误表）
+    """
+
+    code = -32006
+    error_code = "IDEMPOTENCY_CONFLICT"
