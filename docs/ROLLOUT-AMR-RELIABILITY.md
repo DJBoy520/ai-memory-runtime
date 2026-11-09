@@ -15,17 +15,25 @@
 ### 步骤 1：停止守护进程
 确保主服务与所有写者停止，释放文件锁与 SQLite 数据库写连接：
 ```bash
-sudo systemctl stop amr.service
+systemctl --user stop amr.service
 # 确认进程已完全退出
-sudo systemctl status amr.service
+systemctl --user status amr.service
 ```
 
 ### 步骤 2：生产数据库冷备份
 完整备份 SQLite 主文件及 WAL/SHM 临时文件：
 ```bash
-BACKUP_DIR="/data/amr/backups/$(date +%Y%m%d_%H%M%S)"
+BACKUP_DIR="/home/dj/WorkSpaces/ai-memory-runtime/data/backups/$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
-cp /data/amr/storage/amr.db* "$BACKUP_DIR/"
+# 使用 sqlite3 backup API 生成一致性快照（服务已停止）
+python3 - "$BACKUP_DIR" <<'PY'
+import sqlite3, os, sys
+src = "/home/dj/WorkSpaces/ai-memory-runtime/data/sessions.db"
+dst = os.path.join(sys.argv[1], "sessions.db")
+con = sqlite3.connect(src); out = sqlite3.connect(dst); con.backup(out); out.close(); con.close()
+PY
+cp /home/dj/WorkSpaces/ai-memory-runtime/data/sessions.db-wal "$BACKUP_DIR/" 2>/dev/null || true
+cp /home/dj/WorkSpaces/ai-memory-runtime/data/sessions.db-shm "$BACKUP_DIR/" 2>/dev/null || true
 sha256sum "$BACKUP_DIR"/* > "$BACKUP_DIR/checksums.txt"
 ```
 
@@ -33,34 +41,48 @@ sha256sum "$BACKUP_DIR"/* > "$BACKUP_DIR/checksums.txt"
 使用迁移脚本进行只读盘点与无害演练，检查是否有不可转换的孤儿任务：
 ```bash
 # 1. 资产盘点
-PYTHONPATH=. python scripts/migrate_projection_queue.py --db /data/amr/storage/amr.db --inventory
+PYTHONPATH=. python scripts/migrate_projection_queue.py --db /home/dj/WorkSpaces/ai-memory-runtime/data/sessions.db --inventory
 
 # 2. 副本迁移演练（sqlite3 backup API 复制到临时副本，绝不改动生产库）
-PYTHONPATH=. python scripts/migrate_projection_queue.py --db /data/amr/storage/amr.db --rehearse --report docs/MIGRATION-REHEARSAL-REPORT.md
+PYTHONPATH=. python scripts/migrate_projection_queue.py --db /home/dj/WorkSpaces/ai-memory-runtime/data/sessions.db --rehearse --report docs/MIGRATION-REHEARSAL-REPORT.md
 ```
 > **硬性门禁**：若输出包含 `必须人工确认后才可上线` 或 `quarantine_count > 0`，**严禁启动新服务**！必须由研发介入排查隔离表任务原因。
 
 ### 步骤 4：部署新代码并启动守护进程
 ```bash
-# 拉取/切换至已验证的分支代码
-git checkout <release-tag>
+# 切换至已验证的集成分支/主分支（本机工作区：/home/dj/WorkSpaces/ai-memory-runtime）
+git checkout main
+git log --oneline -1   # 确认是本次 release commit
 
 # 启动新版服务（SessionStore 启动时自动并在单事务内完成 _migrate_schema 增量迁移）
-sudo systemctl start amr.service
+systemctl --user start amr.service
 ```
 
-### 步骤 5：服务健康体检 (amr doctor)
+### 步骤 5：服务健康体检
 ```bash
-amr doctor --json
-# 验证 SQLite schema、Qdrant 连通性、Outbox Worker 状态均为 HEALTHY
+# 模型/引擎状态、Qdrant 集合、SQLite 路径
+python3 src/admin/cli.py status
+
+# JSON-RPC 健康与错误码冒烟（business socket）
+python3 - <<'PY'
+import asyncio
+from src.interfaces.ipc.protocol import make_jsonrpc_request, read_frame, write_frame
+async def main():
+    r, w = await asyncio.open_unix_connection("/run/user/1000/qdrant-bge.sock")
+    await write_frame(w, make_jsonrpc_request("system.health", {"agent_id": "system"}, 1))
+    print(await read_frame(r)); w.close()
+asyncio.run(main())
+PY
 ```
+确认：`model_state` 为 READY/IDLE、`qdrant_ok` 为 true、无迁移异常日志（`journalctl --user -u amr.service -n 100`）。
 
 ### 步骤 6：观测核心指标
-通过 Admin UDS 接口检查指标：
 ```bash
-amr status --metrics
+python3 src/admin/cli.py metrics
+python3 src/admin/cli.py dead-letters --limit 20
 ```
-观察 `outbox_lag_seconds` 是否逐步归零，旧队列任务是否完成排水。
+观察 `outbox_lag_seconds` 是否逐步归零、`outbox_backlog` 是否下降、`outbox_dead_letter` 是否为 0；
+旧队列 `qdrant_sync_queue` 的 pending 任务会被同一 Worker 排水（`migrated to outbox#...` / `synced` 日志）。
 
 ---
 
@@ -77,7 +99,7 @@ amr status --metrics
 ### 2. 回退操作步骤
 ```bash
 # 1. 立即停止新服务
-sudo systemctl stop amr.service
+systemctl --user stop amr.service
 
 # 2. 从备份目录恢复 SQLite 数据库
 cp /data/amr/backups/<backup_timestamp>/amr.db* /data/amr/storage/
@@ -86,7 +108,7 @@ cp /data/amr/backups/<backup_timestamp>/amr.db* /data/amr/storage/
 git checkout <previous-stable-tag>
 
 # 4. 重新启动稳定版服务
-sudo systemctl start amr.service
+systemctl --user start amr.service
 
 # 5. 验证服务状态
 amr doctor

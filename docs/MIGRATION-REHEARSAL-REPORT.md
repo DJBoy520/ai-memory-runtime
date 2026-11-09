@@ -1,65 +1,56 @@
-# AMR 阶段 A 数据库迁移预演与对账报告模板
+# AMR v5 数据库迁移预演与对账报告
 
-> **使用说明**：
-> 本报告由 `scripts/migrate_projection_queue.py --rehearse --report docs/MIGRATION-REHEARSAL-REPORT.md` 自动生成或辅助填充。
-> 在生产上线窗口执行前，运维人员必须在生产环境备份的数据库副本上完整演练一次，并核准本报告中的对账数据。
+> 本报告记录在**生产数据库只读快照副本**上执行 `scripts/migrate_projection_queue.py --rehearse` 的真实结果。
+> 源生产库全程未改动；迁移仅在临时副本上进行。
 
 ---
 
 ## 1. 预演环境与基本信息
 
-- **预演执行时间**: YYYY-MM-DD HH:MM:SS UTC
-- **执行人**: [运维工程师/开发负责人]
-- **源数据库路径**: `/data/amr/storage/amr.db`
-- **临时副本路径**: `/tmp/amr_rehearse_xxxx/rehearsal_replica.db`
-- **演练版本 Git SHA**: `[commit sha]`
-- **迁移结果状态**: `[ COMPLETED | BLOCKED ]`
+- **预演执行时间**: 2026-11-10 00:47 CST（2026-11-09 16:47 UTC）
+- **执行方式**: 编排方自动预演（Gemini 子 agent 编码 + 独立验证）
+- **源数据库路径**: `/tmp/amr-rehearsal/sessions_prod_snapshot.db`
+  （由生产 `data/sessions.db` 的 sqlite3 backup API 生成，1176 条 memories）
+- **临时副本路径**: `/tmp/amr_rehearse_ru8v7_gp/rehearsal_replica.db`
+- **演练代码版本**: `f7049ad`（feat/amr-reliability-v5 集成分支）
+- **迁移结果状态**: `COMPLETED` → **GO**
+- **源库完整性**: 迁移前后 `sha256` 一致（脚本只读复制，源库 schema 仍为 legacy_old，无 `_amr_migrations` 表）
 
 ---
 
 ## 2. 模式与资产盘点前后对账表
 
-| 维度 | 盘点项 | 迁移前 (Before) | 迁移后 (After) | 差异 (Diff) | 预期基线 |
+| 维度 | 盘点项 | 迁移前 (Before) | 迁移后 (After) | 差异 | 结论 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Schema 状态** | `memories.projection_revision` | [有/无] | 有 | +1 列 | 必须存在 |
-| | `memories.collection_name` | [有/无] | 有 | +1 列 | 必须存在 |
-| | `memories.projection_class` | [有/无] | 有 | +1 列 | 必须存在 |
-| | `memory_projection_outbox` 结构 | [旧/无/新] | 新 (v5) | 升级换表 | 无快照/point列，含revision |
-| | `_amr_migrations` 表 | [有/无] | 有 | +2 记录 | 包含回填与重建标记 |
-| **memories 事实表** | v3 记忆行数 | 0 | [数字] | 增加 | 包含 revisions/大写态的记忆 |
-| | legacy 记忆行数 | [数字] | [数字] | 减少 | 存量扁平旧记忆 |
-| | memories 总行数 | [数字] | [数字] | 0 (不变) | 严禁事实行丢失 |
-| **新投影队列** | pending 待投影任务数 | 0 | [数字] | 增加 | 旧表合法任务已平移 |
-| | done 已完成任务数 | 0 | 0 | 0 | 新建表初始无 done |
-| | dead_letter 死信任务数 | 0 | 0 | 0 | 必须为 0 |
-| **旧同步队列** | 旧队列行总数 (qdrant_sync_queue) | [数字] | [数字] | 0 (不变) | 冻结旧表，不可删除 |
-| | 旧队列中 pending 任务数 | [数字] | [数字] | 0 (不变) | 待后续 Worker 启动时排水 |
-| **隔离区 (Quarantine)**| 隔离任务总数 (`quarantine_count`) | 0 | **0** | **0** | **必须为 0，否则阻断上线** |
+| **Schema** | `memories.projection_revision` | 无 | 有 | +1 列 | ✅ |
+| | `memories.collection_name` | 无 | 有 | +1 列 | ✅ |
+| | `memories.projection_class` | 无 | 有 | +1 列 | ✅ |
+| | `memory_projection_outbox` | legacy_old | v5_new | 换表 | ✅ |
+| | `_amr_migrations` | 无 | 2 条记录 | +2 | ✅ |
+| | `idempotency_keys` | 无 | 有 | 新表 | ✅ |
+| **memories** | v3 记忆行数 | 0（未分类） | **1173** | +1173 | ✅ |
+| | legacy 记忆行数 | 0（未分类） | **3** | +3 | ✅ |
+| | memories 总行数 | **1176** | **1176** | **0** | ✅ 无事实行丢失 |
+| | 状态分布（迁移后） | — | ACTIVE 623 / HISTORICAL 522 / DELETED 27 / PENDING_VERIFY 1（v3）；DELETED 3（legacy） | — | ✅ |
+| **新投影队列** | pending / done / dead_letter | 0 / 0 / 0 | **0 / 0 / 0** | 0 | ✅ |
+| | 可转换旧任务 | 0 | 0 | 0 | ✅ |
+| **旧同步队列** | qdrant_sync_queue 总数 | **3610** | **3610** | **0** | ✅ 冻结未删 |
+| | 旧队列状态 | 全部 synced | 全部 synced | 0 | ✅ |
+| **隔离区** | `quarantine_count` | 0 | **0** | **0** | ✅ 上线门禁通过 |
+
+**分类依据**（一次性 `_amr_migrations` 门控）：
+- 存在 `memory_revisions` 行 ∨ status ∈ 大写规范集 ∨ `source_refs` 非空 → `projection_class='v3'`；
+- 其余保持 `'legacy'`。本次仅 3 条 2026-09-27 的 legacy DELETED 行（source_refs 为空、无 revisions）保持 legacy。
 
 ---
 
-## 3. 隔离区详细清单 (若非空)
-
-若存在无法转换的孤儿任务（即 memories 主表中已不存在对应行或点位缺失），清单记录如下：
+## 3. 隔离区详细清单
 
 ```json
-[
-  /*
-  示例：
-  {
-    "id": 1024,
-    "memory_id": "mem_missing_001",
-    "reason": "memory row missing (orphan)"
-  }
-  */
-]
+[]
 ```
 
-> **审批声明**：
-> 若隔离区包含任何任务，必须在此填写研发负责人审批签字：
-> - 阻断原因确认人：________________
-> - 处理方案（确认丢弃/人工补齐）：________________
-> - 批准上线签字：________________  日期：________
+> `quarantine_count = 0`，无需人工审批。
 
 ---
 
@@ -69,16 +60,29 @@
 {
   "action": "rehearse",
   "status": "completed",
-  "source_db": "/data/amr/storage/amr.db",
-  "replica_db": "/tmp/amr_rehearse_demo/rehearsal_replica.db",
-  "quarantine_count": 0,
-  "timestamp": 1731234567
+  "source_db": "/tmp/amr-rehearsal/sessions_prod_snapshot.db",
+  "replica_db": "/tmp/amr_rehearse_ru8v7_gp/rehearsal_replica.db",
+  "before": {
+    "schema_status": {"memory_projection_outbox": {"schema_type": "legacy_old"}},
+    "memories_classification": {"total": 1176, "by_projection_class": {"unclassified": 1176}},
+    "old_queue": {"total": 3610, "by_status": {"synced": 3610}}
+  },
+  "after": {
+    "schema_status": {"memory_projection_outbox": {"schema_type": "v5_new"}},
+    "memories_classification": {"total": 1176, "by_projection_class": {"legacy": 3, "v3": 1173}},
+    "new_queue": {"exists": true, "total": 0, "by_status": {}}
+  },
+  "quarantine_count": 0
 }
 ```
+
+二次初始化验证：`_amr_migrations` 两条标记不变、分类计数不变（幂等 no-op）；副本 `PRAGMA integrity_check = ok`。
 
 ---
 
 ## 5. 结论与上线决策
 
-- [ ] **准予上线 (GO)**：所有对账数据平稳，quarantine 隔离区为 0，模式加列完整。
-- [ ] **中止上线 (NO-GO)**：存在孤儿任务阻断，需退回研发分支修复数据。
+- [x] **准予上线 (GO)**：quarantine=0，模式加列完整，事实行 0 丢失，旧队列原样冻结，二次初始化幂等。
+- [ ] **中止上线 (NO-GO)**
+
+上线顺序与回退操作见 `docs/ROLLOUT-AMR-RELIABILITY.md`。
