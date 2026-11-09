@@ -150,9 +150,9 @@ def test_reconciliation_engine_lifecycle_chunky_commit():
         assert applied == 250
 
         # 检查 SQLite 状态已流转
-        cursor.execute("SELECT count(*) FROM memories WHERE status = 'deleted'")
+        cursor.execute("SELECT count(*) FROM memories WHERE status = 'DELETED'")
         assert cursor.fetchone()[0] == 250
 
-        # 检查 memory_projection_outbox 已记录
-        cursor.execute("SELECT count(*) FROM memory_projection_outbox WHERE op_type = 'delete'")
+        # 检查 qdrant_sync_queue 已记录
+        cursor.execute("SELECT count(*) FROM qdrant_sync_queue WHERE op_type = 'delete'")
         assert cursor.fetchone()[0] == 250

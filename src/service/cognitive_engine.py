@@ -602,7 +602,7 @@ class CognitiveEngine:
                 FROM memories m
                 JOIN qdrant_sync_queue q ON m.memory_id = q.memory_id
                 WHERE q.status = 'pending'
-                  AND m.status = 'active'
+                  AND m.status IN ('active', 'ACTIVE')
                   AND m.project_id IN ({placeholders})
                   AND m.created_at >= ?
                 ORDER BY m.created_at DESC
@@ -635,8 +635,8 @@ class CognitiveEngine:
         final_candidates: List[Dict[str, Any]] = []
         for mid, cand in combined_candidate_map.items():
             db_mem = self.session_store.get_memory(mid)
-            # 严格回表校验当前最新 status == 'active'
-            if not db_mem or db_mem.get("status") != "active":
+            # 严格回表校验当前最新 status == 'active' / 'ACTIVE'
+            if not db_mem or db_mem.get("status") not in ("active", "ACTIVE"):
                 continue
 
             # 校验 project_id
@@ -698,4 +698,4 @@ class CognitiveEngine:
             operator="cognitive_engine:forget",
             detail={"action": "forget", "reason": reason},
         )
-        return updated is not None and updated.get("status") == "deleted"
+        return updated is not None and updated.get("status") in ("deleted", "DELETED")

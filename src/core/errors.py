@@ -60,3 +60,54 @@ class InvalidStatusError(ValueError):
         super().__init__(message)
         self.value = value
         self.allowed = list(allowed or [])
+
+
+class LegacyPathForbidden(ValueError):
+    """legacy 记忆不可使用 v3 专用路径（如内容修改或新队列入队）。"""
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        *,
+        memory_id: Optional[str] = None,
+        projection_class: Optional[str] = None,
+        hint: Optional[str] = None,
+    ) -> None:
+        msg = message or f"Legacy memory '{memory_id}' (class={projection_class}) cannot use v3 path. {hint or ''}".strip()
+        super().__init__(msg)
+        self.memory_id = memory_id
+        self.projection_class = projection_class
+        self.hint = hint
+
+
+class IdempotencyConflict(ValueError):
+    """幂等键被不同请求复用（同 key、不同请求摘要）。"""
+
+    def __init__(
+        self,
+        op: str,
+        idem_key: str,
+        existing_memory_id: Optional[str] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        msg = message or f"Idempotency conflict for op '{op}', key '{idem_key}' (existing_memory_id={existing_memory_id})"
+        super().__init__(msg)
+        self.op = op
+        self.idem_key = idem_key
+        self.existing_memory_id = existing_memory_id
+
+
+class MigrationBlocked(RuntimeError):
+    """迁移存在不可自动转换的旧任务，已被隔离并阻止自动上线。"""
+
+    def __init__(
+        self,
+        quarantine_count: int,
+        report_path: str,
+        message: Optional[str] = None,
+    ) -> None:
+        msg = message or f"Migration blocked: {quarantine_count} task(s) quarantined. Report written to {report_path}."
+        super().__init__(msg)
+        self.quarantine_count = quarantine_count
+        self.report_path = report_path
+
