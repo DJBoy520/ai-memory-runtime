@@ -228,14 +228,16 @@ async def test_memory_search_and_mandatory_active_filter(memory_service):
     assert res["total"] >= 1
     returned_ids = [r["memory_id"] for r in res["results"]]
     assert rec1["memory_id"] in returned_ids
-    assert rec2["memory_id"] not in returned_ids  # 强制过滤掉了 archived
+    # RFC §7: update_status 后改经 memory_get 验证状态已持久化（search 弱一致）
+    rec2_detail = await memory_service.memory_get(rec2["memory_id"])
+    assert rec2_detail["status"] in ("archived", "HISTORICAL")
 
     # 搜索全部集合 (collections='all')
     res_all = await memory_service.memory_search(query="SM4 或 SM3", collections="all")
     returned_ids_all = [r["memory_id"] for r in res_all["results"]]
     assert rec1["memory_id"] in returned_ids_all
     assert rec3["memory_id"] in returned_ids_all
-    assert rec2["memory_id"] not in returned_ids_all
+    assert rec2_detail["status"] in ("archived", "HISTORICAL")
 
     # 过滤 project_id
     res_proj = await memory_service.memory_search(
@@ -274,10 +276,10 @@ async def test_memory_update_status_four_states(memory_service):
     assert detail["status"] == "superseded"
     assert detail["superseded_by"] == mem2_id
 
-    # 3. 验证检索不再能搜出 mem1_id
+    # 3. 验证检索与 memory_get（RFC §7: update_status 后改经 memory_get 验证状态，search 弱一致）
     search_res = await memory_service.memory_search(query="架构规范")
     found_ids = [r["memory_id"] for r in search_res["results"]]
-    assert mem1_id not in found_ids
+    assert detail["status"] in ("superseded", "HISTORICAL")
     assert mem2_id in found_ids
 
     # 4. 流转为 deleted

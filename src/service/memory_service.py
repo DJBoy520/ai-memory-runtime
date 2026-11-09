@@ -5,9 +5,12 @@ AI Memory Runtime - Memory Service 核心语义服务层
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import uuid
@@ -16,8 +19,12 @@ from qdrant_client import models
 
 from config.settings import AppConfig, load_config
 from src.core.engine import BGEM3Engine
+from src.core.errors import IdempotencyConflict, LegacyPathForbidden, VersionConflictError
+from src.core.idempotency import compute_request_digest
 from src.core.qdrant import QdrantManager, STANDARD_COLLECTIONS
+from src.core.request_context import get_request_id
 from src.core.session_store import SessionStore
+from src.service.memory_status import CANONICAL_STATUSES, normalize_status
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,8 @@ class MemoryService:
         self.qdrant = qdrant_manager or QdrantManager.get_instance(config=self.config.qdrant)
         self.session_store = session_store or SessionStore(config=self.config.storage)
         self._cached_tokenizer = None
+        self._enrich_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mem_enrich")
+        self._enrich_semaphore = threading.Semaphore(2)
 
     def _generate_memory_id(self) -> str:
         """生成符合 mem_YYYYMMDD_xxxxxx 格式的全局唯一 ID"""
@@ -451,6 +460,7 @@ class MemoryService:
                 evidence=evidence,
                 operator=source_agent or "system",
                 qdrant_payload=payload_with_point,
+                collection_name=collection_name,
             )
 
         # 写入 Qdrant
@@ -478,26 +488,146 @@ class MemoryService:
 
     async def memory_get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """
-        精准提取记忆与溯源
-        - 从 Qdrant 获取记忆详情及元数据；
-        - 若包含 session_id 与 source_message_ids，从 SessionStore 查询原始对话内容并组装 raw_messages 一起返回；
-        - 若该 memory_id 存在多个切片，将组合完整信息。
+        精准提取记忆与溯源 (SQLite SSOT + Best-effort Payload 富化)
+        - 先从 SQLite 读取 (SessionStore.get_memory)；
+        - SQLite 命中时，权威字段全部取自 SQLite，绝不被 payload 覆盖；
+        - 富化唯一 legacy 键：meta.tags、parent_memory_id、chunk_index、total_chunks、session_id、source_message_ids、raw_messages；
+        - 工程约束：专用线程池(2)，信号量(2)非阻塞获取(拿不到立即 degraded)，wait_for(0.2s)超时降级；
+        - SQLite 无行时退回 Qdrant 路径 (enrichment="ok")；
+        - SQLite 自身异常如实抛出。
         """
-        point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, memory_id)
-        if not point_info:
-            return None
+        # 1. 尝试从 SQLite (SSOT) 读取
+        mem_row = await asyncio.to_thread(self.session_store.get_memory, memory_id)
 
-        payload = point_info["payload"]
-        sess_id = payload.get("session_id")
-        src_msg_ids = payload.get("source_message_ids") or []
+        # 2. SQLite 无行：退回现 Qdrant 路径（保持旧返回形态，enrichment="ok"）
+        if mem_row is None:
+            point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, memory_id)
+            if not point_info:
+                return None
 
-        # 从 SessionStore 查询关联的原始对话
-        raw_messages: List[Dict[str, Any]] = []
-        if sess_id and src_msg_ids:
+            payload = point_info["payload"] or {}
+            sess_id = payload.get("session_id")
+            src_msg_ids = payload.get("source_message_ids") or []
+
+            raw_messages: List[Dict[str, Any]] = []
+            if sess_id and src_msg_ids:
+                try:
+                    db_msgs = await asyncio.to_thread(
+                        self.session_store.get_messages,
+                        session_id=sess_id,
+                        message_ids=src_msg_ids,
+                    )
+                    raw_messages = [
+                        {
+                            "message_id": m.get("message_id"),
+                            "role": m.get("role"),
+                            "content": m.get("content"),
+                            "timestamp": m.get("timestamp"),
+                        }
+                        for m in (db_msgs or [])
+                    ]
+                except Exception as e:
+                    logger.error(f"Failed to fetch raw messages for session {sess_id}: {e}")
+
+            p_type = payload.get("type") or payload.get("memory_type", "general")
+            return {
+                "memory_id": payload.get("memory_id"),
+                "parent_memory_id": payload.get("parent_memory_id"),
+                "chunk_index": payload.get("chunk_index", 0),
+                "total_chunks": payload.get("total_chunks", 1),
+                "content": payload.get("content", ""),
+                "memory_type": p_type,
+                "type": p_type,
+                "status": payload.get("status"),
+                "superseded_by": payload.get("superseded_by"),
+                "scope": payload.get("scope"),
+                "project_id": payload.get("project_id"),
+                "source_agent": payload.get("source_agent"),
+                "session_id": sess_id,
+                "source_message_ids": src_msg_ids,
+                "raw_messages": raw_messages,
+                "meta": payload.get("meta", {}),
+                "created_at": payload.get("created_at"),
+                "updated_at": payload.get("updated_at"),
+                "enrichment": "ok",
+            }
+
+        # 3. SQLite 命中：提取权威字段（绝不被 payload 覆盖）
+        mid = mem_row["memory_id"]
+        content = mem_row["content"]
+        m_type = mem_row.get("type") or "general"
+        m_status = mem_row.get("status") or "ACTIVE"
+        project_id = mem_row.get("project_id", "global")
+        scope = mem_row.get("scope", "global")
+        source_agent = mem_row.get("source_agent") or mem_row.get("created_by_agent", "system")
+        created_by_agent = mem_row.get("created_by_agent") or mem_row.get("source_agent", "system")
+        updated_by_agent = mem_row.get("updated_by_agent") or source_agent
+        version = mem_row.get("version", 1)
+        superseded_by = mem_row.get("superseded_by")
+        created_at = mem_row.get("created_at")
+        updated_at = mem_row.get("updated_at")
+        p_class = mem_row.get("projection_class", "legacy")
+
+        # 提取 SQLite 可得的溯源与族信息
+        root_mid = mem_row.get("root_memory_id")
+        parent_memory_id = root_mid if (root_mid and root_mid != mid) else None
+        evidence = mem_row.get("evidence") or []
+        session_id = evidence[0]["session_id"] if evidence else None
+        source_message_ids = [e["message_id"] for e in evidence if "message_id" in e] if evidence else None
+        chunk_index = None
+        total_chunks = None
+        meta = None
+
+        # 4. Best-effort 富化（工程约束：专用线程池、非阻塞信号量、0.2s 超时）
+        enrichment_status = "degraded"
+        payload = None
+
+        acquired = self._enrich_semaphore.acquire(blocking=False)
+        if acquired:
             try:
-                db_msgs = self.session_store.get_messages(
-                    session_id=sess_id,
-                    message_ids=src_msg_ids,
+                loop = asyncio.get_running_loop()
+                point_info = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        self._enrich_executor,
+                        self.qdrant.get_point_by_memory_id,
+                        mid,
+                    ),
+                    timeout=0.2,
+                )
+                if point_info and point_info.get("payload"):
+                    payload = point_info["payload"]
+                enrichment_status = "ok"
+            except Exception as e:
+                logger.warning(f"Qdrant enrichment degraded for {mid}: {e}")
+                enrichment_status = "degraded"
+            finally:
+                self._enrich_semaphore.release()
+        else:
+            logger.warning(f"Qdrant enrichment degraded for {mid}: semaphore busy (zero queue)")
+            enrichment_status = "degraded"
+
+        if enrichment_status == "ok" and payload:
+            if parent_memory_id is None:
+                parent_memory_id = payload.get("parent_memory_id")
+            if chunk_index is None:
+                chunk_index = payload.get("chunk_index")
+            if total_chunks is None:
+                total_chunks = payload.get("total_chunks")
+            if session_id is None:
+                session_id = payload.get("session_id")
+            if source_message_ids is None:
+                source_message_ids = payload.get("source_message_ids")
+            if meta is None:
+                meta = payload.get("meta")
+
+        # 5. raw_messages 溯源消息提取 (同样 best-effort)
+        raw_messages: Optional[List[Dict[str, Any]]] = None
+        if session_id and source_message_ids:
+            try:
+                db_msgs = await asyncio.to_thread(
+                    self.session_store.get_messages,
+                    session_id=session_id,
+                    message_ids=source_message_ids,
                 )
                 raw_messages = [
                     {
@@ -506,30 +636,69 @@ class MemoryService:
                         "content": m.get("content"),
                         "timestamp": m.get("timestamp"),
                     }
-                    for m in db_msgs
+                    for m in (db_msgs or [])
                 ]
             except Exception as e:
-                logger.error(f"Failed to fetch raw messages for session {sess_id}: {e}")
+                logger.warning(f"Failed to fetch raw messages for session {session_id}: {e}")
+                raw_messages = None
+        else:
+            if enrichment_status == "ok":
+                raw_messages = []
+            else:
+                raw_messages = None
+
+        # 6. legacy 兼容的状态映射
+        if p_class == "legacy":
+            if m_status in ("HISTORICAL", "superseded") and superseded_by:
+                ret_status = "superseded"
+            elif m_status in ("HISTORICAL", "archived") and not superseded_by:
+                ret_status = "archived"
+            elif m_status in ("DELETED", "deleted"):
+                ret_status = "deleted"
+            elif m_status in ("ACTIVE", "active"):
+                ret_status = "active"
+            else:
+                ret_status = m_status
+        else:
+            ret_status = normalize_status(m_status)
 
         result: Dict[str, Any] = {
-            "memory_id": payload.get("memory_id"),
-            "parent_memory_id": payload.get("parent_memory_id"),
-            "chunk_index": payload.get("chunk_index", 0),
-            "total_chunks": payload.get("total_chunks", 1),
-            "content": payload.get("content", ""),
-            "memory_type": payload.get("memory_type"),
-            "status": payload.get("status"),
-            "superseded_by": payload.get("superseded_by"),
-            "scope": payload.get("scope"),
-            "project_id": payload.get("project_id"),
-            "source_agent": payload.get("source_agent"),
-            "session_id": sess_id,
-            "source_message_ids": src_msg_ids,
+            "memory_id": mid,
+            "content": content,
+            "type": m_type,
+            "memory_type": m_type,
+            "status": ret_status,
+            "project_id": project_id,
+            "scope": scope,
+            "source_agent": source_agent,
+            "created_by_agent": created_by_agent,
+            "updated_by_agent": updated_by_agent,
+            "version": version,
+            "superseded_by": superseded_by,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "enrichment": enrichment_status,
+            "meta": meta,
+            "parent_memory_id": parent_memory_id,
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "session_id": session_id,
+            "source_message_ids": source_message_ids,
             "raw_messages": raw_messages,
-            "meta": payload.get("meta", {}),
-            "created_at": payload.get("created_at"),
-            "updated_at": payload.get("updated_at"),
         }
+        if p_class == "v3":
+            try:
+                result["source_refs"] = json.loads(mem_row.get("source_refs") or "[]")
+            except Exception:
+                result["source_refs"] = []
+            try:
+                result["conflicts_with"] = json.loads(mem_row.get("conflicts_with") or "[]")
+            except Exception:
+                result["conflicts_with"] = []
+            result["projection_revision"] = mem_row.get("projection_revision", 0)
+            result["collection_name"] = mem_row.get("collection_name", "ai_memory")
+            result["projection_class"] = "v3"
+
         return result
 
     async def memory_update_status(
@@ -539,45 +708,38 @@ class MemoryService:
         superseded_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        记忆四态流转 (active / superseded / archived / deleted)
-        - 验证状态合法性；
-        - 若为 superseded，必须提供 superseded_by；
-        - 更新 Qdrant 中该 memory_id 及其对应 chunk 的 payload 状态；
-        - 返回 { memory_id, previous_status, current_status, updated_at }。
+        记忆状态流转 (统一分派 store.change_memory_status)
+        - 使用 normalize_status 校验 canonical 6 态；
+        - HISTORICAL 需 superseded_by（保留旧契约但映射 legacy 'superseded'）；
+        - 调 store.change_memory_status(actor=..., superseded_by=...)；
+        - 返回 previous_status / current_status / updated_at。
         """
-        if new_status not in VALID_STATUSES:
-            raise ValueError(f"Invalid status '{new_status}', must be one of {VALID_STATUSES}")
-
-        if new_status == "superseded" and not superseded_by:
+        canonical = normalize_status(new_status)
+        if canonical not in CANONICAL_STATUSES:
+            raise ValueError(f"Invalid status '{new_status}', must be one of {CANONICAL_STATUSES}")
+        if (canonical == "HISTORICAL" or new_status.lower() == "superseded") and new_status.lower() != "archived" and not superseded_by:
             raise ValueError("superseded_by is required when new_status is 'superseded'")
 
-        # 获取当前状态
-        current_item = await self.memory_get(memory_id)
-        if not current_item:
-            raise KeyError(f"Memory with ID '{memory_id}' not found")
-
-        prev_status = current_item["status"]
-        now_ts = int(time.time())
-
-        payload_updates: Dict[str, Any] = {
-            "status": new_status,
-            "updated_at": now_ts,
-        }
-        if new_status == "superseded":
-            payload_updates["superseded_by"] = superseded_by
-
-        # 执行更新
-        await asyncio.to_thread(
-            self.qdrant.update_payload_by_memory_id,
+        res = await asyncio.to_thread(
+            self.session_store.change_memory_status,
             memory_id=memory_id,
-            payload_updates=payload_updates,
+            new_status=canonical,
+            actor="system",
+            superseded_by=superseded_by,
         )
+
+        prev_st = res.get("previous_status")
+        curr_st = res.get("current_status")
+        if new_status in ("superseded", "archived", "deleted", "active"):
+            curr_st = new_status
+        if prev_st and prev_st.upper() == "ACTIVE" and new_status.islower():
+            prev_st = "active"
 
         return {
             "memory_id": memory_id,
-            "previous_status": prev_status,
-            "current_status": new_status,
-            "updated_at": now_ts,
+            "previous_status": prev_st,
+            "current_status": curr_st,
+            "updated_at": res.get("updated_at", int(time.time())),
         }
 
     async def memory_ingest_session(
@@ -613,63 +775,24 @@ class MemoryService:
         source_refs: Optional[List[str]] = None,
         conflicts_with: Optional[List[str]] = None,
         collection_name: str = "ai_memory",
+        idempotency_key: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        v3.0 记忆创建内核（memory_create 标准入口）：
-        - 生成 memory_id；
-        - SQLite SSOT 原子入库（memories + revisions + Outbox + audit）；
-        - Qdrant 确定性 point_id(UUIDv5) 写入 9 字段 Payload。
+        旧方法名薄包装（供旧调用兼容，零同步 I/O，直接代理到 memory_create）。
         """
-        memory_id = self._generate_memory_id()
-        point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, memory_id))
-        text = content.strip()
-
-        # 1. 向量生成 (调用 BGEM3Engine)
-        embeddings = await self.engine.embed([text])
-        vector = embeddings[0]
-
-        # 2. SQLite SSOT 原子入库 (含 Outbox 与双向冲突标记)
-        store_res = await asyncio.to_thread(
-            self.session_store.create_memory_v3,
-            memory_id=memory_id,
-            content=text,
-            project_id=project_id or "global",
-            type=type or "general",
-            status=status or "ACTIVE",
-            created_by_agent=agent_id,
-            source_refs=source_refs or [],
-            conflicts_with=conflicts_with or [],
-            qdrant_point_id=point_id,
-            operator=agent_id,
-        )
-
-        # 3. 构造 9 字段 Payload 写入 Qdrant
-        now_ts = int(time.time())
-        payload = {
-            "memory_id": memory_id,
-            "version": 1,
-            "content": text,
-            "project_id": project_id or "global",
-            "type": type or "general",
-            "status": (status or "ACTIVE").upper(),
-            "created_by_agent": agent_id,
-            "updated_by_agent": agent_id,
-            "updated_at": now_ts,
-        }
-
-        point = models.PointStruct(
-            id=point_id,
-            vector=vector,
-            payload=payload,
-        )
-
-        await asyncio.to_thread(
-            self.qdrant.upsert_points,
+        return await self.memory_create(
+            content=content,
+            project_id=project_id,
+            type=type,
+            status=status,
+            agent_id=agent_id,
+            source_refs=source_refs,
+            conflicts_with=conflicts_with,
             collection_name=collection_name,
-            points=[point],
+            idempotency_key=idempotency_key,
+            request_id=request_id,
         )
-
-        return store_res
 
     async def memory_create(
         self,
@@ -681,27 +804,62 @@ class MemoryService:
         source_refs: Optional[List[str]] = None,
         conflicts_with: Optional[List[str]] = None,
         collection_name: str = "ai_memory",
+        idempotency_key: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        v3.0 标准创建记忆：
-        - 校验内容与 6 态规则
-        - 由 SessionStore 生成 SQLite 实体、版本快照(v1)与发件箱任务
-        - 计算 1024 维向量并同步写入 Qdrant 9 字段 Payload
-        - 返回标准记忆对象
+        v3.0 标准创建记忆（SQLite 提交即成功，零 embed、零 Qdrant I/O）：
+        - 服务端 ID 在事务内生成并进快照；
+        - store.execute_idempotent 带幂等仲裁与事务隔离；
+        - business_fn 调 store.create_memory_v3(cursor=cursor, collection_name=..., request_id=...)；
+        - 返回 result 至少含 memory_id/version/status/projection_status="pending"/projection_revision/collection_name；
+        - 重放时附 idempotent_replay=True。
         """
         if not content or not content.strip():
             raise ValueError("content must not be empty")
 
-        return await self._create_v3_memory(
-            content=content,
-            project_id=project_id,
-            type=type,
-            status=status,
-            agent_id=agent_id,
-            source_refs=source_refs,
-            conflicts_with=conflicts_with,
-            collection_name=collection_name,
+        req_id = request_id or get_request_id()
+        canonical_st = normalize_status(status)
+
+        # 幂等摘要字段：content/project_id/type/status/agent_id/source_refs/conflicts_with/collection_name（排除 memory_id）
+        digest_payload = {
+            "content": content,
+            "project_id": project_id or "global",
+            "type": type or "general",
+            "status": status,
+            "agent_id": agent_id or "system",
+            "source_refs": source_refs,
+            "conflicts_with": conflicts_with,
+            "collection_name": collection_name or "ai_memory",
+        }
+        digest = compute_request_digest("create", digest_payload)
+
+        def business_fn(cur):
+            mid = self._generate_memory_id()
+            res = self.session_store.create_memory_v3(
+                memory_id=mid,
+                content=content,
+                project_id=project_id or "global",
+                type=type or "general",
+                status=canonical_st,
+                created_by_agent=agent_id or "system",
+                source_refs=source_refs,
+                conflicts_with=conflicts_with,
+                collection_name=collection_name or "ai_memory",
+                request_id=req_id,
+                cursor=cur,
+            )
+            return (mid, res)
+
+        res = await asyncio.to_thread(
+            self.session_store.execute_idempotent,
+            "create",
+            idempotency_key,
+            digest,
+            business_fn,
+            agent_id_raw=agent_id or "default",
         )
+        return res
 
     async def memory_update(
         self,
@@ -714,74 +872,124 @@ class MemoryService:
         agent_id: str = "system",
         conflicts_with: Optional[List[str]] = None,
         collection_name: str = "ai_memory",
+        idempotency_key: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        v3.0 标准修改记忆：
-        - 仅修改 type / status：就地更新元数据，不递增版本，不写 revisions 表，直接更新 Qdrant Payload
-        - 修改 content：
-            - 必须校验 expected_version（乐观锁）
-            - 必须提供 change_reason
-            - version ++ 并落入 memory_revisions 表
-            - 重算 Embedding 向量并覆盖 Qdrant Point
+        v3.0 标准修改记忆（SQLite 提交即成功，零 embed、零 Qdrant I/O）：
+        - 先读 store.get_memory(memory_id) 判断 projection_class：
+            - 'legacy'：content 变更 -> raise LegacyPathForbidden；type 变更 -> LegacyPathForbidden；
+              status 变更 -> store.change_memory_status(cursor=None, ...)；不允许走 update_memory_v3。
+            - 'v3'：execute_idempotent("update", ...) -> store.update_memory_v3(cursor=cursor)。
+        - digest 字段：memory_id/content/type/status/expected_version/change_reason/agent_id/conflicts_with/collection_name。
+        - 返回 projection_status="pending"。
         """
-        # 1. 执行 SQLite SSOT 更新与校验
-        updated_item = await asyncio.to_thread(
-            self.session_store.update_memory_v3,
-            memory_id=memory_id,
-            content=content,
-            type=type,
-            status=status,
-            expected_version=expected_version,
-            change_reason=change_reason,
-            agent_id=agent_id,
-            conflicts_with=conflicts_with,
-        )
+        if not memory_id or not memory_id.strip():
+            raise ValueError("memory_id must not be empty")
 
-        # 2. Qdrant 同步
-        point_id = updated_item["qdrant_point_id"]
-        now_ts = int(time.time())
+        mem_row = await asyncio.to_thread(self.session_store.get_memory, memory_id)
+        if mem_row is None:
+            def _check_family():
+                with self.session_store._lock:
+                    con = self.session_store._get_connection()
+                    rows = self.session_store.resolve_memory_family(con.cursor(), memory_id)
+                    return dict(rows[0]) if rows else None
+            mem_row = await asyncio.to_thread(_check_family)
+        if mem_row is None:
+            raise KeyError(f"Memory '{memory_id}' not found")
 
-        if content is not None and content.strip() != "":
-            # 内容变更：重算向量并覆盖
-            embeddings = await self.engine.embed([content.strip()])
-            new_vector = embeddings[0]
+        p_class = mem_row.get("projection_class", "legacy")
+        if p_class == "legacy":
+            if content is not None:
+                raise LegacyPathForbidden(
+                    memory_id=memory_id,
+                    projection_class=p_class,
+                    hint="legacy 记忆不支持正文变更",
+                )
+            if type is not None:
+                raise LegacyPathForbidden(
+                    memory_id=memory_id,
+                    projection_class=p_class,
+                    hint="legacy 记忆不支持类型变更",
+                )
+            if status is not None:
+                digest_payload = {
+                    "memory_id": memory_id,
+                    "content": content,
+                    "type": type,
+                    "status": status,
+                    "expected_version": expected_version,
+                    "change_reason": change_reason,
+                    "agent_id": agent_id or "system",
+                    "conflicts_with": conflicts_with,
+                    "collection_name": collection_name or "ai_memory",
+                }
+                digest = compute_request_digest("update", digest_payload)
 
-            payload = {
-                "memory_id": memory_id,
-                "version": updated_item["version"],
-                "content": content.strip(),
-                "project_id": updated_item["project_id"],
-                "type": updated_item["type"],
-                "status": (updated_item["status"] or "ACTIVE").upper(),
-                "created_by_agent": updated_item["created_by_agent"],
-                "updated_by_agent": agent_id,
-                "updated_at": now_ts,
-            }
-            point = models.PointStruct(
-                id=point_id,
-                vector=new_vector,
-                payload=payload,
-            )
-            await asyncio.to_thread(
-                self.qdrant.upsert_points,
-                collection_name=collection_name,
-                points=[point],
-            )
-        else:
-            # 仅元数据更新：update_payload
-            payload_updates = {
-                "type": updated_item["type"],
-                "status": (updated_item["status"] or "ACTIVE").upper(),
-                "updated_by_agent": agent_id,
-                "updated_at": now_ts,
-            }
-            await asyncio.to_thread(
-                self.qdrant.update_payload_by_memory_id,
+                def legacy_fn(cur):
+                    st_res = self.session_store.change_memory_status(
+                        memory_id=memory_id,
+                        new_status=status,
+                        actor=agent_id or "system",
+                        reason=change_reason,
+                        cursor=cur,
+                    )
+                    st_res["projection_status"] = "pending"
+                    return (memory_id, st_res)
+
+                res = await asyncio.to_thread(
+                    self.session_store.execute_idempotent,
+                    "update",
+                    idempotency_key,
+                    digest,
+                    legacy_fn,
+                    agent_id_raw=agent_id or "default",
+                )
+                if "projection_status" not in res:
+                    res["projection_status"] = "pending"
+                return res
+
+            return {**mem_row, "projection_status": "pending"}
+
+        # v3 路径
+        digest_payload = {
+            "memory_id": memory_id,
+            "content": content,
+            "type": type,
+            "status": status,
+            "expected_version": expected_version,
+            "change_reason": change_reason,
+            "agent_id": agent_id or "system",
+            "conflicts_with": conflicts_with,
+            "collection_name": collection_name or "ai_memory",
+        }
+        digest = compute_request_digest("update", digest_payload)
+
+        def v3_fn(cur):
+            up_res = self.session_store.update_memory_v3(
                 memory_id=memory_id,
-                payload_updates=payload_updates,
+                content=content,
+                type=type,
+                status=status,
+                expected_version=expected_version,
+                change_reason=change_reason,
+                agent_id=agent_id or "system",
+                conflicts_with=conflicts_with,
+                cursor=cur,
             )
+            return (memory_id, up_res)
 
-        return updated_item
+        res = await asyncio.to_thread(
+            self.session_store.execute_idempotent,
+            "update",
+            idempotency_key,
+            digest,
+            v3_fn,
+            agent_id_raw=agent_id or "default",
+        )
+        if "projection_status" not in res:
+            res["projection_status"] = "pending"
+        return res
 
     async def memory_history(self, memory_id: str) -> Dict[str, Any]:
         """查询某条记忆的所有历史修订版本轨迹"""
@@ -803,12 +1011,45 @@ class MemoryService:
         memory_id: str,
         agent_id: str = "system",
         reason: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """逻辑软删除记忆：状态置为 DELETED，常规与历史检索隐藏，保留底账与审计"""
-        return await self.memory_update(
-            memory_id=memory_id,
-            status="DELETED",
-            change_reason=reason or "Soft deleted via memory_delete",
-            agent_id=agent_id,
+        """
+        逻辑软删除记忆（SQLite 提交即成功，零 Qdrant I/O）：
+        - 统一走 store.change_memory_status(memory_id, "DELETED", actor=agent_id, reason=reason)；
+          v3 行走新队列（Worker 删点），legacy 行走 amr_delta_v1 op='delete'；
+        - 支持 idempotency_key（digest 含 memory_id/reason/agent_id）；
+        - 返回 projection_status="pending"。
+        """
+        if not memory_id or not memory_id.strip():
+            raise ValueError("memory_id must not be empty")
+
+        digest_payload = {
+            "memory_id": memory_id,
+            "reason": reason,
+            "agent_id": agent_id or "system",
+        }
+        digest = compute_request_digest("delete", digest_payload)
+
+        def delete_fn(cur):
+            del_res = self.session_store.change_memory_status(
+                memory_id=memory_id,
+                new_status="DELETED",
+                actor=agent_id or "system",
+                reason=reason,
+                cursor=cur,
+            )
+            del_res["projection_status"] = "pending"
+            return (memory_id, del_res)
+
+        res = await asyncio.to_thread(
+            self.session_store.execute_idempotent,
+            "delete",
+            idempotency_key,
+            digest,
+            delete_fn,
+            agent_id_raw=agent_id or "default",
         )
+        if "projection_status" not in res:
+            res["projection_status"] = "pending"
+        return res
 
