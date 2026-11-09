@@ -20,6 +20,7 @@ from config.settings import AppConfig, load_config
 from src.core.session_store import SessionStore
 from src.reconciliation.policy_gate import PolicyGate, CandidateState
 from src.reconciliation.rules import RuleEngine
+from src.service.memory_status import normalize_status
 
 
 class ReconciliationEngine:
@@ -138,7 +139,7 @@ class ReconciliationEngine:
             SELECT memory_id, qdrant_point_id, type, subject, predicate, object,
                    content, status, confidence, importance, project_id, scope, source_agent, version
             FROM memories
-            WHERE status IN ('active', 'stale')
+            WHERE LOWER(status) IN ('active', 'stale')
             """
         )
         rows = [dict(r) for r in cursor.fetchall()]
@@ -211,7 +212,7 @@ class ReconciliationEngine:
             chunk = approved_candidates[i : i + chunk_size]
             for cand in chunk:
                 mid = cand["memory_id"]
-                new_status = cand["proposed_status"]
+                new_status = normalize_status(cand["proposed_status"])
                 reason = cand["reason"]
 
                 # 走统一状态流转分派 (支持 v3 新队列与 legacy 受控旧队列)
@@ -274,13 +275,13 @@ class ReconciliationEngine:
         invalid_in_qdrant = []
         for pid in qdrant_points:
             st = sqlite_map.get(pid)
-            if st is None or st in ("deleted", "archived", "DELETED", "HISTORICAL"):
+            if st is None or normalize_status(st) in ("DELETED", "HISTORICAL"):
                 invalid_in_qdrant.append(pid)
 
         # 2. SQLite 中为 active/stale 但 Qdrant 中缺失的点位 (需补充同步)
         missing_in_qdrant = []
         for pid, st in sqlite_map.items():
-            if st in ("active", "ACTIVE", "stale", "STALE") and pid not in qdrant_points:
+            if normalize_status(st) in ("ACTIVE", "STALE") and pid not in qdrant_points:
                 missing_in_qdrant.append(pid)
 
         recon_report = {
