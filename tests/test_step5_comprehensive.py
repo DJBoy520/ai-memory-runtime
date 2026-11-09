@@ -220,6 +220,7 @@ async def test_memory_search_exact_match(mock_service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_status", ["superseded", "archived", "deleted"])
 async def test_memory_search_filters_non_active(mock_service, target_status):
+    from src.service.memory_status import normalize_status
     rec = await mock_service.memory_record(content=f"Old statement to be {target_status}")
     mem_id = rec["memory_id"]
 
@@ -230,9 +231,9 @@ async def test_memory_search_filters_non_active(mock_service, target_status):
     found_ids = [r["memory_id"] for r in search_res["results"]]
     assert mem_id not in found_ids
 
-    # But memory_get still returns it for historical audit
+    # But memory_get still returns it for historical audit (§7: 状态期望按 normalize 映射更新)
     item = await mock_service.memory_get(mem_id)
-    assert item["status"] == target_status
+    assert normalize_status(item["status"]) == normalize_status(target_status)
     if target_status == "superseded":
         assert item["superseded_by"] == "mem_replacement_999"
 

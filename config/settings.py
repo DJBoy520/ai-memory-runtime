@@ -59,6 +59,7 @@ class StorageConfig(BaseModel):
     sqlite_path: str = "data/sessions.db"
     busy_timeout: int = 5000
     wal_enabled: bool = True
+    idempotency_retention_days: int = 7
 
     # 兼容 wal_mode 命名访问
     @property
