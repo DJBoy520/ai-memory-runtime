@@ -4,6 +4,11 @@ import pytest
 import uuid
 from src.interfaces.mcp.bridge import MCPBridge
 
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("AMR_TEST_LIVE_DAEMON"),
+    reason="requires live AMR daemon; set AMR_TEST_LIVE_DAEMON=1 with AMR_TEST_DAEMON_SOCKET",
+)
+
 @pytest.mark.asyncio
 async def test_mcp_bridge_e2e_flow():
     bridge = MCPBridge(source_agent="hermes")

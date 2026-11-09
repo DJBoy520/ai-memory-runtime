@@ -30,20 +30,36 @@ logger = logging.getLogger("AMR-Daemon")
 
 
 class AMRApplication:
-    def __init__(self, config_path: str = None):
-        cfg_file = Path(config_path) if config_path else Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+    def __init__(
+        self,
+        config_path: str = None,
+        *,
+        engine=None,
+        qdrant_manager=None,
+        session_store=None,
+    ):
+        if config_path:
+            cfg_file = Path(config_path)
+        elif os.environ.get("AMR_CONFIG_PATH"):
+            cfg_file = Path(os.environ["AMR_CONFIG_PATH"])
+        else:
+            cfg_file = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+
         check_and_fix_file_permissions(cfg_file)
         self.config = load_config(cfg_file)
 
         logger.info("Initializing Storage (SQLite WAL)...")
-        self.session_store = SessionStore(config=self.config)
+        self.session_store = session_store if session_store is not None else SessionStore(config=self.config)
 
         logger.info("Initializing BGE-M3 Engine (Tesla P4 GPU)...")
-        self.engine = BGEM3Engine(config=self.config.model)
+        self.engine = engine if engine is not None else BGEM3Engine(config=self.config.model)
 
         logger.info("Initializing Qdrant Manager...")
-        self.qdrant_manager = QdrantManager(config=self.config.qdrant)
-        self.qdrant_manager.ensure_standard_collections()
+        if qdrant_manager is not None:
+            self.qdrant_manager = qdrant_manager
+        else:
+            self.qdrant_manager = QdrantManager(config=self.config.qdrant)
+            self.qdrant_manager.ensure_standard_collections()
 
         logger.info("Initializing Semantic Memory Service...")
         self.memory_service = MemoryService(
@@ -234,5 +250,5 @@ async def main():
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
+    except KeyboardInterrupt:
         pass
