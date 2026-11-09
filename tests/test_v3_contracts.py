@@ -206,22 +206,37 @@ def test_v3_status_transition_guard(store):
 async def test_v3_qwenwork_and_system_health_rpc():
     from src.main import AMRApplication
     from config.settings import AppConfig, ServerConfig
-    
+    from unittest.mock import AsyncMock, MagicMock
+
     # 验证 AppConfig 默认 allowed_agents 包含 qwenwork
     cfg = AppConfig()
     assert "qwenwork" in cfg.server.allowed_agents
-    
-    app = AMRApplication()
+
+    # §7 隔离改造：注入 fake engine/qdrant_manager/session_store，不得连真实 Qdrant/生产库
+    fake_engine = MagicMock()
+    fake_engine.state = MagicMock(value="ready")
+    fake_engine.get_model_status = AsyncMock(return_value={"state": "ready", "model": "fake"})
+
+    fake_qdrant = MagicMock()
+    fake_qdrant.is_healthy.return_value = True
+
+    fake_store = MagicMock()
+
+    app = AMRApplication(
+        engine=fake_engine,
+        qdrant_manager=fake_qdrant,
+        session_store=fake_store,
+    )
     # 1. 验证 qwenwork 调用被许可
     health_res = await app.dispatch_business_rpc("system.health", {"agent_id": "qwenwork"})
     assert health_res["status"] == "healthy"
     assert health_res["sqlite_ok"] is True
-    
+
     # 2. 验证 system.status
     status_res = await app.dispatch_business_rpc("system.status", {"agent_id": "qwenwork"})
     assert status_res["status"] == "running"
     assert "qwenwork" in status_res["allowed_agents"]
-    
+
     # 3. 验证未知未授权 agent 抛出 AGENT_UNAUTHORIZED
     with pytest.raises(ValueError, match="AGENT_UNAUTHORIZED"):
         await app.dispatch_business_rpc("system.health", {"agent_id": "malicious_bot"})

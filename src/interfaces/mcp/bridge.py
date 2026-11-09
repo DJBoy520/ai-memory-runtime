@@ -49,6 +49,16 @@ DEFAULT_SOURCE_AGENT = os.environ.get("AMR_SOURCE_AGENT", "openclaw")
 DEFAULT_CALL_TIMEOUT_SECONDS = float(os.environ.get("AMR_BRIDGE_TIMEOUT_SECONDS", "120"))
 
 
+class DaemonRpcError(Exception):
+    """Encapsulates JSON-RPC error code, message, and data returned by the daemon."""
+
+    def __init__(self, code: int, message: str, data: Optional[Any] = None) -> None:
+        super().__init__(f"[{code}] {message}")
+        self.code = code
+        self.message = message
+        self.data = data
+
+
 class MCPBridge:
     def __init__(
         self,
@@ -79,7 +89,10 @@ class MCPBridge:
                 ) from None
             if "error" in resp_dict and resp_dict["error"]:
                 err = resp_dict["error"]
-                raise RuntimeError(f"Daemon RPC Error ({err.get('code')}): {err.get('message')}")
+                code = err.get("code", -32603)
+                msg = err.get("message", "")
+                data = err.get("data")
+                raise DaemonRpcError(code=code, message=msg, data=data)
             return resp_dict.get("result", {})
         finally:
             writer.close()
@@ -160,6 +173,22 @@ class MCPBridge:
                         ],
                         "isError": False
                     }
+                }
+            except DaemonRpcError as e:
+                sys.stderr.write(f"[AMR-Bridge] Daemon RPC error executing {tool_name}: {e}\n")
+                lines = [f"[{e.code}] {e.message}"]
+                if e.data is not None:
+                    lines.append(json.dumps(e.data, ensure_ascii=False))
+                error_text = "\n".join(lines)
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": error_text}
+                        ],
+                        "isError": True,
+                    },
                 }
             except Exception as e:
                 sys.stderr.write(f"[AMR-Bridge] Error executing {tool_name}: {e}\n")
