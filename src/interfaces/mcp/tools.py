@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 TOOL_DEFINITIONS = [
     {
         "name": "memory_search",
-        "description": "Semantic search across long-term memories. By default returns current valid facts (status=ACTIVE). Supports history lookup (include_history=true) and domain filtering.",
+        "description": "Semantic search across long-term memories (weakly consistent with recent writes while asynchronous projection is pending). By default returns current valid facts (status=ACTIVE). Supports history lookup (include_history=true) and domain filtering.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -64,7 +64,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_create",
-        "description": "Create a new durable shared memory. AMR automatically tracks version=1, timestamps, and caller agent_id.",
+        "description": "Create a new durable shared memory. SQLite committed immediately with projection_status='pending' (asynchronous vector projection; memory_search is weakly consistent). Idempotency conflicts return error code -32006. AMR automatically tracks version=1, timestamps, and caller agent_id.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -97,6 +97,10 @@ TOOL_DEFINITIONS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "If in conflict with existing ACTIVE memories, list target memory_ids. AMR will atomically mark both as CONFLICT."
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional client-generated idempotency key (e.g. UUID) to safely retry memory creation without duplicates. Returns error code -32006 on conflict."
                 }
             },
             "required": ["content"]
@@ -104,7 +108,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_update",
-        "description": "Update an existing memory. Content changes require expected_version and change_reason (triggers version increment). Pure metadata updates (type/status) update in-place without versioning.",
+        "description": "Update an existing memory. Content changes require expected_version and change_reason (triggers version increment). Pure metadata updates (type/status) update in-place without versioning. SQLite committed immediately with projection_status='pending' (asynchronous vector projection; memory_search is weakly consistent). Idempotency conflicts return error code -32006.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -137,6 +141,10 @@ TOOL_DEFINITIONS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional list of memory IDs this record conflicts with."
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional client-generated idempotency key for safe retries."
                 }
             },
             "required": ["memory_id"]
@@ -158,7 +166,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_delete",
-        "description": "Soft delete a memory (sets status to DELETED). Hidden from standard and historical search, preserved in SQLite for audit and recovery.",
+        "description": "Soft delete a memory (sets status to DELETED). SQLite committed immediately with projection_status='pending' (asynchronous vector projection). Hidden from standard and historical search, preserved in SQLite for audit and recovery. Idempotency conflicts return error code -32006.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -169,6 +177,10 @@ TOOL_DEFINITIONS = [
                 "reason": {
                     "type": "string",
                     "description": "Optional explanation for why this memory was deleted."
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional client-generated idempotency key for safe retries."
                 }
             },
             "required": ["memory_id"]
@@ -261,9 +273,13 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     elif name == "memory_create":
         if "content" not in args or not isinstance(args["content"], str) or not args["content"].strip():
             raise ValueError("Parameter 'content' is required and must be a non-empty string.")
+        if "idempotency_key" in args and args["idempotency_key"] is not None and not isinstance(args["idempotency_key"], str):
+            raise ValueError("Parameter 'idempotency_key' must be a string.")
     elif name == "memory_update":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
+        if "idempotency_key" in args and args["idempotency_key"] is not None and not isinstance(args["idempotency_key"], str):
+            raise ValueError("Parameter 'idempotency_key' must be a string.")
         if "content" in args and args["content"] is not None:
             if "expected_version" not in args or args["expected_version"] is None:
                 raise ValueError("Parameter 'expected_version' is required when updating content.")
@@ -272,6 +288,8 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     elif name == "memory_history" or name == "memory_get" or name == "memory_delete":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
+        if name == "memory_delete" and "idempotency_key" in args and args["idempotency_key"] is not None and not isinstance(args["idempotency_key"], str):
+            raise ValueError("Parameter 'idempotency_key' must be a string.")
     elif name == "memory_record":
         if "content" not in args or not isinstance(args["content"], str) or not args["content"].strip():
             raise ValueError("Parameter 'content' is required and must be a non-empty string.")
