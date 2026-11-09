@@ -85,7 +85,7 @@ def test_session_store_versioning_and_protection_level(temp_db):
         superseded_by="mem_v2_test",
         superseded_at=now,
     )
-    assert updated_v1["status"] in ("superseded", "HISTORICAL")
+    assert updated_v1["status"] == "HISTORICAL"
     assert updated_v1["superseded_by"] == "mem_v2_test"
     assert updated_v1["superseded_at"] == now
 

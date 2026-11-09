@@ -23,6 +23,7 @@ from src.core.engine import BGEM3Engine
 from src.core.qdrant import QdrantManager, STANDARD_COLLECTIONS
 from src.core.session_store import SessionStore
 from src.service.entity_normalizer import EntityNormalizer
+from src.service.memory_status import normalize_status, is_status
 
 logger = logging.getLogger(__name__)
 
@@ -427,12 +428,12 @@ class CognitiveEngine:
             )
 
             # 2. 标记旧记忆 superseded 指向新 memory_id
-            self.session_store.update_memory_status(
+            self.session_store.change_memory_status(
                 memory_id=existing_memory_id,
-                status="superseded",
+                new_status="HISTORICAL",
                 superseded_by=new_id,
-                operator=operator,
-                detail={"transition": f"{current_status} -> {next_status}"},
+                actor=operator,
+                reason=f"State machine transition: {current_status} -> {next_status}",
             )
 
             return {"success": True, "action": "transitioned", "new_memory": new_mem}
@@ -462,12 +463,12 @@ class CognitiveEngine:
             )
 
             # 2. 标记旧条目 superseded 指向新 memory_id
-            self.session_store.update_memory_status(
+            self.session_store.change_memory_status(
                 memory_id=existing_memory_id,
-                status="superseded",
+                new_status="HISTORICAL",
                 superseded_by=new_id,
-                operator=operator,
-                detail={"reason": "overwrite_by_new_entry"},
+                actor=operator,
+                reason="overwrite_by_new_entry",
             )
 
             return {"success": True, "action": "overwritten", "new_memory": new_mem}
@@ -600,11 +601,19 @@ class CognitiveEngine:
                 f"""
                 SELECT m.memory_id, m.content
                 FROM memories m
-                JOIN qdrant_sync_queue q ON m.memory_id = q.memory_id
-                WHERE q.status = 'pending'
-                  AND m.status IN ('active', 'ACTIVE')
+                WHERE LOWER(m.status) = 'active'
                   AND m.project_id IN ({placeholders})
                   AND m.created_at >= ?
+                  AND (
+                      EXISTS (
+                          SELECT 1 FROM qdrant_sync_queue q
+                          WHERE q.memory_id = m.memory_id AND q.status = 'pending'
+                      )
+                      OR EXISTS (
+                          SELECT 1 FROM memory_projection_outbox o
+                          WHERE o.memory_id = m.memory_id AND o.status = 'pending'
+                      )
+                  )
                 ORDER BY m.created_at DESC
                 LIMIT 10
                 """,
@@ -636,7 +645,7 @@ class CognitiveEngine:
         for mid, cand in combined_candidate_map.items():
             db_mem = self.session_store.get_memory(mid)
             # 严格回表校验当前最新 status == 'active' / 'ACTIVE'
-            if not db_mem or db_mem.get("status") not in ("active", "ACTIVE"):
+            if not db_mem or normalize_status(db_mem.get("status")) != "ACTIVE":
                 continue
 
             # 校验 project_id
@@ -686,16 +695,17 @@ class CognitiveEngine:
     ) -> bool:
         """
         合规遗忘：
-        1. SQLite 事务中标记 status = 'deleted'，记录 deleted_at, deleted_by, deletion_reason；
-        2. 向 qdrant_sync_queue 投递 op_type = 'delete'；
+        1. 统一状态分派标记 status = 'DELETED'，记录 deleted_at, deleted_by, deletion_reason；
+        2. 自动投递对应 Outbox 队列任务 (v3 -> 统一投影队列, legacy -> qdrant_sync_queue)；
         3. 写入 memory_audit_log 审计日志。
         """
-        updated = self.session_store.update_memory_status(
-            memory_id=memory_id,
-            status="deleted",
-            deleted_by=deleted_by,
-            deletion_reason=reason,
-            operator="cognitive_engine:forget",
-            detail={"action": "forget", "reason": reason},
-        )
-        return updated is not None and updated.get("status") in ("deleted", "DELETED")
+        try:
+            res = self.session_store.change_memory_status(
+                memory_id=memory_id,
+                new_status="DELETED",
+                actor=deleted_by,
+                reason=reason,
+            )
+            return res is not None and normalize_status(res.get("current_status")) == "DELETED"
+        except KeyError:
+            return False

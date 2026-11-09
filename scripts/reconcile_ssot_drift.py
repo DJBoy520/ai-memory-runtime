@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qdrant_client import QdrantClient, models  # noqa: E402
 
 from config.settings import load_config  # noqa: E402
+from src.core.session_store import SessionStore  # noqa: E402
+from src.service.memory_status import normalize_status  # noqa: E402
 
 DRIFT_DATE = "20261007"
 
@@ -38,7 +40,8 @@ def main() -> None:
 
     cfg = load_config()
     client = QdrantClient(url=cfg.qdrant.url, api_key=cfg.qdrant.api_key or None, timeout=cfg.qdrant.timeout)
-    conn = sqlite3.connect(cfg.storage.sqlite_path)
+    store = SessionStore(db_path=cfg.storage.sqlite_path)
+    conn = store.get_connection()
     conn.row_factory = sqlite3.Row
 
     if args.apply:
@@ -48,7 +51,7 @@ def main() -> None:
             sys.exit(2)
 
     # 1) 找漂移集（Qdrant=ARCHIVED 且 SQLite=ACTIVE）
-    sqlite_rows = {r["memory_id"]: r for r in conn.execute("SELECT * FROM memories WHERE status='ACTIVE'")}
+    sqlite_rows = {r["memory_id"]: r for r in conn.execute("SELECT * FROM memories WHERE LOWER(status) = 'active'")}
     drift = []
     off = None
     while True:
@@ -63,6 +66,7 @@ def main() -> None:
         if off is None:
             break
 
+    canonical_archived = normalize_status("archived")
     audit: dict = {
         "date": DRIFT_DATE,
         "decided_by": "zcode(AI 仲裁，用户授权 AI 决策)",
@@ -71,16 +75,23 @@ def main() -> None:
         "projection_repaired": [],
     }
 
-    # 2) SQLite 对齐归档
-    print(f"[1] SQLite 对齐归档 {len(drift)} 条测试夹具记忆...")
+    # 2) SQLite 对齐归档 (走 store.change_memory_status 分派)
+    print(f"[1] SQLite 对齐归档 {len(drift)} 条测试夹具记忆 (目标状态: {canonical_archived})...")
     for mid in drift:
         print(f"    ARCHIVE {mid}: {sqlite_rows[mid]['content'][:50]!r}")
         if args.apply:
-            conn.execute(
-                "UPDATE memories SET status='ARCHIVED', updated_at=? WHERE memory_id=?",
-                (int(time.time()), mid),
+            store.change_memory_status(
+                memory_id=mid,
+                new_status=canonical_archived,
+                actor="zcode-ssot-drift-repair",
+                reason="test fixture junk, aligned with refine_v2 curation",
+                cursor=conn.cursor(),
             )
-        audit["archived_in_sqlite"].append({"memory_id": mid, "reason": "test fixture junk, aligned with refine_v2 curation"})
+        audit["archived_in_sqlite"].append({
+            "memory_id": mid,
+            "target_status": canonical_archived,
+            "reason": "test fixture junk, aligned with refine_v2 curation",
+        })
 
     # 3) 缺失投影修复：SQLite=ACTIVE 且 Qdrant 无点 → 补建
     print("[2] 扫描 SQLite=ACTIVE 但 Qdrant 无投影的条目...")
