@@ -14,12 +14,14 @@ from pathlib import Path
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from transformers import AutoModel, AutoTokenizer
 
 from config.settings import ModelConfig, settings
+from src.core.errors import ModelLoadingPendingError
+from src.service.metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +46,7 @@ class QueueFullError(EngineError):
 
 
 class ModelLoadingTimeoutError(EngineError):
-    """LOADING 排队自旋超时异常"""
+    """LOADING 排队自旋超时异常（保留兼容）"""
     pass
 
 
@@ -59,6 +61,8 @@ class BGEM3Engine:
         config: Optional[ModelConfig] = None,
         model_path: Optional[str] = None,
         idle_timeout_seconds: Optional[int] = None,
+        exit_fn: Optional[Callable[[int], None]] = None,
+        crash_count_path: Optional[Union[str, Path]] = None,
     ):
         self.config = config or settings.model
         self.model_path = model_path or self._resolve_model_path(self.config.name_or_path)
@@ -74,6 +78,25 @@ class BGEM3Engine:
         # 状态机与并发锁
         self._state: ModelState = ModelState.UNLOADED
         self._state_lock = threading.RLock()
+
+        # Single-flight 加载原语
+        self._load_exec_lock = threading.Lock()
+        self._load_epoch: int = 0
+        self._load_started_at: Optional[float] = None
+        self._stall_reported_timeout: bool = False
+        self._stall_reported_exit: bool = False
+        self._unhealthy: bool = False
+
+        # 退出函数与崩溃计数文件
+        self.exit_fn: Callable[[int], None] = exit_fn or os._exit
+        self._exit_called: bool = False
+        if crash_count_path is not None:
+            self.crash_count_path = Path(crash_count_path)
+        else:
+            self.crash_count_path = self._default_crash_count_path()
+
+        # 检查并清理启动时崩溃计数
+        self._check_and_prune_crash_counts()
 
         # 推理线程池
         self._executor = ThreadPoolExecutor(
@@ -94,6 +117,172 @@ class BGEM3Engine:
         self._idle_timer: Optional[threading.Timer] = None
         self._total_inferences = 0
         self._last_error: Optional[str] = None
+
+        # Watchdog 守护线程
+        self._watchdog_stop_event = threading.Event()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop,
+            daemon=True,
+            name="bge-watchdog",
+        )
+        self._watchdog_thread.start()
+
+        # 初始化指标 gauge
+        METRICS.set_gauge("model_unhealthy", 0.0)
+
+    def _default_crash_count_path(self) -> Path:
+        xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if xdg_runtime and Path(xdg_runtime).is_dir():
+            return Path(xdg_runtime) / "amr.crash.count"
+        return Path("/tmp/amr.crash.count")
+
+    @property
+    def unhealthy(self) -> bool:
+        with self._state_lock:
+            return self._unhealthy
+
+    def _set_unhealthy(self, value: bool) -> None:
+        with self._state_lock:
+            self._unhealthy = value
+            METRICS.set_gauge("model_unhealthy", 1.0 if value else 0.0)
+
+    def _check_and_prune_crash_counts(self) -> int:
+        now = time.time()
+        valid_ts: List[float] = []
+        if self.crash_count_path.exists():
+            try:
+                content = self.crash_count_path.read_text(encoding="utf-8")
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ts = float(line)
+                        if (now - ts) <= 600.0:
+                            valid_ts.append(ts)
+                    except ValueError:
+                        continue
+                self._write_crash_counts(valid_ts)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to read/prune crash count file {self.crash_count_path}: {e}"
+                )
+
+        if len(valid_ts) >= 3:
+            logger.critical("repeated watchdog exits")
+        return len(valid_ts)
+
+    def _write_crash_counts(self, timestamps: List[float]) -> None:
+        parent = self.crash_count_path.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        temp_file = (
+            parent
+            / f"{self.crash_count_path.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+        )
+        try:
+            content = "\n".join(f"{ts:.6f}" for ts in timestamps)
+            if content:
+                content += "\n"
+            temp_file.write_text(content, encoding="utf-8")
+            temp_file.replace(self.crash_count_path)
+        except Exception:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
+            raise
+
+    def _record_crash_and_exit(self) -> None:
+        with self._state_lock:
+            if self._exit_called:
+                return
+            self._exit_called = True
+
+        now = time.time()
+        valid_ts: List[float] = []
+        if self.crash_count_path.exists():
+            try:
+                content = self.crash_count_path.read_text(encoding="utf-8")
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ts = float(line)
+                        if (now - ts) <= 600.0:
+                            valid_ts.append(ts)
+                    except ValueError:
+                        continue
+            except Exception as e:
+                logger.warning(f"Error reading crash count file: {e}")
+
+        valid_ts.append(now)
+        try:
+            self._write_crash_counts(valid_ts)
+        except Exception as e:
+            logger.error(f"Failed to record crash timestamp: {e}")
+
+        logger.critical(
+            "Watchdog load stall exceeded load_stall_exit_seconds; invoking exit_fn(1)"
+        )
+        self.exit_fn(1)
+
+    def _watchdog_loop(self) -> None:
+        while not self._watchdog_stop_event.wait(timeout=0.05):
+            try:
+                self._watchdog_tick()
+            except Exception as e:
+                logger.error(f"Watchdog tick error: {e}", exc_info=True)
+
+    def _watchdog_tick(self) -> None:
+        now = time.monotonic()
+        with self._state_lock:
+            started_at = self._load_started_at
+            current_state = self._state
+            load_timeout = getattr(self.config, "load_timeout_seconds", 120.0)
+            stall_timeout = getattr(self.config, "load_stall_exit_seconds", 180.0)
+            exit_enabled = getattr(self.config, "watchdog_exit_enabled", False)
+
+        if started_at is None:
+            return
+
+        elapsed = now - started_at
+
+        # 1. 状态 LOADING 且 elapsed > load_timeout_seconds：判定超时
+        if current_state == ModelState.LOADING and elapsed > load_timeout:
+            with self._state_lock:
+                if (
+                    self._state == ModelState.LOADING
+                    and self._load_started_at == started_at
+                    and not self._stall_reported_timeout
+                ):
+                    self._stall_reported_timeout = True
+                    self._load_epoch += 1
+                    self._set_unhealthy(True)
+                    err_msg = (
+                        f"Model load watchdog timeout: loading exceeded {load_timeout}s "
+                        f"(elapsed: {elapsed:.2f}s)"
+                    )
+                    self._set_state(ModelState.ERROR, error_msg=err_msg)
+                    logger.critical(
+                        f"{err_msg}; marked ERROR/unhealthy (epoch incremented to {self._load_epoch})"
+                    )
+                    METRICS.incr("model_load_failures_total")
+
+        # 2. 若 watchdog_exit_enabled 且同一 stall attempt 的 elapsed > load_stall_exit_seconds
+        if exit_enabled and elapsed > stall_timeout:
+            trigger_exit = False
+            with self._state_lock:
+                if (
+                    self._load_started_at == started_at
+                    and not self._stall_reported_exit
+                ):
+                    self._stall_reported_exit = True
+                    trigger_exit = True
+
+            if trigger_exit:
+                self._record_crash_and_exit()
 
     def _resolve_device(self, requested_device: str) -> str:
         """设备判定：优先 cuda，不可用时降级 cpu"""
@@ -144,6 +333,8 @@ class BGEM3Engine:
 
     def _schedule_idle_unload(self):
         """重置并启动闲置卸载定时器"""
+        if self.idle_timeout_seconds <= 0:
+            return
         with self._state_lock:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
@@ -190,8 +381,8 @@ class BGEM3Engine:
             if hasattr(torch.cuda, "ipc_collect"):
                 torch.cuda.ipc_collect()
 
-    def _load_model_sync(self):
-        """同步执行模型载入逻辑（由 ThreadPoolExecutor 运行）"""
+    def _load_model_sync(self) -> tuple[Any, Any]:
+        """同步执行模型载入逻辑（工作线程内运行，构造局部对象并返回）"""
         tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         model = AutoModel.from_pretrained(self.model_path)
 
@@ -203,8 +394,94 @@ class BGEM3Engine:
             model = model.to("cpu")
 
         model.eval()
-        self.tokenizer = tokenizer
-        self.model = model
+        return tokenizer, model
+
+    def _load_worker(self, epoch: int, started_at: float) -> None:
+        """单次模型加载的工作线程"""
+        load_start = time.monotonic()
+        METRICS.incr("model_loads_total")
+        tokenizer = None
+        model = None
+        success = False
+        error_msg = None
+        try:
+            logger.info(f"Starting model load for epoch {epoch} on device {self.device}")
+            tokenizer, model = self._load_model_sync()
+            success = True
+        except Exception as e:
+            logger.error(f"Model load failed in epoch {epoch}: {e}", exc_info=True)
+            error_msg = str(e)
+            METRICS.incr("model_load_failures_total")
+        finally:
+            load_duration_ms = (time.monotonic() - load_start) * 1000.0
+            METRICS.observe("model_load_duration_ms", load_duration_ms)
+            try:
+                with self._state_lock:
+                    if self._load_epoch == epoch and self._state == ModelState.LOADING:
+                        if success:
+                            self.tokenizer = tokenizer
+                            self.model = model
+                            self._load_started_at = None
+                            self._stall_reported_timeout = False
+                            self._stall_reported_exit = False
+                            self._set_unhealthy(False)
+                            self._set_state(ModelState.READY)
+                            logger.info(
+                                f"Model successfully mounted for epoch {epoch} in {load_duration_ms:.1f}ms"
+                            )
+                        else:
+                            self._load_started_at = None
+                            self._stall_reported_timeout = False
+                            self._stall_reported_exit = False
+                            self._set_state(ModelState.ERROR, error_msg=error_msg or "Load failed")
+                    else:
+                        # Epoch changed or state no longer LOADING: discard local resources
+                        logger.warning(
+                            f"Model load result for epoch {epoch} discarded "
+                            f"(current epoch={self._load_epoch}, state={self._state.value})"
+                        )
+                        if self._load_started_at == started_at:
+                            self._load_started_at = None
+                            self._stall_reported_timeout = False
+                            self._stall_reported_exit = False
+
+                        if model is not None:
+                            del model
+                            model = None
+                        if tokenizer is not None:
+                            del tokenizer
+                            tokenizer = None
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            if hasattr(torch.cuda, "ipc_collect"):
+                                torch.cuda.ipc_collect()
+            finally:
+                self._load_exec_lock.release()
+
+    def _trigger_load(self) -> None:
+        """非阻塞尝试获取加载执行锁，触发单次加载"""
+        acquired = self._load_exec_lock.acquire(blocking=False)
+        if not acquired:
+            return
+
+        with self._state_lock:
+            self._cancel_idle_timer()
+            self._load_epoch += 1
+            current_epoch = self._load_epoch
+            started_at = time.monotonic()
+            self._load_started_at = started_at
+            self._stall_reported_timeout = False
+            self._stall_reported_exit = False
+            self._set_state(ModelState.LOADING)
+
+        load_thread = threading.Thread(
+            target=self._load_worker,
+            args=(current_epoch, started_at),
+            daemon=True,
+            name=f"bge-loader-{current_epoch}",
+        )
+        load_thread.start()
 
     async def load_model(self) -> None:
         """公有异步方法：主动加载模型或推进至 READY 状态"""
@@ -213,31 +490,42 @@ class BGEM3Engine:
                 return
             if self._state == ModelState.IDLE:
                 self._cancel_idle_timer()
-                self._state = ModelState.READY
+                self._set_state(ModelState.READY)
                 return
-            if self._state in (
-                ModelState.UNLOADED,
-                ModelState.ERROR,
-                ModelState.UNLOADING,
-            ):
-                self._cancel_idle_timer()
-                self._state = ModelState.LOADING
+            if self._state == ModelState.LOADING:
+                pass
+            else:
+                self._trigger_load()
 
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(self._executor, self._load_model_sync)
-            self._set_state(ModelState.READY)
-        except Exception as e:
-            self._set_state(ModelState.ERROR, error_msg=str(e))
-            raise EngineError(f"Failed to load model: {e}")
+        await self._wait_for_ready(timeout=getattr(self.config, "load_timeout_seconds", 120.0))
+
+    async def preload(self) -> None:
+        """预加载模型至 READY 状态（幂等）"""
+        with self._state_lock:
+            if self._state == ModelState.READY:
+                return
+            if self._state == ModelState.IDLE:
+                self._cancel_idle_timer()
+                self._set_state(ModelState.READY)
+                return
+            if self._state == ModelState.LOADING:
+                pass
+            else:
+                self._trigger_load()
+
+        await self._wait_for_ready(timeout=getattr(self.config, "load_timeout_seconds", 120.0))
 
     async def unload_model(self) -> None:
         """公有异步方法：主动卸载模型释放显存"""
         self._cancel_idle_timer()
         with self._state_lock:
+            self._load_epoch += 1
+            self._load_started_at = None
+            self._stall_reported_timeout = False
+            self._stall_reported_exit = False
             if self._state == ModelState.UNLOADED:
                 return
-            self._state = ModelState.UNLOADING
+            self._set_state(ModelState.UNLOADING)
 
         loop = asyncio.get_running_loop()
         try:
@@ -247,8 +535,11 @@ class BGEM3Engine:
             self._set_state(ModelState.ERROR, error_msg=str(e))
             raise
 
-    async def _wait_for_ready(self, timeout: float = 25.0) -> None:
+    async def _wait_for_ready(self, timeout: Optional[float] = None) -> None:
         """LOADING 状态排队自旋等待机制"""
+        if timeout is None:
+            timeout = getattr(self.config, "request_load_wait_seconds", 25.0)
+
         start_time = time.monotonic()
         while True:
             current_state = self.state
@@ -258,17 +549,25 @@ class BGEM3Engine:
                 with self._state_lock:
                     if self._state == ModelState.IDLE:
                         self._cancel_idle_timer()
-                        self._state = ModelState.READY
+                        self._set_state(ModelState.READY)
                         return
             if current_state == ModelState.ERROR:
                 raise EngineError(f"Model failed to load: {self._last_error}")
 
-            if current_state not in (ModelState.LOADING, ModelState.UNLOADED, ModelState.UNLOADING):
+            if current_state not in (
+                ModelState.LOADING,
+                ModelState.UNLOADED,
+                ModelState.UNLOADING,
+            ):
                 raise EngineError(f"Unexpected state: {current_state}")
 
             elapsed = time.monotonic() - start_time
             if elapsed >= timeout:
-                raise ModelLoadingTimeoutError(f"Timed out waiting for READY ({timeout}s)")
+                raise ModelLoadingPendingError(
+                    f"Timed out waiting for model READY ({timeout}s)",
+                    model_state=current_state.value,
+                    retry_after_ms=1000,
+                )
 
             await asyncio.sleep(0.02)
 
@@ -314,15 +613,27 @@ class BGEM3Engine:
             self._active_requests += 1
 
         try:
-            current_state = self.state
-            if current_state in (
-                ModelState.UNLOADED,
-                ModelState.IDLE,
-                ModelState.ERROR,
-            ):
-                await self.load_model()
-            elif current_state == ModelState.LOADING:
-                await self._wait_for_ready(timeout=25.0)
+            while True:
+                current_state = self.state
+                if current_state == ModelState.READY:
+                    break
+                elif current_state == ModelState.IDLE:
+                    with self._state_lock:
+                        if self._state == ModelState.IDLE:
+                            self._cancel_idle_timer()
+                            self._set_state(ModelState.READY)
+                            break
+                elif current_state == ModelState.LOADING:
+                    await self._wait_for_ready(timeout=self.config.request_load_wait_seconds)
+                elif current_state in (
+                    ModelState.UNLOADED,
+                    ModelState.ERROR,
+                    ModelState.UNLOADING,
+                ):
+                    self._trigger_load()
+                    await self._wait_for_ready(timeout=self.config.request_load_wait_seconds)
+                else:
+                    raise EngineError(f"Unexpected state: {current_state}")
 
             if self.state != ModelState.READY:
                 raise EngineError(f"Engine is not in READY state (current: {self.state})")
@@ -356,8 +667,9 @@ class BGEM3Engine:
 
             with self._state_lock:
                 if remaining == 0 and self._state == ModelState.READY:
-                    self._state = ModelState.IDLE
-                    self._schedule_idle_unload()
+                    if self.idle_timeout_seconds > 0:
+                        self._state = ModelState.IDLE
+                        self._schedule_idle_unload()
 
     def _get_driver_used_mb(self) -> float:
         if not torch.cuda.is_available():
@@ -395,9 +707,20 @@ class BGEM3Engine:
             "device": self.device,
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "last_error": self._last_error,
+            "unhealthy": self.unhealthy,
         }
 
     def close(self):
         self._cancel_idle_timer()
+        self._watchdog_stop_event.set()
+        with self._state_lock:
+            self._load_epoch += 1
+            self._load_started_at = None
+            self._stall_reported_timeout = False
+            self._stall_reported_exit = False
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            if threading.current_thread() != self._watchdog_thread:
+                self._watchdog_thread.join(timeout=1.0)
         self._executor.shutdown(wait=False)
         self._do_unload_resources()
+        self._set_state(ModelState.UNLOADED)

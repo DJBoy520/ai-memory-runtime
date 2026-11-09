@@ -26,6 +26,11 @@ model:
   max_queue_size: 64
   idle_timeout_seconds: 3600
   max_token_length: 8192
+  preload_on_start: false
+  load_timeout_seconds: 120.0
+  request_load_wait_seconds: 25.0
+  load_stall_exit_seconds: 180.0
+  watchdog_exit_enabled: false  # 仅在 systemd 托管环境下显式开启（受控退出）
 
 storage:
   sqlite_path: "data/sessions.db"

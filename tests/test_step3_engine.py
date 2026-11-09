@@ -26,6 +26,7 @@ from src.core.engine import (
     ModelState,
     QueueFullError,
 )
+from src.core.errors import ModelLoadingPendingError
 
 
 @pytest.fixture
@@ -171,7 +172,7 @@ async def test_loading_timeout(mock_model_config):
     engine = BGEM3Engine(config=mock_model_config)
     try:
         engine._set_state(ModelState.LOADING)
-        with pytest.raises(ModelLoadingTimeoutError):
+        with pytest.raises(ModelLoadingPendingError):
             await engine._wait_for_ready(timeout=0.2)
     finally:
         engine.close()
