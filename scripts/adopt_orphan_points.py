@@ -3,35 +3,52 @@
 scripts/adopt_orphan_points.py
 反向补登脚本：将 Qdrant 中存在但 SQLite memories 表中不存在的孤儿点位补登至 SQLite SSOT。
 
-技术依据：RFC-003 第 2.2 节 & opencode_task_reconciliation_p1.md
+技术依据：RFC-003 第 2.2 节 & RFC v5.3 F8
 - 保持原有 memory_id 与 qdrant_point_id 不变
-- status = 'active'
+- 显式落 projection_class='legacy'，collection_name 取点位所在集合
+- 写入 status 必须经 normalize_status 规范化
 - created_at / updated_at 复用原有时间戳
 - source_agent = 'openclaw'
 - 计算 SHA256 存入 content_hash
 - 幂等执行（重复执行不报错、不重复插入）
+- 支持 --dry-run 与报告输出
 """
 
+import argparse
 import hashlib
+import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 # 将项目根目录添加到 sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from qdrant_client import QdrantClient
-from config.settings import load_config
-from src.core.session_store import SessionStore
+from qdrant_client import QdrantClient  # noqa: E402
+from config.settings import load_config  # noqa: E402
+from src.core.session_store import SessionStore  # noqa: E402
+from src.service.memory_status import normalize_status  # noqa: E402
 
 
-def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_memory") -> int:
-    config = load_config()
-    client = QdrantClient(
-        url=config.qdrant.url,
-        api_key=config.qdrant.api_key,
-        timeout=config.qdrant.timeout or 10.0,
-    )
+def adopt_orphans(
+    db_path: str = "data/sessions.db",
+    collection_name: str = "ai_memory",
+    dry_run: bool = False,
+    client: Optional[QdrantClient] = None,
+) -> int:
+    """
+    反向补登孤儿点位到 SQLite SSOT。
+    显式标记 projection_class='legacy', collection_name=collection_name，status 经 normalize_status。
+    """
+    if client is None:
+        config = load_config()
+        client = QdrantClient(
+            url=config.qdrant.url,
+            api_key=config.qdrant.api_key,
+            timeout=config.qdrant.timeout or 10.0,
+        )
+
     store = SessionStore(db_path=db_path)
     conn = store.get_connection()
     cursor = conn.cursor()
@@ -70,10 +87,14 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
         if pid not in existing_pids and mid not in existing_mids:
             orphan_points.append(p)
 
-    print(f"[Adopt] 待补登的孤儿点位数: {len(orphan_points)}")
+    print(f"[Adopt] 待补登的孤儿点位数: {len(orphan_points)} (Dry-Run: {dry_run})")
 
     if not orphan_points:
         print("[Adopt] 无孤儿点位需要补登，系统已完全一致。")
+        return 0
+
+    if dry_run:
+        print(f"[Adopt] [DRY-RUN] 模拟运行完成，跳过实际写入。待补登点位数: {len(orphan_points)}")
         return 0
 
     inserted_count = 0
@@ -86,7 +107,7 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
         mid = payload.get("memory_id") or f"mem_{pid[:12]}"
         content = payload.get("content", "")
         c_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        
+
         m_type = payload.get("memory_type", "fact")
         subject = payload.get("subject", "system")
         predicate = payload.get("predicate", "states_fact")
@@ -94,7 +115,8 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
         project_id = payload.get("project_id", "crypto-infrastructure")
         scope = payload.get("scope", "global")
         source_agent = payload.get("source_agent", "openclaw")
-        status = payload.get("status", "active")
+        raw_status = payload.get("status", "active")
+        canonical_status = normalize_status(raw_status)
         confidence = float(payload.get("confidence", 0.8))
         importance = float(payload.get("importance", 0.5))
         mention_count = int(payload.get("mention_count", 1))
@@ -112,7 +134,8 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
                 project_id, scope, source_agent, version,
                 content_hash, curation_batch_id, last_reconciled_at,
                 deleted_at, deleted_by, deletion_reason,
-                created_at, updated_at
+                created_at, updated_at,
+                projection_class, collection_name
             )
             VALUES (
                 ?, ?, ?, 'coexist',
@@ -123,7 +146,8 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
                 ?, ?, ?, 1,
                 ?, NULL, NULL,
                 NULL, NULL, NULL,
-                ?, ?
+                ?, ?,
+                'legacy', ?
             )
             """,
             (
@@ -131,10 +155,11 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
                 subject, predicate, obj, content,
                 created_at,
                 confidence, importance, mention_count,
-                status,
+                canonical_status,
                 project_id, scope, source_agent,
                 c_hash,
                 created_at, updated_at,
+                collection_name,
             ),
         )
         if cursor.rowcount > 0:
@@ -155,9 +180,19 @@ def adopt_orphans(db_path: str = "data/sessions.db", collection_name: str = "ai_
     # 验证最终数量
     cursor.execute("SELECT count(*) FROM memories")
     final_count = cursor.fetchone()[0]
-    print(f"[Adopt] 成功补登: {inserted_count} 条点位。当前 SQLite memories 总行数: {final_count}")
+    print(f"[Adopt] 成功补登: {inserted_count} 条点位 (projection_class='legacy')。当前 SQLite memories 总行数: {final_count}")
     return inserted_count
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="反向补登孤儿点位到 SQLite SSOT")
+    parser.add_argument("--db-path", default="data/sessions.db", help="SQLite 数据库路径")
+    parser.add_argument("--collection", default="ai_memory", help="Qdrant 集合名")
+    parser.add_argument("--dry-run", action="store_true", help="演练模式，不落库")
+    args = parser.parse_args()
+
+    adopt_orphans(db_path=args.db_path, collection_name=args.collection, dry_run=args.dry_run)
+
+
 if __name__ == "__main__":
-    adopt_orphans()
+    main()

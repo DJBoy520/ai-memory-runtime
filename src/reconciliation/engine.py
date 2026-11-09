@@ -20,6 +20,7 @@ from config.settings import AppConfig, load_config
 from src.core.session_store import SessionStore
 from src.reconciliation.policy_gate import PolicyGate, CandidateState
 from src.reconciliation.rules import RuleEngine
+from src.service.memory_status import normalize_status
 
 
 class ReconciliationEngine:
@@ -138,7 +139,7 @@ class ReconciliationEngine:
             SELECT memory_id, qdrant_point_id, type, subject, predicate, object,
                    content, status, confidence, importance, project_id, scope, source_agent, version
             FROM memories
-            WHERE status IN ('active', 'stale')
+            WHERE LOWER(status) IN ('active', 'stale')
             """
         )
         rows = [dict(r) for r in cursor.fetchall()]
@@ -211,37 +212,22 @@ class ReconciliationEngine:
             chunk = approved_candidates[i : i + chunk_size]
             for cand in chunk:
                 mid = cand["memory_id"]
-                new_status = cand["proposed_status"]
+                new_status = normalize_status(cand["proposed_status"])
                 reason = cand["reason"]
 
-                # 1. 更新 memories
-                cursor.execute(
-                    """
-                    UPDATE memories
-                    SET status = ?, curation_batch_id = ?, updated_at = ?,
-                        deleted_at = CASE WHEN ? = 'deleted' THEN ? ELSE deleted_at END,
-                        deleted_by = CASE WHEN ? = 'deleted' THEN 'reconciliation_engine' ELSE deleted_by END,
-                        deletion_reason = CASE WHEN ? = 'deleted' THEN ? ELSE deletion_reason END
-                    WHERE memory_id = ?
-                    """,
-                    (new_status, self.batch_id, now_ts, new_status, now_ts, new_status, new_status, reason, mid),
-                )
-
-                # 2. 写入 memory_projection_outbox
-                op_type = "delete" if new_status in ("deleted", "archived") else "update_payload"
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO memory_projection_outbox (
-                        memory_id, version, projection_type, op_type,
-                        payload_snapshot, status, retry_count, next_retry_at,
-                        created_at, updated_at
+                # 走统一状态流转分派 (支持 v3 新队列与 legacy 受控旧队列)
+                try:
+                    self.store.change_memory_status(
+                        mid,
+                        new_status,
+                        actor="reconciliation_engine",
+                        reason=reason,
+                        cursor=cursor,
                     )
-                    VALUES (?, 1, 'qdrant_main', ?, NULL, 'pending', 0, 0, ?, ?)
-                    """,
-                    (mid, op_type, now_ts, now_ts),
-                )
+                except KeyError:
+                    continue
 
-                # 3. 标记 curation_candidates 为 APPLIED
+                # 标记 curation_candidates 为 APPLIED
                 cursor.execute(
                     "UPDATE curation_candidates SET state = 'APPLIED' WHERE candidate_id = ?",
                     (cand["candidate_id"],),
@@ -289,13 +275,13 @@ class ReconciliationEngine:
         invalid_in_qdrant = []
         for pid in qdrant_points:
             st = sqlite_map.get(pid)
-            if st is None or st in ("deleted", "archived"):
+            if st is None or normalize_status(st) in ("DELETED", "HISTORICAL"):
                 invalid_in_qdrant.append(pid)
 
         # 2. SQLite 中为 active/stale 但 Qdrant 中缺失的点位 (需补充同步)
         missing_in_qdrant = []
         for pid, st in sqlite_map.items():
-            if st in ("active", "stale") and pid not in qdrant_points:
+            if normalize_status(st) in ("ACTIVE", "STALE") and pid not in qdrant_points:
                 missing_in_qdrant.append(pid)
 
         recon_report = {

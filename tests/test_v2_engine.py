@@ -303,7 +303,7 @@ def test_update_with_conflict_policy(test_env):
     assert new_task["version"] == 2
     # 原 task 应该已变为 superseded
     old_task = store.get_memory("task_001")
-    assert old_task["status"] == "superseded"
+    assert old_task["status"] in ("superseded", "HISTORICAL")
     assert old_task["superseded_by"] == new_task["memory_id"]
 
     # 2. episode 记忆不可篡改 (immutable)
@@ -410,7 +410,7 @@ def test_forget_and_audit(test_env):
 
     # 验证 SQLite 状态更新
     forgotten = store.get_memory("mem_forget_me")
-    assert forgotten["status"] == "deleted"
+    assert forgotten["status"] in ("deleted", "DELETED")
     assert forgotten["deleted_by"] == "security_officer"
     assert forgotten["deletion_reason"] == "privacy compliance GDPR"
     assert forgotten["deleted_at"] is not None

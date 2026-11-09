@@ -48,12 +48,18 @@ class ModelConfig(BaseModel):
     max_queue_size: int = 64
     idle_timeout_seconds: int = 300
     max_token_length: int = 8192
+    preload_on_start: bool = False
+    load_timeout_seconds: float = 120.0
+    request_load_wait_seconds: float = 25.0
+    load_stall_exit_seconds: float = 180.0
+    watchdog_exit_enabled: bool = False
 
 
 class StorageConfig(BaseModel):
     sqlite_path: str = "data/sessions.db"
     busy_timeout: int = 5000
     wal_enabled: bool = True
+    idempotency_retention_days: int = 7
 
     # 兼容 wal_mode 命名访问
     @property

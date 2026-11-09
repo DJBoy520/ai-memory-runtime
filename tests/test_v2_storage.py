@@ -212,7 +212,7 @@ def test_update_memory_status_and_outbox(temp_v2_store):
         operator="council",
         detail={"reason": "confidence threshold reached"},
     )
-    assert updated["status"] == "active"
+    assert updated["status"] == "ACTIVE"
 
     tasks = temp_v2_store.fetch_pending_sync_tasks()
     assert len(tasks) == 1
@@ -227,7 +227,7 @@ def test_update_memory_status_and_outbox(temp_v2_store):
         deleted_by="admin_user",
         deletion_reason="superseded by dynamic discovery",
     )
-    assert deleted["status"] == "deleted"
+    assert deleted["status"] == "DELETED"
     assert deleted["deleted_by"] == "admin_user"
     assert deleted["deletion_reason"] == "superseded by dynamic discovery"
     assert deleted["deleted_at"] is not None
@@ -257,11 +257,10 @@ def test_outbox_queue_retry_and_ordering(temp_v2_store):
     temp_v2_store.update_memory_status("mem_seq_001", "archived")
 
     tasks = temp_v2_store.fetch_pending_sync_tasks()
-    assert len(tasks) == 3
-    # 验证按自增 id 严格保序
+    assert len(tasks) == 2
+    # 验证按自增 id 严格保序（老 upsert 原地 patch + 最新 delta）
     assert tasks[0]["op_type"] == "upsert"
     assert tasks[1]["op_type"] == "update_payload"
-    assert tasks[2]["op_type"] == "update_payload"
 
     # 测试任务重试标记
     t0_id = tasks[0]["id"]

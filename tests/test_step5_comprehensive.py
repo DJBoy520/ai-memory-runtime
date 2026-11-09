@@ -110,6 +110,26 @@ def mock_service():
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+async def _flush_projection(service):
+    """Fixture helper: drain the transactional outbox once so Qdrant catches up.
+
+    Writes are commit-then-project (weak search consistency), so tests that
+    assert on search results after a status change must flush the worker.
+    """
+    from src.service.outbox_worker import OutboxWorker
+
+    worker = OutboxWorker(
+        session_store=service.session_store,
+        qdrant_manager=service.qdrant,
+        engine=service.engine,
+        config=service.config,
+    )
+    for _ in range(3):
+        processed = await worker.run_once()
+        if processed == 0:
+            break
+
+
 # ==========================================
 # 1. MCP Tools Input Validation (35 test cases)
 # ==========================================
@@ -220,19 +240,33 @@ async def test_memory_search_exact_match(mock_service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_status", ["superseded", "archived", "deleted"])
 async def test_memory_search_filters_non_active(mock_service, target_status):
+    from src.service.memory_status import normalize_status
     rec = await mock_service.memory_record(content=f"Old statement to be {target_status}")
     mem_id = rec["memory_id"]
 
     sub_id = "mem_replacement_999" if target_status == "superseded" else None
+    if sub_id:
+        # Fixture injection (§7): superseded_by is now persisted with an FK,
+        # so the replacement target must actually exist.
+        mock_service.session_store.create_memory(
+            memory_id=sub_id,
+            subject="replacement",
+            predicate="replaces",
+            content="replacement target for superseded link",
+            type="fact",
+            status="active",
+        )
     await mock_service.memory_update_status(mem_id, target_status, superseded_by=sub_id)
+    # Writes are commit-then-project; flush the outbox before asserting search.
+    await _flush_projection(mock_service)
 
     search_res = await mock_service.memory_search(query=f"Old statement to be {target_status}")
     found_ids = [r["memory_id"] for r in search_res["results"]]
     assert mem_id not in found_ids
 
-    # But memory_get still returns it for historical audit
+    # But memory_get still returns it for historical audit (§7: 状态期望按 normalize 映射更新)
     item = await mock_service.memory_get(mem_id)
-    assert item["status"] == target_status
+    assert normalize_status(item["status"]) == normalize_status(target_status)
     if target_status == "superseded":
         assert item["superseded_by"] == "mem_replacement_999"
 

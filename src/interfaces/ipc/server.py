@@ -1,11 +1,21 @@
 import asyncio
 import logging
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, Optional
 
 from config.settings import AppConfig, settings
+from src.core.errors import (
+    IdempotencyConflict,
+    InvalidStatusError,
+    LegacyPathForbidden,
+    ModelLoadingPendingError,
+    VersionConflictError,
+)
+from src.core.request_context import get_request_id
+from src.interfaces.ipc.errors import RpcError
 from src.interfaces.ipc.protocol import (
     ConnectionClosedError,
     FrameDecodeError,
@@ -15,6 +25,12 @@ from src.interfaces.ipc.protocol import (
     read_frame,
     write_frame,
 )
+
+try:
+    from src.core.engine import QueueFullError
+except ImportError:
+    class QueueFullError(Exception):
+        pass
 
 logger = logging.getLogger("ipc.server")
 
@@ -82,8 +98,7 @@ class UDSServer:
                     res = await self.handler(method, params)
                     resp = make_jsonrpc_response(res, req_id=req_id)
                 except Exception as ex:
-                    logger.exception("[%s] Handler error executing method '%s': %s", self.name, method, ex)
-                    resp = make_jsonrpc_error(-32603, f"Internal error: {str(ex)}", req_id=req_id)
+                    resp = self._map_exception_to_error_response(ex, method, req_id)
 
                 try:
                     await write_frame(writer, resp, max_bytes=self.max_request_bytes)
@@ -103,6 +118,113 @@ class UDSServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+    def _map_exception_to_error_response(self, ex: Exception, method: str, req_id: Any) -> Dict[str, Any]:
+        """按规范将各类业务异常与系统异常映射为稳定的 JSON-RPC 错误对象（RFC v5 / GPT-AUDIT C1）。"""
+        req_ctx_id = get_request_id()
+
+        # 1. RpcError 首位直通，防止被 ValueError 分支提前吞掉
+        if isinstance(ex, RpcError):
+            logger.warning("[%s] Handler RpcError executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            return ex.to_jsonrpc_error(req_id)
+
+        # 2. core.errors.VersionConflictError -> -32002 VERSION_CONFLICT
+        if isinstance(ex, VersionConflictError):
+            logger.warning("[%s] Version conflict executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {
+                "memory_id": getattr(ex, "memory_id", None),
+                "current_version": getattr(ex, "current_version", None),
+                "expected_version": getattr(ex, "expected_version", None),
+            }
+            msg = str(ex) if str(ex).startswith("VERSION_CONFLICT:") else f"VERSION_CONFLICT: {str(ex)}"
+            return make_jsonrpc_error(-32002, msg, data=data, req_id=req_id)
+
+        # 3. core.errors.ModelLoadingPendingError -> -32003 MODEL_LOADING
+        if isinstance(ex, ModelLoadingPendingError):
+            logger.warning("[%s] Model loading pending executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {
+                "model_state": getattr(ex, "model_state", "LOADING"),
+                "retry_after_ms": getattr(ex, "retry_after_ms", 1000),
+            }
+            msg = str(ex) if str(ex).startswith("MODEL_LOADING:") else f"MODEL_LOADING: {str(ex)}"
+            return make_jsonrpc_error(-32003, msg, data=data, req_id=req_id)
+
+        # 4. engine.QueueFullError -> -32004 QUEUE_FULL
+        if isinstance(ex, QueueFullError):
+            logger.warning("[%s] Queue full executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {}
+            if hasattr(ex, "active_requests") and getattr(ex, "active_requests") is not None:
+                data["active_requests"] = getattr(ex, "active_requests")
+            if hasattr(ex, "max_queue_size") and getattr(ex, "max_queue_size") is not None:
+                data["max_queue_size"] = getattr(ex, "max_queue_size")
+            if "active_requests" not in data or "max_queue_size" not in data:
+                m = re.search(r"\((\d+)/(\d+)\)", str(ex))
+                if m:
+                    data.setdefault("active_requests", int(m.group(1)))
+                    data.setdefault("max_queue_size", int(m.group(2)))
+            msg = str(ex) if str(ex).startswith("QUEUE_FULL:") else f"QUEUE_FULL: {str(ex)}"
+            return make_jsonrpc_error(-32004, msg, data=data, req_id=req_id)
+
+        # 5. KeyError -> -32005 NOT_FOUND
+        if isinstance(ex, KeyError):
+            logger.warning("[%s] Resource not found executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            mid = ex.args[0] if ex.args else None
+            data = {"memory_id": mid}
+            msg = str(ex) if str(ex).startswith("NOT_FOUND:") else f"NOT_FOUND: {str(ex)}"
+            return make_jsonrpc_error(-32005, msg, data=data, req_id=req_id)
+
+        # 6. IdempotencyConflict -> -32006 IDEMPOTENCY_CONFLICT
+        if isinstance(ex, IdempotencyConflict):
+            logger.warning("[%s] Idempotency conflict executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {
+                "op": getattr(ex, "op", None),
+                "idem_key": getattr(ex, "idem_key", None),
+                "existing_memory_id": getattr(ex, "existing_memory_id", None),
+            }
+            msg = str(ex) if str(ex).startswith("IDEMPOTENCY_CONFLICT:") else f"IDEMPOTENCY_CONFLICT: {str(ex)}"
+            return make_jsonrpc_error(-32006, msg, data=data, req_id=req_id)
+
+        # 7. LegacyPathForbidden / InvalidStatusError -> -32602 INVALID_ARGUMENT
+        if isinstance(ex, LegacyPathForbidden):
+            logger.warning("[%s] Legacy path forbidden executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {
+                "memory_id": getattr(ex, "memory_id", None),
+                "projection_class": getattr(ex, "projection_class", None),
+                "hint": getattr(ex, "hint", None),
+            }
+            msg = str(ex) if str(ex).startswith("INVALID_ARGUMENT:") else f"INVALID_ARGUMENT: {str(ex)}"
+            return make_jsonrpc_error(-32602, msg, data=data, req_id=req_id)
+
+        if isinstance(ex, InvalidStatusError):
+            logger.warning("[%s] Invalid status executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            data = {
+                "value": getattr(ex, "value", None),
+                "allowed": getattr(ex, "allowed", None),
+            }
+            msg = str(ex) if str(ex).startswith("INVALID_ARGUMENT:") else f"INVALID_ARGUMENT: {str(ex)}"
+            return make_jsonrpc_error(-32602, msg, data=data, req_id=req_id)
+
+        # 8. 其它 ValueError：按消息前缀匹配
+        if isinstance(ex, ValueError):
+            msg_str = str(ex)
+            logger.warning("[%s] ValueError executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+            if msg_str.startswith("AGENT_UNAUTHORIZED:"):
+                data = getattr(ex, "data", {})
+                return make_jsonrpc_error(-32001, msg_str, data=data, req_id=req_id)
+            elif msg_str.startswith("VERSION_CONFLICT:"):
+                data = getattr(ex, "data", {})
+                return make_jsonrpc_error(-32002, msg_str, data=data, req_id=req_id)
+            elif msg_str.startswith("NOT_FOUND:"):
+                data = getattr(ex, "data", {})
+                return make_jsonrpc_error(-32005, msg_str, data=data, req_id=req_id)
+            else:
+                data = getattr(ex, "data", None)
+                msg = msg_str if msg_str.startswith("INVALID_ARGUMENT:") else f"INVALID_ARGUMENT: {msg_str}"
+                return make_jsonrpc_error(-32602, msg, data=data, req_id=req_id)
+
+        # 9. 其余 Exception -> -32603 INTERNAL
+        logger.exception("[%s] Internal error executing method '%s' (request_id=%s): %s", self.name, method, req_ctx_id, ex)
+        return make_jsonrpc_error(-32603, f"Internal error: {str(ex)}", req_id=req_id)
 
     async def start(self) -> None:
         # 确保父级目录存在

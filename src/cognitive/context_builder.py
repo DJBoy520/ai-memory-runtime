@@ -69,7 +69,7 @@ class ContextBuilder:
                             m_id = pt.payload.get("memory_id")
                             if m_id:
                                 mem = self.session_store.get_memory(m_id)
-                                if mem and mem.get("status") in ("active", "candidate"):
+                                if mem and str(mem.get("status") or "").lower() in ("active", "candidate"):
                                     mem["_recall_source"] = "vector_top20"
                                     mem["_score"] = pt.score
                                     candidates_map[m_id] = mem
@@ -80,8 +80,8 @@ class ContextBuilder:
         # 2. 同 project_id 全部活跃记忆 (优先 limit 30)
         cursor.execute(
             """
-            SELECT memory_id FROM memories 
-            WHERE project_id = ? AND status IN ('active', 'candidate')
+            SELECT memory_id FROM memories
+            WHERE project_id = ? AND LOWER(status) IN ('active', 'candidate')
             ORDER BY updated_at DESC LIMIT 30
             """,
             (project_id,),
@@ -99,8 +99,8 @@ class ContextBuilder:
             for ent in entities:
                 cursor.execute(
                     """
-                    SELECT memory_id FROM memories 
-                    WHERE (subject = ? OR object = ?) AND status IN ('active', 'candidate')
+                    SELECT memory_id FROM memories
+                    WHERE (subject = ? OR object = ?) AND LOWER(status) IN ('active', 'candidate')
                     ORDER BY updated_at DESC LIMIT 10
                     """,
                     (ent, ent),

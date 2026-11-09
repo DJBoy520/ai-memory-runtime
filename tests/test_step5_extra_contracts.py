@@ -163,17 +163,31 @@ async def test_memory_search_thresholds(memory_env, threshold):
     ("active", "superseded", "new_mem_xyz"),
 ])
 async def test_memory_status_lifecycle_transitions(memory_env, status_cycle):
+    from src.service.memory_status import normalize_status
     initial, next_st, sub_by = status_cycle
     rec = await memory_env.memory_record(content=f"Lifecycle transition test for {next_st}")
     mem_id = rec["memory_id"]
-    assert rec["status"] == initial
+    assert normalize_status(rec["status"]) == normalize_status(initial)
+
+    if sub_by:
+        # Fixture injection (§7): superseded_by is persisted with a real FK,
+        # so the replacement target must exist.
+        memory_env.session_store.create_memory(
+            memory_id=sub_by,
+            subject="replacement",
+            predicate="replaces",
+            content="replacement target for superseded link",
+            type="fact",
+            status="active",
+        )
 
     res = await memory_env.memory_update_status(mem_id, new_status=next_st, superseded_by=sub_by)
-    assert res["current_status"] == next_st
-    assert res["previous_status"] == initial
+    # §7: 状态期望按 normalize 映射更新
+    assert normalize_status(res["current_status"]) == normalize_status(next_st)
+    assert normalize_status(res["previous_status"]) == normalize_status(initial)
 
     item = await memory_env.memory_get(mem_id)
-    assert item["status"] == next_st
+    assert normalize_status(item["status"]) == normalize_status(next_st)
     if sub_by:
         assert item["superseded_by"] == sub_by
 

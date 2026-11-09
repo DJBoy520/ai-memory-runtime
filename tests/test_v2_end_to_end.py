@@ -16,6 +16,11 @@ import time
 from typing import Any, Dict, List
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("AMR_TEST_LIVE_DAEMON"),
+    reason="requires live AMR daemon; set AMR_TEST_LIVE_DAEMON=1 with AMR_TEST_DAEMON_SOCKET",
+)
+
 from config.settings import load_config
 from src.interfaces.ipc.protocol import encode_frame, read_frame
 

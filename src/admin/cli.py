@@ -71,6 +71,18 @@ class AdminClient:
     async def snapshot(self, collection_name: str) -> Dict[str, Any]:
         return await self._send_command("admin.snapshot", {"collection": collection_name})
 
+    async def metrics(self) -> Dict[str, Any]:
+        return await self._send_command("status.metrics")
+
+    async def dead_letters(self, limit: int = 50) -> Dict[str, Any]:
+        return await self._send_command("outbox.list_dead_letters", {"limit": limit})
+
+    async def replay(self, task_ids=None) -> Dict[str, Any]:
+        params: Dict[str, Any] = {}
+        if task_ids:
+            params["task_ids"] = task_ids
+        return await self._send_command("outbox.replay", params)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -93,6 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
     snap_parser = subparsers.add_parser("snapshot", help="Create a collection snapshot.")
     snap_parser.add_argument("collection", help="Collection name (e.g. ai_memory).")
 
+    subparsers.add_parser("metrics", help="Print in-process metrics snapshot (outbox lag/backlog/dead letters).")
+    dl_parser = subparsers.add_parser("dead-letters", help="List projection dead-letter tasks.")
+    dl_parser.add_argument("--limit", type=int, default=50)
+    replay_parser = subparsers.add_parser("replay", help="Replay projection dead-letter tasks (all or selected IDs).")
+    replay_parser.add_argument("--ids", type=int, nargs="*", default=None)
+
     return parser
 
 
@@ -112,6 +130,12 @@ def main():
             res = await client.collections()
         elif args.command == "snapshot":
             res = await client.snapshot(args.collection)
+        elif args.command == "metrics":
+            res = await client.metrics()
+        elif args.command == "dead-letters":
+            res = await client.dead_letters(args.limit)
+        elif args.command == "replay":
+            res = await client.replay(args.ids)
         else:
             raise ValueError(f"Unknown command: {args.command}")
 
