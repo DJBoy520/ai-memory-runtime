@@ -1754,21 +1754,49 @@ class SessionStore:
         return int(row_id[0]) if row_id else cursor.lastrowid
 
     def resolve_memory_family(self, cursor: sqlite3.Cursor, memory_id: str) -> List[sqlite3.Row]:
-        """解析记忆族（支持多分片 legacy 行与独立实体）"""
-        cursor.execute(
-            "SELECT * FROM memories WHERE memory_id = ? OR root_memory_id = ? ORDER BY created_at ASC, memory_id ASC;",
-            (memory_id, memory_id),
-        )
-        rows = cursor.fetchall()
-        if rows:
-            root_id = rows[0]["root_memory_id"]
-            if root_id and root_id != memory_id:
+        """解析记忆族（多分片 legacy 行）与独立实体/版本行。
+
+        root_memory_id 同时被多分片（parent_chunk_N）与版本链（v2.root=v1）复用，
+        因此不能无条件按 root 归组，否则状态变更会误伤同一根下的其它版本行：
+        - parent-only id（memories 无对应行）-> root 下的全部分片；
+        - 分片行（memory_id == f"{root}_chunk_N"）-> root 下的全部分片；
+        - 其它（含版本行）-> 仅该行。
+        """
+        cursor.execute("SELECT * FROM memories WHERE memory_id = ?;", (memory_id,))
+        row = cursor.fetchone()
+        if row is None:
+            cursor.execute(
+                "SELECT * FROM memories WHERE root_memory_id = ? ORDER BY created_at ASC, memory_id ASC;",
+                (memory_id,),
+            )
+            return list(cursor.fetchall())
+
+        root_id = row["root_memory_id"]
+        if root_id and root_id != memory_id:
+            # root 行是否存在是区分“分片族”与“版本链”的可靠信号：
+            # memory_record 多分片的 parent 不落 memories；版本链的 v1 是真实行。
+            cursor.execute("SELECT 1 FROM memories WHERE memory_id = ?;", (root_id,))
+            root_exists = cursor.fetchone() is not None
+            if not root_exists:
                 cursor.execute(
                     "SELECT * FROM memories WHERE memory_id = ? OR root_memory_id = ? ORDER BY created_at ASC, memory_id ASC;",
                     (root_id, root_id),
                 )
-                rows = cursor.fetchall()
-        return list(rows)
+                return list(cursor.fetchall())
+
+        return [row]
+
+    def _validate_superseded_target(
+        self, cursor: sqlite3.Cursor, rows: List[sqlite3.Row], superseded_by: str
+    ) -> None:
+        """校验 superseded_by 目标存在且不指向自身/同族，避免底层 FK 错误不可诊断。"""
+        if any(r["memory_id"] == superseded_by for r in rows):
+            raise ValueError(
+                "INVALID_ARGUMENT: superseded_by must not reference the same memory or its shard family"
+            )
+        cursor.execute("SELECT 1 FROM memories WHERE memory_id = ?;", (superseded_by,))
+        if cursor.fetchone() is None:
+            raise ValueError(f"INVALID_ARGUMENT: superseded_by '{superseded_by}' not found")
 
     def apply_status_change(
         self,
@@ -1787,6 +1815,8 @@ class SessionStore:
         """
         canonical = normalize_status(new_status)
         now = int(time.time())
+        if canonical == "HISTORICAL" and superseded_by:
+            self._validate_superseded_target(cursor, rows, superseded_by)
         fields: Dict[str, Any] = {"status": canonical, "updated_at": now}
         if canonical == "HISTORICAL" and superseded_by:
             fields["superseded_by"] = superseded_by
@@ -1929,6 +1959,8 @@ class SessionStore:
             canonical = normalize_status(new_status)
             if canonical not in CANONICAL_STATUSES:
                 raise ValueError(f"Invalid memory status: '{new_status}'. Must be one of {CANONICAL_STATUSES}")
+            if canonical == "HISTORICAL" and superseded_by:
+                self._validate_superseded_target(cursor, rows, superseded_by)
 
             now = int(time.time())
             fields: Dict[str, Any] = {"status": canonical, "updated_at": now}

@@ -169,6 +169,18 @@ async def test_memory_status_lifecycle_transitions(memory_env, status_cycle):
     mem_id = rec["memory_id"]
     assert normalize_status(rec["status"]) == normalize_status(initial)
 
+    if sub_by:
+        # Fixture injection (§7): superseded_by is persisted with a real FK,
+        # so the replacement target must exist.
+        memory_env.session_store.create_memory(
+            memory_id=sub_by,
+            subject="replacement",
+            predicate="replaces",
+            content="replacement target for superseded link",
+            type="fact",
+            status="active",
+        )
+
     res = await memory_env.memory_update_status(mem_id, new_status=next_st, superseded_by=sub_by)
     # §7: 状态期望按 normalize 映射更新
     assert normalize_status(res["current_status"]) == normalize_status(next_st)

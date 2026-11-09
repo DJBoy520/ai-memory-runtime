@@ -6,19 +6,16 @@ and serves Agent RPC calls with full lifecycle and backpressure governance.
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from config.settings import check_and_fix_file_permissions, load_config
 from src.core.engine import BGEM3Engine
-from src.core.errors import IdempotencyConflict
-from src.core.idempotency import compute_request_digest
 from src.core.qdrant import QdrantManager
 from src.core.request_context import (
     get_client_ref,
@@ -110,86 +107,6 @@ class AMRApplication:
             qdrant_manager=self.qdrant_manager,
         )
 
-    async def _execute_with_idempotency(
-        self,
-        op: str,
-        idem_key: Optional[str],
-        agent_id: str,
-        payload_for_digest: Dict[str, Any],
-        coro_fn,
-    ) -> Dict[str, Any]:
-        """执行带幂等仲裁的写操作（RFC v5.2 §1/§2 / 外部审计 A4）。"""
-        if not idem_key or not hasattr(self.session_store, "locked_write_transaction"):
-            return await coro_fn()
-
-        digest = compute_request_digest(op, payload_for_digest)
-        retention_days = getattr(getattr(self.config, "storage", None), "idempotency_retention_days", 7)
-        now = int(time.time())
-        cutoff = now - (retention_days * 86400)
-
-        # 1. 仲裁占位
-        with self.session_store.locked_write_transaction() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO idempotency_keys (
-                    agent_id_raw, op, idem_key, request_digest, memory_id, response_json, created_at
-                ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
-                ON CONFLICT(agent_id_raw, op, idem_key) DO UPDATE
-                  SET request_digest = excluded.request_digest,
-                      memory_id = NULL,
-                      response_json = NULL,
-                      created_at = excluded.created_at
-                  WHERE idempotency_keys.created_at < ?;
-                """,
-                (agent_id, op, idem_key, digest, now, cutoff),
-            )
-            if cur.rowcount == 0:
-                cur.execute(
-                    "SELECT request_digest, response_json, memory_id FROM idempotency_keys WHERE agent_id_raw = ? AND op = ? AND idem_key = ?;",
-                    (agent_id, op, idem_key),
-                )
-                row = cur.fetchone()
-                if row is None or row["request_digest"] != digest:
-                    existing_mid = row["memory_id"] if row else None
-                    raise IdempotencyConflict(
-                        op=op,
-                        idem_key=idem_key,
-                        existing_memory_id=existing_mid,
-                    )
-                resp_data = json.loads(row["response_json"]) if row["response_json"] else {}
-                return {**resp_data, "idempotent_replay": True}
-
-        # 2. 执行实际业务协程
-        try:
-            res = await coro_fn()
-        except Exception:
-            # 业务失败时回滚占位，不烧 key
-            try:
-                with self.session_store.locked_write_transaction() as conn:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "DELETE FROM idempotency_keys WHERE agent_id_raw = ? AND op = ? AND idem_key = ? AND response_json IS NULL;",
-                        (agent_id, op, idem_key),
-                    )
-            except Exception:
-                pass
-            raise
-
-        # 3. 提交持久化响应快照
-        mid = res.get("memory_id") if isinstance(res, dict) else None
-        try:
-            with self.session_store.locked_write_transaction() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "UPDATE idempotency_keys SET memory_id = ?, response_json = ? WHERE agent_id_raw = ? AND op = ? AND idem_key = ?;",
-                    (mid, json.dumps(res, ensure_ascii=False), agent_id, op, idem_key),
-                )
-        except Exception as ex:
-            logger.warning("Failed to record idempotency snapshot for %s/%s: %s", op, idem_key, ex)
-
-        return res
-
     async def dispatch_business_rpc(self, method: str, params: Dict[str, Any]) -> Any:
         """Route business RPC calls strictly from business UDS."""
         params = params or {}
@@ -219,76 +136,42 @@ class AMRApplication:
                     status=norm_status,
                 )
             elif method in ("memory.create", "memory_create"):
-                idem_key = params.get("idempotency_key")
-                create_payload = {
-                    "content": params.get("content"),
-                    "project_id": params.get("project_id", "global"),
-                    "type": params.get("type") or params.get("memory_type", "general"),
-                    "status": params.get("status", "ACTIVE"),
-                    "collection_name": params.get("collection_name", "ai_memory"),
-                }
-                return await self._execute_with_idempotency(
-                    "create",
-                    idem_key,
-                    agent_id,
-                    create_payload,
-                    lambda: self.memory_service.memory_create(
-                        content=params.get("content"),
-                        project_id=params.get("project_id", "global"),
-                        type=params.get("type") or params.get("memory_type", "general"),
-                        status=params.get("status", "ACTIVE"),
-                        agent_id=agent_id,
-                        source_refs=params.get("source_refs"),
-                        conflicts_with=params.get("conflicts_with"),
-                        collection_name=params.get("collection_name", "ai_memory"),
-                    ),
+                # 幂等仲裁在 SessionStore.execute_idempotent 内与业务写入同事务完成；
+                # main 只透传 key 与服务端 request_id，不再做第二套包装。
+                return await self.memory_service.memory_create(
+                    content=params.get("content"),
+                    project_id=params.get("project_id", "global"),
+                    type=params.get("type") or params.get("memory_type", "general"),
+                    status=params.get("status", "ACTIVE"),
+                    agent_id=agent_id,
+                    source_refs=params.get("source_refs"),
+                    conflicts_with=params.get("conflicts_with"),
+                    collection_name=params.get("collection_name", "ai_memory"),
+                    idempotency_key=params.get("idempotency_key"),
+                    request_id=get_request_id(),
                 )
             elif method in ("memory.update", "memory_update"):
-                idem_key = params.get("idempotency_key")
-                update_payload = {
-                    "memory_id": params.get("memory_id"),
-                    "content": params.get("content"),
-                    "type": params.get("type"),
-                    "status": params.get("status"),
-                    "expected_version": params.get("expected_version"),
-                    "change_reason": params.get("change_reason"),
-                    "collection_name": params.get("collection_name", "ai_memory"),
-                }
-                return await self._execute_with_idempotency(
-                    "update",
-                    idem_key,
-                    agent_id,
-                    update_payload,
-                    lambda: self.memory_service.memory_update(
-                        memory_id=params.get("memory_id"),
-                        content=params.get("content"),
-                        type=params.get("type"),
-                        status=params.get("status"),
-                        expected_version=params.get("expected_version"),
-                        change_reason=params.get("change_reason"),
-                        agent_id=agent_id,
-                        conflicts_with=params.get("conflicts_with"),
-                        collection_name=params.get("collection_name", "ai_memory"),
-                    ),
+                return await self.memory_service.memory_update(
+                    memory_id=params.get("memory_id"),
+                    content=params.get("content"),
+                    type=params.get("type"),
+                    status=params.get("status"),
+                    expected_version=params.get("expected_version"),
+                    change_reason=params.get("change_reason"),
+                    agent_id=agent_id,
+                    conflicts_with=params.get("conflicts_with"),
+                    collection_name=params.get("collection_name", "ai_memory"),
+                    idempotency_key=params.get("idempotency_key"),
+                    request_id=get_request_id(),
                 )
             elif method in ("memory.history", "memory_history"):
                 return await self.memory_service.memory_history(memory_id=params.get("memory_id"))
             elif method in ("memory.delete", "memory_delete"):
-                idem_key = params.get("idempotency_key")
-                delete_payload = {
-                    "memory_id": params.get("memory_id"),
-                    "reason": params.get("reason"),
-                }
-                return await self._execute_with_idempotency(
-                    "delete",
-                    idem_key,
-                    agent_id,
-                    delete_payload,
-                    lambda: self.memory_service.memory_delete(
-                        memory_id=params.get("memory_id"),
-                        agent_id=agent_id,
-                        reason=params.get("reason"),
-                    ),
+                return await self.memory_service.memory_delete(
+                    memory_id=params.get("memory_id"),
+                    agent_id=agent_id,
+                    reason=params.get("reason"),
+                    idempotency_key=params.get("idempotency_key"),
                 )
             elif method == "memory.record":
                 # 兼容老版接口
