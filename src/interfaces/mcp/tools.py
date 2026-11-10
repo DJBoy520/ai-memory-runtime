@@ -273,18 +273,40 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     elif name == "memory_create":
         if "content" not in args or not isinstance(args["content"], str) or not args["content"].strip():
             raise ValueError("Parameter 'content' is required and must be a non-empty string.")
+        if len(args["content"].strip()) < 5:
+            raise ValueError("Parameter 'content' must be at least 5 characters (min 5 chars).")
         if "idempotency_key" in args and args["idempotency_key"] is not None and not isinstance(args["idempotency_key"], str):
             raise ValueError("Parameter 'idempotency_key' must be a string.")
+        if "status" in args and args["status"] is not None:
+            raw_status = args["status"]
+            valid_create_statuses = {"active", "pending_verify", "conflict", "temporary"}
+            if not isinstance(raw_status, str) or raw_status.strip().lower() not in valid_create_statuses:
+                raise ValueError(
+                    f"Invalid status '{raw_status}'. Parameter 'status' for memory_create must be one of: "
+                    "ACTIVE, PENDING_VERIFY, CONFLICT, TEMPORARY."
+                )
     elif name == "memory_update":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
         if "idempotency_key" in args and args["idempotency_key"] is not None and not isinstance(args["idempotency_key"], str):
             raise ValueError("Parameter 'idempotency_key' must be a string.")
         if "content" in args and args["content"] is not None:
+            if not isinstance(args["content"], str) or not args["content"].strip():
+                raise ValueError("Parameter 'content' must be a non-empty string when updating content.")
+            if len(args["content"].strip()) < 5:
+                raise ValueError("Parameter 'content' must be at least 5 characters (min 5 chars).")
             if "expected_version" not in args or args["expected_version"] is None:
                 raise ValueError("Parameter 'expected_version' is required when updating content.")
             if "change_reason" not in args or not args.get("change_reason"):
                 raise ValueError("Parameter 'change_reason' is required when updating content.")
+        if "status" in args and args["status"] is not None:
+            raw_status = args["status"]
+            valid_update_statuses = {"active", "pending_verify", "conflict", "historical", "temporary", "deleted"}
+            if not isinstance(raw_status, str) or raw_status.strip().lower() not in valid_update_statuses:
+                raise ValueError(
+                    f"Invalid status '{raw_status}'. Parameter 'status' for memory_update must be one of: "
+                    "ACTIVE, PENDING_VERIFY, CONFLICT, HISTORICAL, TEMPORARY, DELETED."
+                )
     elif name == "memory_history" or name == "memory_get" or name == "memory_delete":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
@@ -296,11 +318,20 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     elif name == "memory_update_status":
         if "memory_id" not in args or not isinstance(args["memory_id"], str) or not args["memory_id"].strip():
             raise ValueError("Parameter 'memory_id' is required.")
-        valid_statuses = {"active", "superseded", "archived", "deleted", "ACTIVE", "PENDING_VERIFY", "CONFLICT", "HISTORICAL", "TEMPORARY", "DELETED"}
+        valid_statuses = {
+            "active",
+            "superseded",
+            "archived",
+            "deleted",
+            "pending_verify",
+            "conflict",
+            "historical",
+            "temporary",
+        }
         new_stat = args.get("new_status")
-        if new_stat not in valid_statuses:
+        if not isinstance(new_stat, str) or new_stat.strip().lower() not in valid_statuses:
             raise ValueError(f"Invalid status '{new_stat}'")
-        if new_stat.lower() == "superseded" and not args.get("superseded_by"):
+        if new_stat.strip().lower() == "superseded" and not args.get("superseded_by"):
             raise ValueError("Parameter 'superseded_by' is required when new_status is 'superseded'")
     elif name == "memory_ingest_session":
         if "session_id" not in args or not isinstance(args["session_id"], str) or not args["session_id"].strip():
