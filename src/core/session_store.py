@@ -398,6 +398,8 @@ class SessionStore:
         mem_cols = {row["name"] for row in cursor.fetchall()}
         if mem_cols:
             v2_mem_columns = {
+                "status": "TEXT NOT NULL DEFAULT 'ACTIVE'",
+                "qdrant_point_id": "TEXT",
                 "type": "TEXT NOT NULL DEFAULT 'general'",
                 "subject": "TEXT DEFAULT ''",
                 "predicate": "TEXT DEFAULT ''",
@@ -435,6 +437,15 @@ class SessionStore:
             for col_name, col_def in v2_mem_columns.items():
                 if col_name not in mem_cols:
                     cursor.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def};")
+
+            if "qdrant_point_id" not in mem_cols:
+                cursor.execute(
+                    "UPDATE memories SET qdrant_point_id = memory_id WHERE qdrant_point_id IS NULL OR qdrant_point_id = '';"
+                )
+            if "status" not in mem_cols:
+                cursor.execute(
+                    "UPDATE memories SET status = 'ACTIVE' WHERE status IS NULL OR status = '';"
+                )
 
             # 补充索引
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status);")
@@ -565,20 +576,41 @@ class SessionStore:
             cursor.execute("PRAGMA table_info(memories);")
             mem_cols = {row["name"] for row in cursor.fetchall()}
             if mem_cols:
+                if "status" not in mem_cols:
+                    cursor.execute("ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE';")
+                    cursor.execute("UPDATE memories SET status = 'ACTIVE' WHERE status IS NULL OR status = '';")
+                if "qdrant_point_id" not in mem_cols:
+                    cursor.execute("ALTER TABLE memories ADD COLUMN qdrant_point_id TEXT;")
+                    cursor.execute("UPDATE memories SET qdrant_point_id = memory_id WHERE qdrant_point_id IS NULL OR qdrant_point_id = '';")
                 if "projection_revision" not in mem_cols:
                     cursor.execute("ALTER TABLE memories ADD COLUMN projection_revision INTEGER NOT NULL DEFAULT 0;")
                 if "collection_name" not in mem_cols:
                     cursor.execute("ALTER TABLE memories ADD COLUMN collection_name TEXT NOT NULL DEFAULT 'ai_memory';")
                 if "projection_class" not in mem_cols:
                     cursor.execute("ALTER TABLE memories ADD COLUMN projection_class TEXT NOT NULL DEFAULT 'legacy';")
+                if "source_refs" not in mem_cols:
+                    cursor.execute("ALTER TABLE memories ADD COLUMN source_refs TEXT DEFAULT '[]';")
 
             v3_count = 0
             legacy_count = 0
+            ambiguous_count = 0
             if mem_cols:
                 cursor.execute("SELECT COUNT(*) FROM memories WHERE projection_class = 'v3';")
                 v3_count = cursor.fetchone()[0]
                 cursor.execute("SELECT COUNT(*) FROM memories WHERE projection_class = 'legacy';")
                 legacy_count = cursor.fetchone()[0]
+
+                cursor.execute("""
+                    SELECT COUNT(*) FROM memories
+                    WHERE (
+                        status IS NULL
+                        OR UPPER(status) NOT IN ('ACTIVE', 'HISTORICAL', 'PENDING_VERIFY', 'CONFLICT', 'TEMPORARY', 'DELETED')
+                        OR (source_refs IS NOT NULL AND TRIM(source_refs) = '' AND source_refs != '')
+                        OR (source_refs IS NOT NULL AND source_refs NOT IN ('', '[]') AND NOT (source_refs LIKE '[%]'))
+                        OR (status = 'DELETED' AND (SELECT COUNT(*) FROM memory_revisions r WHERE r.memory_id = memories.memory_id) = 0)
+                    );
+                """)
+                ambiguous_count = cursor.fetchone()[0]
 
             # 1. 存量分类回填 (一次性门控)
             if "v5_projection_class_backfill" not in applied_migrations:
@@ -596,12 +628,16 @@ class SessionStore:
 
                 cursor.execute(
                     "INSERT INTO _amr_migrations (migration_id, applied_at, details) VALUES (?, ?, ?);",
-                    ("v5_projection_class_backfill", now, json.dumps({"v3_count": v3_count, "legacy_count": legacy_count})),
+                    ("v5_projection_class_backfill", now, json.dumps({
+                        "v3_count": v3_count,
+                        "legacy_count": legacy_count,
+                        "ambiguous_count": ambiguous_count,
+                    })),
                 )
                 report_data = {
                     "v3_count": v3_count,
                     "legacy_count": legacy_count,
-                    "ambiguous_count": 0,
+                    "ambiguous_count": ambiguous_count,
                     "quarantine": [],
                     "status": "in_progress",
                     "updated_at": now,
@@ -703,9 +739,9 @@ class SessionStore:
                         report_data = {
                             "v3_count": v3_count,
                             "legacy_count": legacy_count,
-                            "ambiguous_count": 0,
+                            "ambiguous_count": ambiguous_count,
                             "quarantine": [
-                                {"id": r["id"], "memory_id": r["memory_id"], "reason": reason}
+                                {"id": r.get("id"), "memory_id": r.get("memory_id"), "reason": reason}
                                 for r, reason in quarantine
                             ],
                             "status": "blocked",
@@ -720,6 +756,35 @@ class SessionStore:
                             quarantine_count=len(quarantine),
                             report_path=str(report_path),
                         )
+
+                    # 转换任务状态映射与 (target_collection, memory_id) 去重
+                    def _map_outbox_status(s_raw: Optional[str]) -> str:
+                        s = str(s_raw or "pending").strip().lower()
+                        if s in ("completed", "done", "synced"):
+                            return "done"
+                        elif s in ("dead_letter",):
+                            return "dead_letter"
+                        else:
+                            return "pending"
+
+                    deduped_map: Dict[Tuple[str, str], Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+                    for r_dict, m_dict in convertible:
+                        col = m_dict.get("collection_name") or "ai_memory"
+                        mid = r_dict["memory_id"]
+                        key = (col, mid)
+                        if key not in deduped_map:
+                            deduped_map[key] = (r_dict, m_dict)
+                        else:
+                            def _task_sort_key(item):
+                                r_d, m_d = item
+                                rev = r_d.get("projection_revision") if r_d.get("projection_revision") is not None else (r_d.get("version") if r_d.get("version") is not None else (m_d.get("projection_revision") or 0))
+                                created = r_d.get("created_at") or 0
+                                item_id = r_d.get("id") or 0
+                                return (rev, created, item_id)
+                            if _task_sort_key((r_dict, m_dict)) > _task_sort_key(deduped_map[key]):
+                                deduped_map[key] = (r_dict, m_dict)
+
+                    deduped_tasks = list(deduped_map.values())
 
                     # 全部可转换或空表：同事务建 _new、全列 INSERT、换表
                     cursor.execute("""
@@ -739,20 +804,33 @@ class SessionStore:
                             updated_at INTEGER NOT NULL
                         );
                     """)
-                    for r_dict, m_dict in convertible:
+                    for r_dict, m_dict in deduped_tasks:
+                        st = _map_outbox_status(r_dict.get("status"))
+                        r_count = r_dict.get("retry_count") or 0
+                        dl_at = r_dict.get("dead_letter_at")
+                        if st == "dead_letter" and not dl_at:
+                            dl_at = now
+                        proj_rev = (m_dict.get("projection_revision") or 0) if st == "done" else None
+                        next_retry = r_dict.get("next_retry_at") if (r_count > 0 and (r_dict.get("next_retry_at") or 0) > 0) else None
                         cursor.execute(
                             """
                             INSERT INTO memory_projection_outbox_new (
                                 target_collection, memory_id, projection_revision, request_id,
                                 projected_revision, status, retry_count, next_retry_at,
                                 last_error, dead_letter_at, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, NULL, 'pending', 0, NULL, NULL, NULL, ?, ?);
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                             """,
                             (
                                 m_dict.get("collection_name") or "ai_memory",
                                 r_dict["memory_id"],
                                 m_dict.get("projection_revision") or 0,
                                 r_dict.get("request_id"),
+                                proj_rev,
+                                st,
+                                r_count,
+                                next_retry,
+                                r_dict.get("last_error"),
+                                dl_at,
                                 r_dict.get("created_at") or now,
                                 now,
                             ),
@@ -762,15 +840,15 @@ class SessionStore:
 
                     cursor.execute(
                         "INSERT INTO _amr_migrations (migration_id, applied_at, details) VALUES (?, ?, ?);",
-                        ("v5_outbox_rebuild", now, f"converted_{len(convertible)}_tasks"),
+                        ("v5_outbox_rebuild", now, f"converted_{len(deduped_tasks)}_tasks"),
                     )
                     report_data = {
                         "v3_count": v3_count,
                         "legacy_count": legacy_count,
-                        "ambiguous_count": 0,
+                        "ambiguous_count": ambiguous_count,
                         "quarantine": [],
                         "status": "completed",
-                        "converted_count": len(convertible),
+                        "converted_count": len(deduped_tasks),
                         "updated_at": now,
                     }
                     with open(report_path, "w", encoding="utf-8") as f:
@@ -1515,35 +1593,58 @@ class SessionStore:
         强制触发 SQLite WAL 检查点，将 WAL 文件数据刷回主库。
         mode 可选: PASSIVE, FULL, RESTART, TRUNCATE
         """
+        valid_modes = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
+        mode_clean = mode.upper().strip() if mode else ""
+        if mode_clean not in valid_modes:
+            raise ValueError(f"Invalid checkpoint mode: '{mode}'. Must be one of {valid_modes}")
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute(f"PRAGMA wal_checkpoint({mode});")
+            cursor.execute(f"PRAGMA wal_checkpoint({mode_clean});")
 
     @contextmanager
     def locked_write_transaction(self):
         """
         排他写事务上下文管理器：
-        持 self._lock（RLock）；conn.isolation_level=None；显式 BEGIN IMMEDIATE；
-        正常退出 COMMIT；异常 ROLLBACK 后原样抛出；finally 恢复原 isolation_level。
-        yield sqlite3.Connection（调用方用 .cursor()）
+        支持线程重入与嵌套事务 (SAVEPOINT)。
+        最外层：持 self._lock，conn.isolation_level=None，显式 BEGIN IMMEDIATE，正常退出 COMMIT，异常 ROLLBACK；
+        内层：创建独立 SAVEPOINT，正常退出 RELEASE，异常 ROLLBACK TO。
         """
         with self._lock:
             conn = self._get_connection()
-            old_isolation = conn.isolation_level
+            if not hasattr(self, "_tx_depth"):
+                self._tx_depth = 0
+            is_root = (self._tx_depth == 0)
+            sp_name = f"sp_{self._tx_depth}" if not is_root else None
+            old_isolation = conn.isolation_level if is_root else None
+            self._tx_depth += 1
             try:
-                conn.isolation_level = None
-                conn.execute("BEGIN IMMEDIATE")
+                if is_root:
+                    conn.isolation_level = None
+                    conn.execute("BEGIN IMMEDIATE")
+                else:
+                    conn.execute(f"SAVEPOINT {sp_name}")
                 yield conn
-                conn.execute("COMMIT")
+                if is_root:
+                    conn.execute("COMMIT")
+                else:
+                    conn.execute(f"RELEASE SAVEPOINT {sp_name}")
             except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
+                if is_root:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+                    except Exception:
+                        pass
                 raise
             finally:
-                conn.isolation_level = old_isolation
+                self._tx_depth -= 1
+                if is_root:
+                    conn.isolation_level = old_isolation
 
     def execute_idempotent(
         self,
@@ -1603,8 +1704,10 @@ class SessionStore:
                         idem_key=idem_key,
                         existing_memory_id=existing_mid,
                     )
-                resp_data = json.loads(row["response_json"]) if row["response_json"] else {}
-                return {**resp_data, "idempotent_replay": True}
+                resp_raw = json.loads(row["response_json"]) if row["response_json"] else None
+                if isinstance(resp_raw, dict):
+                    return {**resp_raw, "idempotent_replay": True}
+                return {"result": resp_raw, "idempotent_replay": True}
 
             business_res = business_fn(cur)
             if isinstance(business_res, tuple) and len(business_res) == 2:
@@ -1815,6 +1918,10 @@ class SessionStore:
         """
         canonical = normalize_status(new_status)
         now = int(time.time())
+        for r in rows:
+            curr = normalize_status(r["status"] if "status" in r.keys() else "ACTIVE")
+            if curr == "DELETED" and canonical != "DELETED":
+                raise ValueError("Illegal status transition: DELETED state is terminal and cannot be reverted.")
         if canonical == "HISTORICAL" and superseded_by:
             self._validate_superseded_target(cursor, rows, superseded_by)
         fields: Dict[str, Any] = {"status": canonical, "updated_at": now}
@@ -2359,6 +2466,8 @@ class SessionStore:
                 if t_row:
                     try:
                         t_conflicts = json.loads(t_row["conflicts_with"] or "[]")
+                        if not isinstance(t_conflicts, list):
+                            t_conflicts = []
                     except Exception:
                         t_conflicts = []
                     if memory_id not in t_conflicts:
@@ -2443,10 +2552,14 @@ class SessionStore:
             res = dict(row)
             try:
                 res["source_refs"] = json.loads(res.get("source_refs") or "[]")
+                if not isinstance(res["source_refs"], list):
+                    res["source_refs"] = []
             except Exception:
                 res["source_refs"] = []
             try:
                 res["conflicts_with"] = json.loads(res.get("conflicts_with") or "[]")
+                if not isinstance(res["conflicts_with"], list):
+                    res["conflicts_with"] = []
             except Exception:
                 res["conflicts_with"] = []
 
@@ -2582,6 +2695,8 @@ class SessionStore:
             )
         else:
             # 仅元数据 / 状态更新
+            if superseded_by:
+                self._validate_superseded_target(cursor, [row], superseded_by)
             deleted_at = now if new_status == "DELETED" else row["deleted_at"]
             deleted_by = agent_id if new_status == "DELETED" else row["deleted_by"]
             sup_by = superseded_by or row["superseded_by"]
@@ -2618,6 +2733,8 @@ class SessionStore:
                 if t_row:
                     try:
                         t_conflicts = json.loads(t_row["conflicts_with"] or "[]")
+                        if not isinstance(t_conflicts, list):
+                            t_conflicts = []
                     except Exception:
                         t_conflicts = []
                     if memory_id not in t_conflicts:

@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -264,7 +265,7 @@ def run_apply_action(db_path: Path, report_path: Optional[Path] = None) -> int:
     return 0
 
 
-def run_rehearse_action(db_path: Path, report_path: Optional[Path] = None) -> int:
+def run_rehearse_action(db_path: Path, report_path: Optional[Path] = None, keep_replica: bool = False) -> int:
     """使用 sqlite3 backup API 将源库复制到临时副本，在副本上执行演练与对账，绝不修改源库"""
     if not db_path.exists():
         raise FileNotFoundError(f"Source database not found: {db_path}")
@@ -273,59 +274,63 @@ def run_rehearse_action(db_path: Path, report_path: Optional[Path] = None) -> in
     temp_dir = tempfile.mkdtemp(prefix="amr_rehearse_")
     replica_path = Path(temp_dir) / "rehearsal_replica.db"
 
-    # 1. 使用 sqlite3 在线 backup API 创建完整副本
-    src_conn = sqlite3.connect(str(db_path))
-    dst_conn = sqlite3.connect(str(replica_path))
     try:
-        src_conn.backup(dst_conn)
+        # 1. 使用 sqlite3 在线 backup API 创建完整副本
+        src_conn = sqlite3.connect(str(db_path))
+        dst_conn = sqlite3.connect(str(replica_path))
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+            src_conn.close()
+
+        logger.info("Created backup replica at %s using sqlite3 backup API.", replica_path)
+
+        before_inventory = get_inventory(replica_path)
+        blocked_err = None
+
+        try:
+            # 2. 在副本上跑迁移
+            store = SessionStore(db_path=replica_path)
+            store.close()
+        except MigrationBlocked as mb:
+            blocked_err = mb
+            logger.warning("Rehearsal migration encountered quarantine: %s", mb)
+        except Exception as e:
+            logger.error("Error during rehearsal migration: %s", e)
+            raise
+
+        after_inventory = get_inventory(replica_path)
+        q_count = after_inventory.get("quarantine", {}).get("count", 0)
+
+        report = {
+            "action": "rehearse",
+            "status": "blocked" if (blocked_err or q_count > 0) else "completed",
+            "source_db": str(db_path.resolve()),
+            "replica_db": str(replica_path.resolve()),
+            "before": before_inventory,
+            "after": after_inventory,
+            "quarantine_count": q_count,
+            "timestamp": int(time.time()),
+        }
+
+        output_json = json.dumps(report, ensure_ascii=False, indent=2)
+        print(output_json)
+
+        if report_path:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(output_json, encoding="utf-8")
+            logger.info("Rehearsal report written to %s", report_path)
+
+        if blocked_err or q_count > 0:
+            print(f"\n[ALERT] 预演发现隔离任务 (count={q_count})，必须人工确认后才可上线！", file=sys.stderr)
+            return 1
+
+        logger.info("Rehearsal completed successfully without modifying source database.")
+        return 0
     finally:
-        dst_conn.close()
-        src_conn.close()
-
-    logger.info("Created backup replica at %s using sqlite3 backup API.", replica_path)
-
-    before_inventory = get_inventory(replica_path)
-    blocked_err = None
-
-    try:
-        # 2. 在副本上跑迁移
-        store = SessionStore(db_path=replica_path)
-        store.close()
-    except MigrationBlocked as mb:
-        blocked_err = mb
-        logger.warning("Rehearsal migration encountered quarantine: %s", mb)
-    except Exception as e:
-        logger.error("Error during rehearsal migration: %s", e)
-        raise
-
-    after_inventory = get_inventory(replica_path)
-    q_count = after_inventory.get("quarantine", {}).get("count", 0)
-
-    report = {
-        "action": "rehearse",
-        "status": "blocked" if (blocked_err or q_count > 0) else "completed",
-        "source_db": str(db_path.resolve()),
-        "replica_db": str(replica_path.resolve()),
-        "before": before_inventory,
-        "after": after_inventory,
-        "quarantine_count": q_count,
-        "timestamp": int(time.time()),
-    }
-
-    output_json = json.dumps(report, ensure_ascii=False, indent=2)
-    print(output_json)
-
-    if report_path:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(output_json, encoding="utf-8")
-        logger.info("Rehearsal report written to %s", report_path)
-
-    if blocked_err or q_count > 0:
-        print(f"\n[ALERT] 预演发现隔离任务 (count={q_count})，必须人工确认后才可上线！", file=sys.stderr)
-        return 1
-
-    logger.info("Rehearsal completed successfully without modifying source database.")
-    return 0
+        if not keep_replica and Path(temp_dir).exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def main():
@@ -354,6 +359,11 @@ def main():
         help="通过 sqlite3 backup API 备份源库到临时副本并进行无害迁移预演",
     )
     parser.add_argument(
+        "--keep-replica",
+        action="store_true",
+        help="演练结束后保留临时副本目录（默认自动清理）",
+    )
+    parser.add_argument(
         "--report",
         type=Path,
         default=None,
@@ -379,7 +389,7 @@ def main():
         exit_code = exit_code or code
 
     if args.rehearse:
-        code = run_rehearse_action(target_db, report_path=args.report)
+        code = run_rehearse_action(target_db, report_path=args.report, keep_replica=args.keep_replica)
         exit_code = exit_code or code
 
     if args.apply:
