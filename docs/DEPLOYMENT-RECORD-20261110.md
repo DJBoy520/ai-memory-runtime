@@ -75,5 +75,5 @@ storage:
 - 代码：`git reset --hard 065b24a`（发布前 main）；或切回旧分支。
 - 数据：停止服务后，用 `data/backups/pre_v5_20261110_004929/sessions.db` 覆盖 `data/sessions.db`
   （同时恢复 `config.yaml`），再启动旧代码。
-- 触发条件：`MigrationBlocked`、启动失败、Worker 锁冲突循环、dead_letter 持续上升、`amr doctor` CRITICAL。
+- 触发条件：`MigrationBlocked`、启动失败、Worker 锁冲突循环、dead_letter 持续上升、`python3 scripts/amr_doctor.py` 报告 UNHEALTHY / CRITICAL。
 - 详见 `docs/ROLLOUT-AMR-RELIABILITY.md`。

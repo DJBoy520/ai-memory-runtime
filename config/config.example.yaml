@@ -24,30 +24,32 @@ model:
   fp16: true
   max_batch: 16
   max_queue_size: 64
-  idle_timeout_seconds: 3600
+  idle_timeout_seconds: 300  # 代码默认 300 秒。生产建议：0（禁用空闲卸载，模型长驻显存避免冷启动抖动）
   max_token_length: 8192
-  preload_on_start: false
+  preload_on_start: false  # 代码默认 false。生产建议：true（启动时即预加载模型，消除首请求冷启动延迟）
   load_timeout_seconds: 120.0
   request_load_wait_seconds: 25.0
   load_stall_exit_seconds: 180.0
-  watchdog_exit_enabled: false  # 仅在 systemd 托管环境下显式开启（受控退出）
+  watchdog_exit_enabled: false  # 代码默认 false。生产建议：仅在 systemd 托管环境下开启 true（卡死时受控退出并触发重启）
 
 storage:
   sqlite_path: "data/sessions.db"
   busy_timeout: 5000
   wal_enabled: true
+  idempotency_retention_days: 7  # 幂等键记录保留天数（默认 7 天）
 
 qdrant:
   url: "http://127.0.0.1:6333"
   api_key: ""
   timeout: 10.0
+  prefer_grpc: true
   collections:
     - "ai_memory"
     - "crypto_standards"
     - "project_docs"
 
 search:
-  default_score_threshold: 0.52  # 生产推荐召回过滤阈值（兼顾准确率与召回率）
+  default_score_threshold: null  # 代码默认 None。生产建议：0.52（BGE-M3 黄金集校准阈值，兼顾准确率与召回率）
   project_fallback_ids:
     - "global"
     - "general"
