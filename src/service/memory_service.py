@@ -150,6 +150,12 @@ class MemoryService:
         if not query or not query.strip():
             return {"results": [], "total": 0}
 
+        # JSON 客户端可能把布尔值传成字符串；避免 "false" 被 Python 当作真值。
+        if isinstance(include_history, str):
+            include_history = include_history.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            include_history = bool(include_history)
+
         # 规范化 target collections
         if collections is None:
             target_cols = ["ai_memory"]
