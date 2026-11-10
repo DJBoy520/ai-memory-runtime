@@ -1,13 +1,26 @@
 [Unit]
 Description=AI Memory Runtime (AMR) - Unified Semantic Memory Operating System
 After=network.target
+# Rate-limit automatic restarts in case of persistent crashes (e.g., migration failure or lock conflict)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
+
+# NOTE: This unit is designed as a systemd user unit (~/.config/systemd/user/amr.service).
+# Management commands:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now amr.service
+#   systemctl --user status amr.service
+#   systemctl --user restart amr.service
+#
+# If your deployment path differs from default (%h/WorkSpaces/ai-memory-runtime),
+# adjust WorkingDirectory, PYTHONPATH, ExecStart, and ReadWritePaths accordingly.
 WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
 Environment="PYTHONPATH=%h/WorkSpaces/ai-memory-runtime"
 Environment="CUDA_VISIBLE_DEVICES=0"
-ExecStart=/usr/bin/python3 src/main.py
+ExecStart=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python src/main.py
 Restart=always
 RestartSec=3s
 
