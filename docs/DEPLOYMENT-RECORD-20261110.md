@@ -77,3 +77,16 @@ storage:
   （同时恢复 `config.yaml`），再启动旧代码。
 - 触发条件：`MigrationBlocked`、启动失败、Worker 锁冲突循环、dead_letter 持续上升、`python3 scripts/amr_doctor.py` 报告 UNHEALTHY / CRITICAL。
 - 详见 `docs/ROLLOUT-AMR-RELIABILITY.md`。
+
+## 8. v5.0.1 独立审计加固部署（2026-11-10 08:25 CST）
+
+- **发布提交**: `3d66710`（main），tag `v5.0.1`；审计详情见 `docs/AUDIT-ROUND-20261110.md`。
+- **备份**: `data/backups/pre_v501_20261110_082350/`（DB + WAL/SHM + config）。
+- **停机/启动**: 08:24 停止；08:25:30 启动；08:27:51 模型 READY（136.3s < 300s watchdog 阈值）。
+- **迁移**: `_amr_migrations` 两条标记不变；v3=1174 / legacy=3（含 1 条部署冒烟行）；outbox 正常排水。
+- **验证**:
+  - `python3 scripts/amr_doctor.py --json` → overall **healthy**，exit 0；
+  - MCP Bridge 生产冒烟：身份伪造被拦截（配置 `test_runner`，客户端传 `hermes` 仍落 `test_runner`）；
+    同 key 仅 status 大小写不同 → `idempotent_replay=true`；search 结果 `created_at` 非空；delete 投影后 backlog/lag/dead=0；
+  - main 全量测试：**352 passed, 5 skipped**；审计专项：**181 passed**。
+- **回退**：代码 `git reset --hard 1e30119`（v5.0.0）；数据用上述 pre_v501 备份恢复。
