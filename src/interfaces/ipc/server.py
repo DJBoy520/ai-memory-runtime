@@ -85,19 +85,53 @@ class UDSServer:
                         pass
                     continue
 
+                if not isinstance(req, dict):
+                    logger.warning("[%s] Invalid Request: root payload must be an object (got %s)", self.name, type(req).__name__)
+                    err_resp = make_jsonrpc_error(-32600, "Invalid Request: root payload must be an object", req_id=None)
+                    try:
+                        await write_frame(writer, err_resp, max_bytes=self.max_request_bytes)
+                    except (ConnectionResetError, BrokenPipeError):
+                        break
+                    continue
+
+                is_notification = "id" not in req
                 req_id = req.get("id")
                 method = req.get("method")
                 params = req.get("params")
 
                 if not method or not isinstance(method, str):
-                    err_resp = make_jsonrpc_error(-32600, "Invalid Request: missing method", req_id=req_id)
-                    await write_frame(writer, err_resp, max_bytes=self.max_request_bytes)
+                    logger.warning("[%s] Invalid Request: missing or non-string method: %r", self.name, method)
+                    if not is_notification:
+                        err_resp = make_jsonrpc_error(-32600, "Invalid Request: missing method", req_id=req_id)
+                        try:
+                            await write_frame(writer, err_resp, max_bytes=self.max_request_bytes)
+                        except (ConnectionResetError, BrokenPipeError):
+                            break
+                    continue
+
+                if params is not None and not isinstance(params, dict):
+                    logger.warning("[%s] Invalid params: expected dictionary or null, got %s", self.name, type(params).__name__)
+                    if not is_notification:
+                        err_resp = make_jsonrpc_error(
+                            -32602,
+                            f"INVALID_ARGUMENT: params must be a dictionary, got {type(params).__name__}",
+                            req_id=req_id,
+                        )
+                        try:
+                            await write_frame(writer, err_resp, max_bytes=self.max_request_bytes)
+                        except (ConnectionResetError, BrokenPipeError):
+                            break
                     continue
 
                 try:
                     res = await self.handler(method, params)
+                    if is_notification:
+                        continue
                     resp = make_jsonrpc_response(res, req_id=req_id)
                 except Exception as ex:
+                    if is_notification:
+                        logger.warning("[%s] Notification handler error executing method '%s': %s", self.name, method, ex)
+                        continue
                     resp = self._map_exception_to_error_response(ex, method, req_id)
 
                 try:
@@ -217,6 +251,9 @@ class UDSServer:
             elif msg_str.startswith("NOT_FOUND:"):
                 data = getattr(ex, "data", {})
                 return make_jsonrpc_error(-32005, msg_str, data=data, req_id=req_id)
+            elif msg_str.startswith("METHOD_NOT_FOUND:"):
+                data = getattr(ex, "data", {})
+                return make_jsonrpc_error(-32601, msg_str, data=data, req_id=req_id)
             else:
                 data = getattr(ex, "data", None)
                 msg = msg_str if msg_str.startswith("INVALID_ARGUMENT:") else f"INVALID_ARGUMENT: {msg_str}"

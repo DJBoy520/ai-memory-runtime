@@ -55,6 +55,12 @@ class MemoryService:
         self._enrich_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mem_enrich")
         self._enrich_semaphore = threading.Semaphore(2)
 
+    @property
+    def idempotency_retention_days(self) -> int:
+        if self.config and hasattr(self.config, "storage") and hasattr(self.config.storage, "idempotency_retention_days"):
+            return self.config.storage.idempotency_retention_days
+        return 7
+
     def _generate_memory_id(self) -> str:
         """生成符合 mem_YYYYMMDD_xxxxxx 格式的全局唯一 ID"""
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -144,6 +150,12 @@ class MemoryService:
         if not query or not query.strip():
             return {"results": [], "total": 0}
 
+        # JSON 客户端可能把布尔值传成字符串；避免 "false" 被 Python 当作真值。
+        if isinstance(include_history, str):
+            include_history = include_history.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            include_history = bool(include_history)
+
         # 规范化 target collections
         if collections is None:
             target_cols = ["ai_memory"]
@@ -228,29 +240,51 @@ class MemoryService:
         # 若命中点已被接替（SUPERSEDED 且有 superseded_by），沿链重定向到现役版本（最多 3 跳，防环），
         # 使 Agent 持有过期 ID 时仍能取到当前事实。
         exact_hits: List[Dict[str, Any]] = []
-        allowed_status_set = {s.upper() for s in allowed_statuses}
+        allowed_status_set = {s.upper() for s in allowed_statuses} | {normalize_status(s) for s in allowed_statuses}
         for matched_id in dict.fromkeys(re.findall(r"mem_\d{8}_[0-9a-f]{6,}(?:_chunk_\d+)?", query)):
             redirect_from: Optional[str] = None
             point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, matched_id)
+            seen_ids = {matched_id}
             for _hop in range(3):
                 if not point_info:
                     break
-                payload = point_info["payload"] or {}
-                status_val = (payload.get("status") or "").upper()
-                if status_val == "SUPERSEDED" and payload.get("superseded_by"):
+                payload = point_info.get("payload") or {}
+                status_raw = payload.get("status")
+                target_id = payload.get("superseded_by")
+                if normalize_status(status_raw) == "HISTORICAL" and target_id:
+                    if target_id in seen_ids:
+                        break
+                    seen_ids.add(target_id)
                     redirect_from = redirect_from or matched_id
-                    point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, payload["superseded_by"])
+                    point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, target_id)
                     continue
                 break
             if not point_info:
                 continue
-            payload = point_info["payload"] or {}
+            payload = point_info.get("payload") or {}
             status_val = (payload.get("status") or "").upper()
-            if status_val and status_val not in allowed_status_set:
+            canonical_status = normalize_status(payload.get("status"))
+            if status_val and status_val not in allowed_status_set and canonical_status not in allowed_status_set:
                 continue
             p_type = payload.get("type") or payload.get("memory_type", "general")
+            final_mid = payload.get("memory_id") or matched_id
+            created_at_val = payload.get("created_at")
+            updated_at_val = payload.get("updated_at")
+            if (created_at_val is None or updated_at_val is None) and self.session_store:
+                try:
+                    db_snap = await asyncio.to_thread(
+                        self.session_store.get_memory_projection_snapshot, final_mid
+                    )
+                    if db_snap:
+                        if created_at_val is None:
+                            created_at_val = db_snap.get("created_at")
+                        if updated_at_val is None:
+                            updated_at_val = db_snap.get("updated_at")
+                except Exception as ex:
+                    logger.debug("Failed to backfill timestamps for %s: %s", final_mid, ex)
+
             exact_hits.append({
-                "memory_id": payload.get("memory_id"),
+                "memory_id": final_mid,
                 "version": payload.get("version", 1),
                 "content": payload.get("content", ""),
                 "project_id": payload.get("project_id", "global"),
@@ -266,8 +300,8 @@ class MemoryService:
                 "superseded_from": redirect_from,
                 "collection": point_info["collection"],
                 "scope": payload.get("scope", "global"),
-                "created_at": payload.get("created_at"),
-                "updated_at": payload.get("updated_at"),
+                "created_at": created_at_val,
+                "updated_at": updated_at_val,
                 "subject": payload.get("subject", ""),
                 "predicate": payload.get("predicate", ""),
                 "object": payload.get("object", None),
@@ -699,6 +733,9 @@ class MemoryService:
             result["collection_name"] = mem_row.get("collection_name", "ai_memory")
             result["projection_class"] = "v3"
 
+        if mem_row.get("deletion_reason") is not None:
+            result["deletion_reason"] = mem_row.get("deletion_reason")
+
         return result
 
     async def memory_update_status(
@@ -826,7 +863,7 @@ class MemoryService:
             "content": content,
             "project_id": project_id or "global",
             "type": type or "general",
-            "status": status,
+            "status": canonical_st,
             "agent_id": agent_id or "system",
             "source_refs": source_refs,
             "conflicts_with": conflicts_with,
@@ -857,6 +894,7 @@ class MemoryService:
             idempotency_key,
             digest,
             business_fn,
+            retention_days=self.idempotency_retention_days,
             agent_id_raw=agent_id or "default",
         )
         return res
@@ -913,11 +951,12 @@ class MemoryService:
                     hint="legacy 记忆不支持类型变更",
                 )
             if status is not None:
+                canonical_st = normalize_status(status)
                 digest_payload = {
                     "memory_id": memory_id,
                     "content": content,
                     "type": type,
-                    "status": status,
+                    "status": canonical_st,
                     "expected_version": expected_version,
                     "change_reason": change_reason,
                     "agent_id": agent_id or "system",
@@ -929,7 +968,7 @@ class MemoryService:
                 def legacy_fn(cur):
                     st_res = self.session_store.change_memory_status(
                         memory_id=memory_id,
-                        new_status=status,
+                        new_status=canonical_st,
                         actor=agent_id or "system",
                         reason=change_reason,
                         cursor=cur,
@@ -943,6 +982,7 @@ class MemoryService:
                     idempotency_key,
                     digest,
                     legacy_fn,
+                    retention_days=self.idempotency_retention_days,
                     agent_id_raw=agent_id or "default",
                 )
                 if "projection_status" not in res:
@@ -952,11 +992,12 @@ class MemoryService:
             return {**mem_row, "projection_status": "pending"}
 
         # v3 路径
+        canonical_st = normalize_status(status) if status is not None else None
         digest_payload = {
             "memory_id": memory_id,
             "content": content,
             "type": type,
-            "status": status,
+            "status": canonical_st,
             "expected_version": expected_version,
             "change_reason": change_reason,
             "agent_id": agent_id or "system",
@@ -970,7 +1011,7 @@ class MemoryService:
                 memory_id=memory_id,
                 content=content,
                 type=type,
-                status=status,
+                status=canonical_st,
                 expected_version=expected_version,
                 change_reason=change_reason,
                 agent_id=agent_id or "system",
@@ -985,6 +1026,7 @@ class MemoryService:
             idempotency_key,
             digest,
             v3_fn,
+            retention_days=self.idempotency_retention_days,
             agent_id_raw=agent_id or "default",
         )
         if "projection_status" not in res:
@@ -1047,6 +1089,7 @@ class MemoryService:
             idempotency_key,
             digest,
             delete_fn,
+            retention_days=self.idempotency_retention_days,
             agent_id_raw=agent_id or "default",
         )
         if "projection_status" not in res:

@@ -14,6 +14,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
+# Ensure project root is in sys.path before importing config
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from config.settings import check_and_fix_file_permissions, load_config
 from src.core.engine import BGEM3Engine
 from src.core.qdrant import QdrantManager
@@ -28,7 +33,7 @@ from src.core.request_context import (
 )
 from src.core.session_store import SessionStore
 from src.interfaces.ipc.auth import authorize_agent
-from src.interfaces.ipc.errors import RpcInvalidArgument, RpcNotFound
+from src.interfaces.ipc.errors import RpcInvalidArgument, RpcMethodNotFound, RpcNotFound
 from src.interfaces.ipc.server import DualUDSServer
 from src.service.memory_service import MemoryService
 from src.service.memory_status import normalize_status
@@ -109,7 +114,12 @@ class AMRApplication:
 
     async def dispatch_business_rpc(self, method: str, params: Dict[str, Any]) -> Any:
         """Route business RPC calls strictly from business UDS."""
-        params = params or {}
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise RpcInvalidArgument(
+                f"Parameter 'params' must be a dictionary, got {type(params).__name__}"
+            )
         srv_req_id = new_request_id()
         c_ref = params.get("request_id") or params.get("instance_id") or params.get("client_ref") or "-"
         token_rid = set_request_id(srv_req_id)
@@ -123,6 +133,11 @@ class AMRApplication:
                     norm_status = [normalize_status(s) for s in raw_status] if isinstance(raw_status, list) else normalize_status(raw_status)
                 else:
                     norm_status = None
+                raw_inc_hist = params.get("include_history", False)
+                if isinstance(raw_inc_hist, str):
+                    inc_hist = raw_inc_hist.strip().lower() in ("true", "1", "yes")
+                else:
+                    inc_hist = bool(raw_inc_hist)
                 return await self.memory_service.memory_search(
                     query=params.get("query"),
                     collections=params.get("collections"),
@@ -132,7 +147,7 @@ class AMRApplication:
                     scope=params.get("scope"),
                     limit=params.get("limit", 5),
                     score_threshold=params.get("score_threshold"),
-                    include_history=params.get("include_history", False),
+                    include_history=inc_hist,
                     status=norm_status,
                 )
             elif method in ("memory.create", "memory_create"):
@@ -219,14 +234,19 @@ class AMRApplication:
                     "engine": await self.engine.get_model_status(),
                 }
             else:
-                raise ValueError(f"Unknown business method: {method}")
+                raise RpcMethodNotFound(f"Unknown business method: {method}")
         finally:
             reset_client_ref(token_ref)
             reset_request_id(token_rid)
 
     async def dispatch_admin_rpc(self, method: str, params: Dict[str, Any]) -> Any:
         """Route administration RPC calls strictly from admin UDS."""
-        params = params or {}
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            raise RpcInvalidArgument(
+                f"Parameter 'params' must be a dictionary, got {type(params).__name__}"
+            )
         srv_req_id = new_request_id()
         c_ref = params.get("request_id") or params.get("instance_id") or params.get("client_ref") or "-"
         token_rid = set_request_id(srv_req_id)
@@ -375,7 +395,7 @@ class AMRApplication:
 
                     return {"status": "ok", "replayed_count": len(replayed_ids), "task_ids": replayed_ids}
             else:
-                raise ValueError(f"Unknown admin method: {method}")
+                raise RpcMethodNotFound(f"Unknown admin method: {method}")
         finally:
             reset_client_ref(token_ref)
             reset_request_id(token_rid)

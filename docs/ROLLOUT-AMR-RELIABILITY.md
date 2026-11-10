@@ -94,7 +94,7 @@ python3 src/admin/cli.py dead-letters --limit 20
 2. 服务启动失败，日志中出现 `MigrationBlocked` 阻断异常；
 3. `OutboxWorker` 因锁冲突或异常连续崩溃触发 systemd 快速重启限制；
 4. 指标中 `outbox_dead_letter` 持续上升且存在不可恢复的底层数据错误；
-5. `amr doctor` 报告存储状态处于严重不可用 (CRITICAL)。
+5. `python3 scripts/amr_doctor.py` 报告存储状态处于严重不可用 (UNHEALTHY / CRITICAL)。
 
 ### 2. 回退操作步骤
 ```bash
@@ -110,8 +110,8 @@ git checkout <previous-stable-tag>
 # 4. 重新启动稳定版服务
 systemctl --user start amr.service
 
-# 5. 验证服务状态
-amr doctor
+# 5. 验证服务状态（可加别名 alias amr-doctor="python3 scripts/amr_doctor.py"）
+python3 scripts/amr_doctor.py
 ```
 
 ---

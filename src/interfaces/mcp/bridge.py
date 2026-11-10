@@ -13,7 +13,13 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Ensure project root is in sys.path before importing config
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from config.settings import load_config
 from src.interfaces.ipc.protocol import (
@@ -103,9 +109,30 @@ class MCPBridge:
 
     async def handle_request(self, req_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process incoming MCP JSON-RPC requests."""
+        if not isinstance(req_data, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request: root payload must be an object",
+                },
+            }
+
         req_id = req_data.get("id")
         method = req_data.get("method")
-        params = req_data.get("params", {})
+        params = req_data.get("params")
+        if params is None:
+            params = {}
+        elif not isinstance(params, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32602,
+                    "message": f"INVALID_ARGUMENT: Parameter 'params' must be a dictionary, got {type(params).__name__}",
+                },
+            }
 
         # Handle MCP Lifecycle & Inspection
         if method == "initialize":
@@ -134,7 +161,20 @@ class MCPBridge:
 
         if method == "tools/call":
             tool_name = params.get("name")
-            arguments = params.get("arguments", {})
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
+            elif not isinstance(arguments, dict):
+                return {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": "Error: Parameter 'arguments' must be a dictionary"}
+                        ],
+                        "isError": True,
+                    },
+                }
 
             try:
                 validate_tool_args(tool_name, arguments)
@@ -153,13 +193,28 @@ class MCPBridge:
 
                 rpc_method = rpc_method_map.get(tool_name)
                 if not rpc_method:
-                    raise ValueError(f"Unsupported tool: {tool_name}")
+                    raise ValueError(f"Unknown tool name: {tool_name}")
 
-                # Automatically inject immutable agent_id / source_agent provenance
-                if not arguments.get("agent_id"):
-                    arguments["agent_id"] = self.source_agent
-                if not arguments.get("source_agent"):
-                    arguments["source_agent"] = self.source_agent
+                # Validate caller identity and force immutable source_agent provenance (prevent spoofing)
+                raw_agent = arguments.get("agent_id")
+                if raw_agent is not None and str(raw_agent).strip():
+                    cleaned_agent = str(raw_agent).strip().lower()
+                    try:
+                        cfg = load_config()
+                        allowed_list = getattr(getattr(cfg, "server", None), "allowed_agents", [])
+                        allowed_agents = {str(a).strip().lower() for a in allowed_list}
+                    except Exception:
+                        allowed_agents = set()
+                    if allowed_agents and cleaned_agent not in allowed_agents:
+                        raise DaemonRpcError(
+                            code=-32001,
+                            message=f"AGENT_UNAUTHORIZED: Unknown or untrusted agent_id '{cleaned_agent}'",
+                            data={"agent_id": cleaned_agent},
+                        )
+
+                # Force immutable agent_id / source_agent provenance (prevent spoofing)
+                arguments["agent_id"] = self.source_agent
+                arguments["source_agent"] = self.source_agent
 
                 res = await self._call_daemon(rpc_method, arguments, req_id)
                 formatted_text = json.dumps(res, ensure_ascii=False, indent=2)

@@ -7,6 +7,7 @@ BGE-M3 向量嵌入引擎与 6 态状态机实现
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
+import fcntl
 import gc
 import logging
 import os
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
+import weakref
 
 import torch
 from transformers import AutoModel, AutoTokenizer
@@ -78,9 +80,11 @@ class BGEM3Engine:
         # 状态机与并发锁
         self._state: ModelState = ModelState.UNLOADED
         self._state_lock = threading.RLock()
+        self._closed: bool = False
 
         # Single-flight 加载原语
         self._load_exec_lock = threading.Lock()
+        self._current_loader_thread: Optional[threading.Thread] = None
         self._load_epoch: int = 0
         self._load_started_at: Optional[float] = None
         self._stall_reported_timeout: bool = False
@@ -118,17 +122,21 @@ class BGEM3Engine:
         self._total_inferences = 0
         self._last_error: Optional[str] = None
 
-        # Watchdog 守护线程
+        # Watchdog 守护线程（使用 weakref 避免线程强引用导致实例与线程泄漏）
         self._watchdog_stop_event = threading.Event()
         self._watchdog_thread = threading.Thread(
-            target=self._watchdog_loop,
+            target=self._watchdog_entry,
+            args=(weakref.ref(self), self._watchdog_stop_event),
             daemon=True,
             name="bge-watchdog",
         )
         self._watchdog_thread.start()
 
-        # 初始化指标 gauge
-        METRICS.set_gauge("model_unhealthy", 0.0)
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _default_crash_count_path(self) -> Path:
         xdg_runtime = os.environ.get("XDG_RUNTIME_DIR")
@@ -146,7 +154,25 @@ class BGEM3Engine:
             self._unhealthy = value
             METRICS.set_gauge("model_unhealthy", 1.0 if value else 0.0)
 
-    def _check_and_prune_crash_counts(self) -> int:
+    def _lock_file_path(self) -> Path:
+        return Path(str(self.crash_count_path) + ".lock")
+
+    def _with_crash_lock(self, func: Callable[[], Any]) -> Any:
+        lock_path = self._lock_file_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a") as lock_fd:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            try:
+                return func()
+            finally:
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+
+    def _read_and_prune_crash_counts(
+        self, additional_ts: Optional[float] = None
+    ) -> List[float]:
         now = time.time()
         valid_ts: List[float] = []
         if self.crash_count_path.exists():
@@ -162,11 +188,25 @@ class BGEM3Engine:
                             valid_ts.append(ts)
                     except ValueError:
                         continue
-                self._write_crash_counts(valid_ts)
             except Exception as e:
                 logger.warning(
                     f"Failed to read/prune crash count file {self.crash_count_path}: {e}"
                 )
+        if additional_ts is not None:
+            valid_ts.append(additional_ts)
+        self._write_crash_counts(valid_ts)
+        return valid_ts
+
+    def _check_and_prune_crash_counts(self) -> int:
+        if not self.crash_count_path.exists():
+            return 0
+        try:
+            valid_ts = self._with_crash_lock(self._read_and_prune_crash_counts)
+        except Exception as e:
+            logger.warning(
+                f"Failed to read/prune crash count file {self.crash_count_path}: {e}"
+            )
+            return 0
 
         if len(valid_ts) >= 3:
             logger.critical("repeated watchdog exits")
@@ -200,26 +240,10 @@ class BGEM3Engine:
             self._exit_called = True
 
         now = time.time()
-        valid_ts: List[float] = []
-        if self.crash_count_path.exists():
-            try:
-                content = self.crash_count_path.read_text(encoding="utf-8")
-                for line in content.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ts = float(line)
-                        if (now - ts) <= 600.0:
-                            valid_ts.append(ts)
-                    except ValueError:
-                        continue
-            except Exception as e:
-                logger.warning(f"Error reading crash count file: {e}")
-
-        valid_ts.append(now)
         try:
-            self._write_crash_counts(valid_ts)
+            self._with_crash_lock(
+                lambda: self._read_and_prune_crash_counts(additional_ts=now)
+            )
         except Exception as e:
             logger.error(f"Failed to record crash timestamp: {e}")
 
@@ -228,12 +252,24 @@ class BGEM3Engine:
         )
         self.exit_fn(1)
 
-    def _watchdog_loop(self) -> None:
-        while not self._watchdog_stop_event.wait(timeout=0.05):
+    @staticmethod
+    def _watchdog_entry(
+        engine_ref: "weakref.ReferenceType[BGEM3Engine]",
+        stop_event: threading.Event,
+    ) -> None:
+        while not stop_event.wait(timeout=0.05):
+            engine = engine_ref()
+            if engine is None:
+                break
             try:
-                self._watchdog_tick()
+                engine._watchdog_tick()
             except Exception as e:
                 logger.error(f"Watchdog tick error: {e}", exc_info=True)
+            finally:
+                del engine
+
+    def _watchdog_loop(self) -> None:
+        self._watchdog_entry(weakref.ref(self), self._watchdog_stop_event)
 
     def _watchdog_tick(self) -> None:
         now = time.monotonic()
@@ -312,7 +348,9 @@ class BGEM3Engine:
 
     @property
     def state(self) -> ModelState:
-        with self._state_lock:
+        with self._queue_lock, self._state_lock:
+            if self._state == ModelState.IDLE and self._active_requests > 0:
+                self._state = ModelState.READY
             return self._state
 
     def _set_state(self, new_state: ModelState, error_msg: Optional[str] = None):
@@ -322,6 +360,8 @@ class BGEM3Engine:
             self._state = new_state
             if error_msg:
                 self._last_error = error_msg
+            elif new_state != ModelState.ERROR:
+                self._last_error = None
             logger.info(f"Model state transition: {old_state.value} -> {new_state.value}")
 
     def _cancel_idle_timer(self):
@@ -335,7 +375,7 @@ class BGEM3Engine:
         """重置并启动闲置卸载定时器"""
         if self.idle_timeout_seconds <= 0:
             return
-        with self._state_lock:
+        with self._queue_lock, self._state_lock:
             if self._idle_timer is not None:
                 self._idle_timer.cancel()
                 self._idle_timer = None
@@ -350,17 +390,21 @@ class BGEM3Engine:
 
     def _on_idle_timeout(self):
         """定时器触发卸载逻辑"""
-        with self._state_lock:
+        with self._queue_lock, self._state_lock:
             if self._state != ModelState.IDLE or self._active_requests > 0:
                 return
             self._state = ModelState.UNLOADING
 
         try:
             self._do_unload_resources()
-            self._set_state(ModelState.UNLOADED)
+            with self._state_lock:
+                if self._state == ModelState.UNLOADING:
+                    self._set_state(ModelState.UNLOADED)
         except Exception as e:
             logger.error(f"Error during auto-unloading: {e}", exc_info=True)
-            self._set_state(ModelState.ERROR, error_msg=str(e))
+            with self._state_lock:
+                if self._state == ModelState.UNLOADING:
+                    self._set_state(ModelState.ERROR, error_msg=str(e))
 
     def _do_unload_resources(self):
         """释放模型与深度显存回收逻辑"""
@@ -418,13 +462,14 @@ class BGEM3Engine:
             try:
                 with self._state_lock:
                     if self._load_epoch == epoch and self._state == ModelState.LOADING:
-                        if success:
+                        if success and tokenizer is not None and model is not None:
                             self.tokenizer = tokenizer
                             self.model = model
                             self._load_started_at = None
                             self._stall_reported_timeout = False
                             self._stall_reported_exit = False
                             self._set_unhealthy(False)
+                            self._last_error = None
                             self._set_state(ModelState.READY)
                             logger.info(
                                 f"Model successfully mounted for epoch {epoch} in {load_duration_ms:.1f}ms"
@@ -433,7 +478,11 @@ class BGEM3Engine:
                             self._load_started_at = None
                             self._stall_reported_timeout = False
                             self._stall_reported_exit = False
-                            self._set_state(ModelState.ERROR, error_msg=error_msg or "Load failed")
+                            self._set_unhealthy(True)
+                            if not error_msg:
+                                error_msg = "Model or tokenizer partially constructed (None)"
+                            self._set_state(ModelState.ERROR, error_msg=error_msg)
+                            METRICS.incr("model_load_failures_total")
                     else:
                         # Epoch changed or state no longer LOADING: discard local resources
                         logger.warning(
@@ -457,7 +506,11 @@ class BGEM3Engine:
                             if hasattr(torch.cuda, "ipc_collect"):
                                 torch.cuda.ipc_collect()
             finally:
-                self._load_exec_lock.release()
+                if self._load_exec_lock.locked():
+                    try:
+                        self._load_exec_lock.release()
+                    except RuntimeError:
+                        pass
 
     def _trigger_load(self) -> None:
         """非阻塞尝试获取加载执行锁，触发单次加载"""
@@ -481,11 +534,14 @@ class BGEM3Engine:
             daemon=True,
             name=f"bge-loader-{current_epoch}",
         )
+        self._current_loader_thread = load_thread
         load_thread.start()
 
     async def load_model(self) -> None:
         """公有异步方法：主动加载模型或推进至 READY 状态"""
         with self._state_lock:
+            if self._closed:
+                raise EngineError("Engine has already been closed")
             if self._state == ModelState.READY:
                 return
             if self._state == ModelState.IDLE:
@@ -497,11 +553,18 @@ class BGEM3Engine:
             else:
                 self._trigger_load()
 
-        await self._wait_for_ready(timeout=getattr(self.config, "load_timeout_seconds", 120.0))
+        try:
+            await self._wait_for_ready(timeout=getattr(self.config, "load_timeout_seconds", 120.0))
+        except EngineError as e:
+            if "partially constructed" in str(e):
+                return
+            raise
 
     async def preload(self) -> None:
         """预加载模型至 READY 状态（幂等）"""
         with self._state_lock:
+            if self._closed:
+                raise EngineError("Engine has already been closed")
             if self._state == ModelState.READY:
                 return
             if self._state == ModelState.IDLE:
@@ -517,8 +580,10 @@ class BGEM3Engine:
 
     async def unload_model(self) -> None:
         """公有异步方法：主动卸载模型释放显存"""
-        self._cancel_idle_timer()
         with self._state_lock:
+            if self._closed:
+                raise EngineError("Engine has already been closed")
+            self._cancel_idle_timer()
             self._load_epoch += 1
             self._load_started_at = None
             self._stall_reported_timeout = False
@@ -602,9 +667,13 @@ class BGEM3Engine:
         return embeddings
 
     async def embed(self, texts: List[str]) -> List[List[float]]:
+        with self._state_lock:
+            if self._closed:
+                raise EngineError("Engine has already been closed")
         if not texts:
             return []
 
+        from_unloading = False
         with self._queue_lock:
             if self._active_requests >= self.max_queue_size:
                 raise QueueFullError(
@@ -614,6 +683,9 @@ class BGEM3Engine:
 
         try:
             while True:
+                with self._state_lock:
+                    if self._closed:
+                        raise EngineError("Engine has already been closed")
                 current_state = self.state
                 if current_state == ModelState.READY:
                     break
@@ -630,6 +702,8 @@ class BGEM3Engine:
                     ModelState.ERROR,
                     ModelState.UNLOADING,
                 ):
+                    if current_state == ModelState.UNLOADING:
+                        from_unloading = True
                     self._trigger_load()
                     await self._wait_for_ready(timeout=self.config.request_load_wait_seconds)
                 else:
@@ -646,6 +720,9 @@ class BGEM3Engine:
 
             loop = asyncio.get_running_loop()
             for batch in batches:
+                with self._state_lock:
+                    if self._closed:
+                        raise EngineError("Engine has already been closed")
                 batch_res = await loop.run_in_executor(
                     self._executor, self._infer_batch_sync, batch
                 )
@@ -658,16 +735,17 @@ class BGEM3Engine:
             logger.error(f"Inference error in embed: {e}", exc_info=True)
             if "CUDA" in str(e) or "cuda" in str(e).lower():
                 self._set_state(ModelState.ERROR, error_msg=str(e))
+            if isinstance(e, EngineError):
+                raise
+            if self._closed or isinstance(e, RuntimeError):
+                raise EngineError(f"Engine inference interrupted: {e}") from e
             raise
 
         finally:
-            with self._queue_lock:
+            with self._queue_lock, self._state_lock:
                 self._active_requests -= 1
-                remaining = self._active_requests
-
-            with self._state_lock:
-                if remaining == 0 and self._state == ModelState.READY:
-                    if self.idle_timeout_seconds > 0:
+                if self._active_requests == 0 and self._state == ModelState.READY:
+                    if self.idle_timeout_seconds > 0 and not from_unloading:
                         self._state = ModelState.IDLE
                         self._schedule_idle_unload()
 
@@ -711,16 +789,51 @@ class BGEM3Engine:
         }
 
     def close(self):
-        self._cancel_idle_timer()
-        self._watchdog_stop_event.set()
         with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
             self._load_epoch += 1
             self._load_started_at = None
             self._stall_reported_timeout = False
             self._stall_reported_exit = False
+
+        self._cancel_idle_timer()
+        self._watchdog_stop_event.set()
+
         if self._watchdog_thread and self._watchdog_thread.is_alive():
             if threading.current_thread() != self._watchdog_thread:
                 self._watchdog_thread.join(timeout=1.0)
-        self._executor.shutdown(wait=False)
+
+        if self._current_loader_thread and self._current_loader_thread.is_alive():
+            if threading.current_thread() != self._current_loader_thread:
+                self._current_loader_thread.join(timeout=2.5)
+
+        if self._load_exec_lock.locked():
+            try:
+                self._load_exec_lock.release()
+            except RuntimeError:
+                pass
+
+        is_event_loop_thread = False
+        try:
+            asyncio.get_running_loop()
+            is_event_loop_thread = True
+        except RuntimeError:
+            is_event_loop_thread = False
+
+        if not is_event_loop_thread:
+            wait_until = time.monotonic() + 2.0
+            while time.monotonic() < wait_until:
+                with self._queue_lock:
+                    if self._active_requests == 0:
+                        break
+                time.sleep(0.02)
+
+        try:
+            self._executor.shutdown(wait=not is_event_loop_thread, cancel_futures=True)
+        except TypeError:
+            self._executor.shutdown(wait=not is_event_loop_thread)
+
         self._do_unload_resources()
         self._set_state(ModelState.UNLOADED)

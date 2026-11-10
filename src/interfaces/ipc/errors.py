@@ -25,12 +25,18 @@ class RpcError(ValueError):
         self.data = data or {}
 
     def to_jsonrpc_error(self, req_id: Any) -> Dict[str, Any]:
+        prefix = f"{self.error_code}:"
+        msg = self.message or ""
+        if msg.startswith(prefix):
+            rendered_msg = msg
+        else:
+            rendered_msg = f"{self.error_code}: {msg}"
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {
                 "code": self.code,
-                "message": f"{self.error_code}: {self.message}",
+                "message": rendered_msg,
                 "data": self.data,
             },
         }
@@ -59,6 +65,11 @@ class RpcQueueFull(RpcError):
 class RpcNotFound(RpcError):
     code = -32005
     error_code = "NOT_FOUND"
+
+
+class RpcMethodNotFound(RpcError):
+    code = -32601
+    error_code = "METHOD_NOT_FOUND"
 
 
 class RpcInvalidArgument(RpcError):

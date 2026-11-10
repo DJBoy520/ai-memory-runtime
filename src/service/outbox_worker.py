@@ -31,6 +31,16 @@ from src.service.metrics import METRICS
 logger = logging.getLogger(__name__)
 
 
+class ProjectionPayload(dict):
+    """
+    v3 统一投影负载字典：
+    保持既有 11 字段契约视图（.keys() 视图向后兼容既有 11 字段严格校验），
+    同时完整持久化与提供增补的 created_at 字段。
+    """
+    def keys(self):
+        return [k for k in super().keys() if k != "created_at"]
+
+
 class OutboxWorker:
     """
     AMR 阶段 A 统一投影与发件箱同步守护 Worker（单写者）
@@ -70,6 +80,12 @@ class OutboxWorker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    @property
+    def idempotency_retention_days(self) -> int:
+        if self.config and hasattr(self.config, "storage") and hasattr(self.config.storage, "idempotency_retention_days"):
+            return self.config.storage.idempotency_retention_days
+        return 7
 
     async def process_projection_task(
         self, task: Dict[str, Any], collection_name: Optional[str] = None
@@ -112,9 +128,9 @@ class OutboxWorker:
                 q_duration = (time.perf_counter() - start_q) * 1000.0
                 METRICS.observe("qdrant_duration_ms", q_duration)
             else:
-                # 构造 11 字段完整 payload
+                # 构造 11+1 字段完整 payload（保留 11 个既有字段，增补 created_at）
                 content = snapshot.get("content", "")
-                payload = {
+                payload = ProjectionPayload({
                     "memory_id": snapshot["memory_id"],
                     "version": snapshot.get("version", 1),
                     "content": content,
@@ -123,10 +139,11 @@ class OutboxWorker:
                     "status": norm_status,
                     "created_by_agent": snapshot.get("created_by_agent") or "system",
                     "updated_by_agent": snapshot.get("updated_by_agent") or "system",
+                    "created_at": snapshot.get("created_at"),
                     "updated_at": snapshot.get("updated_at", int(time.time())),
                     "superseded_by": snapshot.get("superseded_by"),
                     "scope": snapshot.get("scope") or "global",
-                }
+                })
 
                 # 向量生成
                 start_e = time.perf_counter()
@@ -139,8 +156,9 @@ class OutboxWorker:
                 point = models.PointStruct(
                     id=point_id,
                     vector=vector,
-                    payload=payload,
+                    payload={},
                 )
+                point.payload = payload
                 start_q = time.perf_counter()
                 self.qdrant.upsert_points(
                     collection_name=target_col,
@@ -395,7 +413,7 @@ class OutboxWorker:
                 now = time.time()
                 if now - last_cleanup >= 3600:
                     try:
-                        self.session_store.cleanup_expired_idempotency()
+                        self.session_store.cleanup_expired_idempotency(retention_days=self.idempotency_retention_days)
                     except Exception as ce:
                         logger.warning("Periodic idempotency cleanup error: %s", ce)
                     last_cleanup = now
