@@ -32,3 +32,6 @@ models/
 
 # Local config backups
 config/*.bak-*
+
+# local migration reports (generated next to sqlite db)
+migration_report.json
