@@ -86,36 +86,41 @@ class ReconciliationEngine:
         except Exception as e:
             raise RuntimeError(f"Qdrant /healthz 连通性探测失败: {e}")
 
-        # 记录检查点初始化状态
+        # 记录检查点初始化状态 (dry_run 时跳过写入)
         now_ts = int(time.time())
         cursor.execute("SELECT count(*) FROM memories")
         sql_count = cursor.fetchone()[0]
         q_count = self.qdrant_client.count(collection_name=self.collection_name).count
 
-        cursor.execute(
-            """
-            INSERT INTO reconciliation_checkpoints (
-                batch_id, start_watermark_ts, sqlite_memory_count,
-                qdrant_active_count, embedding_model, embedding_dimension,
-                distance_metric, status, created_at
+        if not self.dry_run:
+            cursor.execute(
+                """
+                INSERT INTO reconciliation_checkpoints (
+                    batch_id, start_watermark_ts, sqlite_memory_count,
+                    qdrant_active_count, embedding_model, embedding_dimension,
+                    distance_metric, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?)
+                """,
+                (
+                    self.batch_id, now_ts, sql_count, q_count,
+                    self.config.model.name_or_path, 1024, "Cosine", now_ts
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'RUNNING', ?)
-            """,
-            (
-                self.batch_id, now_ts, sql_count, q_count,
-                self.config.model.name_or_path, 1024, "Cosine", now_ts
-            ),
-        )
-        conn.commit()
+            conn.commit()
         print(f"[Phase 0] Preflight 检查通过 (SQLite 记忆: {sql_count}, Qdrant 点位: {q_count})")
         return True
 
     # ==================== Phase 1: Cold Backup ====================
     def phase_1_cold_backup(self) -> Dict[str, Any]:
         print("[Phase 1] 执行冷备与快照核验 (Cold Backup)...")
+        date_str = datetime.now().strftime("%Y%m%d")
+        if self.dry_run:
+            print("[Phase 1] [DRY-RUN] 跳过创建备份文件与目录")
+            return {"sqlite_backup": None, "date": date_str, "dry_run": True}
+
         backup_dir = Path("data/backups")
         backup_dir.mkdir(parents=True, exist_ok=True)
-        date_str = datetime.now().strftime("%Y%m%d")
         sqlite_backup_file = backup_dir / f"sqlite_sessions_{date_str}.db"
 
         # SQLite 在线热备
@@ -149,43 +154,47 @@ class ReconciliationEngine:
         raw_candidates = self.rule_engine.scan_all(rows)
         print(f"[Phase 2] 规则引擎发现潜在治理候选: {len(raw_candidates)} 条")
 
-        # 写入 curation_candidates 表 (状态为 PROPOSED)
+        # 写入 curation_candidates 表 (状态为 PROPOSED, dry_run 时跳过落库)
         now_ts = int(time.time())
         for cand in raw_candidates:
             cand_id = f"cand_{self.batch_id}_{cand['memory_id']}"
             cand["candidate_id"] = cand_id
-            cursor.execute(
-                """
-                INSERT OR REPLACE INTO curation_candidates (
-                    candidate_id, batch_id, memory_id, current_status,
-                    proposed_status, matched_rule_id, reason, evidence_snapshot,
-                    state, created_at, processed_at
+
+        if not self.dry_run:
+            for cand in raw_candidates:
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO curation_candidates (
+                        candidate_id, batch_id, memory_id, current_status,
+                        proposed_status, matched_rule_id, reason, evidence_snapshot,
+                        state, created_at, processed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?, NULL)
+                    """,
+                    (
+                        cand["candidate_id"], self.batch_id, cand["memory_id"], cand["current_status"],
+                        cand["proposed_status"], cand["matched_rule_id"], cand["reason"],
+                        cand["evidence_snapshot"], now_ts
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PROPOSED', ?, NULL)
-                """,
-                (
-                    cand_id, self.batch_id, cand["memory_id"], cand["current_status"],
-                    cand["proposed_status"], cand["matched_rule_id"], cand["reason"],
-                    cand["evidence_snapshot"], now_ts
-                ),
-            )
-        conn.commit()
+            conn.commit()
 
         # Policy Gate 审核
         approved, rejected, summary = self.policy_gate.evaluate(raw_candidates, total_points)
 
-        # 更新 curation_candidates 状态
-        for c in approved:
-            cursor.execute(
-                "UPDATE curation_candidates SET state = 'APPROVED', processed_at = ? WHERE candidate_id = ?",
-                (now_ts, c["candidate_id"]),
-            )
-        for c in rejected:
-            cursor.execute(
-                "UPDATE curation_candidates SET state = 'REJECTED', processed_at = ? WHERE candidate_id = ?",
-                (now_ts, c["candidate_id"]),
-            )
-        conn.commit()
+        # 更新 curation_candidates 状态 (dry_run 时跳过落库)
+        if not self.dry_run:
+            for c in approved:
+                cursor.execute(
+                    "UPDATE curation_candidates SET state = 'APPROVED', processed_at = ? WHERE candidate_id = ?",
+                    (now_ts, c["candidate_id"]),
+                )
+            for c in rejected:
+                cursor.execute(
+                    "UPDATE curation_candidates SET state = 'REJECTED', processed_at = ? WHERE candidate_id = ?",
+                    (now_ts, c["candidate_id"]),
+                )
+            conn.commit()
 
         print(f"[Phase 2] Policy Gate 审核完成: 通过 {len(approved)} 条, 拒绝/拦截 {len(rejected)} 条")
         return approved, summary
@@ -321,6 +330,10 @@ class ReconciliationEngine:
     # ==================== Phase 6: Shadow Restore Drill & Audit ====================
     def phase_6_shadow_drill_and_audit(self, summary_info: Dict[str, Any]) -> Dict[str, Any]:
         print("[Phase 6] 审计报告归档与检查点闭环 (Audit & Checkpoint)...")
+        if self.dry_run:
+            print("[Phase 6] [DRY-RUN] 跳过写 checkpoints 与恢复文件")
+            return {"batch_id": self.batch_id, "status": "DRY_RUN"}
+
         conn = self.store.get_connection()
         cursor = conn.cursor()
         now_ts = int(time.time())
@@ -377,17 +390,21 @@ class ReconciliationEngine:
             print(f"============================================================")
             return summary
         except Exception as e:
-            # 记录失败状态
-            conn = self.store.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                UPDATE reconciliation_checkpoints
-                SET status = 'FAILED', error_message = ?, completed_at = ?
-                WHERE batch_id = ?
-                """,
-                (str(e), int(time.time()), self.batch_id),
-            )
-            conn.commit()
+            # 记录失败状态 (dry_run 时不写库)
+            if not self.dry_run:
+                try:
+                    conn = self.store.get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """
+                        UPDATE reconciliation_checkpoints
+                        SET status = 'FAILED', error_message = ?, completed_at = ?
+                        WHERE batch_id = ?
+                        """,
+                        (str(e), int(time.time()), self.batch_id),
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
             print(f"[Engine] 对账流程异常中断: {e}")
             raise
