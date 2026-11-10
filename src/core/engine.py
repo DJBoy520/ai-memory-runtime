@@ -81,6 +81,8 @@ class BGEM3Engine:
         self._state: ModelState = ModelState.UNLOADED
         self._state_lock = threading.RLock()
         self._closed: bool = False
+        self._teardown_thread: Optional[threading.Thread] = None
+        self._unload_lock = threading.Lock()
 
         # Single-flight 加载原语
         self._load_exec_lock = threading.Lock()
@@ -408,22 +410,29 @@ class BGEM3Engine:
 
     def _do_unload_resources(self):
         """释放模型与深度显存回收逻辑"""
-        self._cancel_idle_timer()
+        with self._unload_lock:
+            self._cancel_idle_timer()
 
-        if hasattr(self, "model") and self.model is not None:
-            del self.model
-            self.model = None
+            if hasattr(self, "model") and self.model is not None:
+                try:
+                    del self.model
+                except AttributeError:
+                    pass
+                self.model = None
 
-        if hasattr(self, "tokenizer") and self.tokenizer is not None:
-            del self.tokenizer
-            self.tokenizer = None
+            if hasattr(self, "tokenizer") and self.tokenizer is not None:
+                try:
+                    del self.tokenizer
+                except AttributeError:
+                    pass
+                self.tokenizer = None
 
-        gc.collect()
+            gc.collect()
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            if hasattr(torch.cuda, "ipc_collect"):
-                torch.cuda.ipc_collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
 
     def _load_model_sync(self) -> tuple[Any, Any]:
         """同步执行模型载入逻辑（工作线程内运行，构造局部对象并返回）"""
@@ -638,10 +647,12 @@ class BGEM3Engine:
 
     def _infer_batch_sync(self, batch_texts: List[str]) -> List[List[float]]:
         """在工作线程内执行单批次推理"""
-        if not self.model or not self.tokenizer:
+        model = getattr(self, "model", None)
+        tokenizer = getattr(self, "tokenizer", None)
+        if not model or not tokenizer:
             raise EngineError("Model or tokenizer is not initialized")
 
-        encoded = self.tokenizer(
+        encoded = tokenizer(
             batch_texts,
             padding=True,
             truncation=True,
@@ -656,9 +667,9 @@ class BGEM3Engine:
         with torch.no_grad():
             if device == "cuda" and self.use_fp16:
                 with torch.amp.autocast("cuda"):
-                    outputs = self.model(**encoded)
+                    outputs = model(**encoded)
             else:
-                outputs = self.model(**encoded)
+                outputs = model(**encoded)
 
             cls_token = outputs.last_hidden_state[:, 0]
             normalized = torch.nn.functional.normalize(cls_token, p=2, dim=1)
@@ -822,18 +833,46 @@ class BGEM3Engine:
         except RuntimeError:
             is_event_loop_thread = False
 
-        if not is_event_loop_thread:
-            wait_until = time.monotonic() + 2.0
-            while time.monotonic() < wait_until:
-                with self._queue_lock:
-                    if self._active_requests == 0:
-                        break
-                time.sleep(0.02)
+        with self._queue_lock:
+            has_active = (self._active_requests > 0)
 
-        try:
-            self._executor.shutdown(wait=not is_event_loop_thread, cancel_futures=True)
-        except TypeError:
-            self._executor.shutdown(wait=not is_event_loop_thread)
+        def _perform_teardown(wait_for_requests: bool):
+            if wait_for_requests:
+                wait_until = time.monotonic() + 2.0
+                while time.monotonic() < wait_until:
+                    with self._queue_lock:
+                        if self._active_requests == 0:
+                            break
+                    time.sleep(0.02)
 
-        self._do_unload_resources()
-        self._set_state(ModelState.UNLOADED)
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
+
+            self._do_unload_resources()
+            self._set_state(ModelState.UNLOADED)
+
+        if is_event_loop_thread and has_active:
+            # FINDING-ROBUST-01: 在异步事件循环线程内调用且存在活跃推理请求时，
+            # 若在此处同步 time.sleep 等待，事件循环无法调度完成回调，
+            # 导致 _active_requests 无法归零；若直接 shutdown(wait=False) 并 unload，
+            # 则推理工作线程会遭遇 UAF 或 CUDA crash。
+            # 因此将安全排空、shutdown(wait=True) 与显存释放委派至专用后台 Teardown 线程执行，
+            # 确保主事件循环保持活跃以排空当前批次，且绝对不在推理执行中释放模型显存。
+            self._teardown_thread = threading.Thread(
+                target=_perform_teardown,
+                args=(True,),
+                daemon=True,
+                name="bge-teardown",
+            )
+            self._teardown_thread.start()
+        else:
+            # 活跃请求为 0 或处于非事件循环线程：安全直接执行同步阻塞停机与显存释放
+            _perform_teardown(wait_for_requests=(not is_event_loop_thread and has_active))
+
+    async def aclose(self, timeout: float = 5.0) -> None:
+        """异步优雅停机：等待在途推理完成，确保工作线程退出后再释放显存"""
+        await asyncio.wait_for(asyncio.to_thread(self.close), timeout=timeout)
+        if self._teardown_thread and self._teardown_thread.is_alive():
+            await asyncio.wait_for(asyncio.to_thread(self._teardown_thread.join), timeout=timeout)

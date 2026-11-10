@@ -412,10 +412,13 @@ class AMRApplication:
 
     async def stop(self):
         logger.info("Stopping Outbox Worker...")
-        self.outbox_worker.stop()
+        await asyncio.to_thread(self.outbox_worker.stop)
         logger.info("Stopping AMR Dual UDS Server...")
         await self.server.stop()
-        self.engine.close()
+        if hasattr(self.engine, "aclose"):
+            await self.engine.aclose()
+        else:
+            self.engine.close()
         self.session_store.close()
         self.qdrant_manager.close()
         logger.info("AMR Daemon stopped cleanly.")

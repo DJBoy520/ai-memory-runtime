@@ -80,6 +80,7 @@ class OutboxWorker:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_event: Optional[asyncio.Event] = None
 
     @property
     def idempotency_retention_days(self) -> int:
@@ -418,16 +419,33 @@ class OutboxWorker:
                         logger.warning("Periodic idempotency cleanup error: %s", ce)
                     last_cleanup = now
 
-                if processed == 0:
-                    await asyncio.sleep(self.poll_interval)
+                if processed == 0 and self._running:
+                    if self._stop_event is not None:
+                        try:
+                            await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_interval)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(self.poll_interval)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.error("Error in outbox loop: %s", e, exc_info=True)
-                await asyncio.sleep(self.poll_interval)
+                if self._running:
+                    if self._stop_event is not None:
+                        try:
+                            await asyncio.wait_for(self._stop_event.wait(), timeout=self.poll_interval)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(self.poll_interval)
 
     def start(self) -> None:
         """启动后台同步守护线程（抢占单执行者 flock）"""
         if self._running:
             return
+        if self._thread and self._thread.is_alive():
+            raise RuntimeError("previous outbox worker is still stopping")
 
         # 抢占 OS 级单执行者 flock
         try:
@@ -450,24 +468,27 @@ class OutboxWorker:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._loop = loop
+            self._stop_event = asyncio.Event()
             try:
                 loop.run_until_complete(self._async_run_loop())
             finally:
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
                 loop.close()
+                if not self._running:
+                    self._release_lock()
 
         self._thread = threading.Thread(target=_worker_thread, daemon=True, name="amr_outbox_worker")
         self._thread.start()
         logger.info("OutboxWorker started with lock %s.", self.lock_path)
 
-    def stop(self, timeout: float = 3.0) -> None:
-        """停止后台守护线程并释放锁"""
-        if not self._running:
-            return
-
-        self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=timeout)
-
+    def _release_lock(self) -> None:
         if self._lock_fd is not None:
             try:
                 fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
@@ -476,5 +497,34 @@ class OutboxWorker:
                 logger.debug("Error closing lock fd: %s", e)
             self._lock_fd = None
 
+    def stop(self, timeout: float = 3.0) -> None:
+        """停止后台守护线程并释放锁（严格仅在线程成功退出后释放锁，防止双写与脑裂）"""
+        if not self._running and (self._thread is None or not self._thread.is_alive()):
+            if self._lock_fd is not None:
+                self._release_lock()
+            return
+
+        self._running = False
+
+        if self._loop and not self._loop.is_closed() and self._stop_event is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._stop_event.set)
+            except Exception:
+                pass
+
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+        # FINDING-ROBUST-02: 仅在后台线程真正退出后才允许释放 flock 锁
+        if self._thread and self._thread.is_alive():
+            logger.critical(
+                "OutboxWorker thread failed to terminate within %.1fs timeout; "
+                "retaining lock %s to prevent double writers / split-brain.",
+                timeout,
+                self.lock_path,
+            )
+            raise TimeoutError("outbox worker did not stop; lock retained")
+
+        self._release_lock()
         logger.info("OutboxWorker stopped.")
 
