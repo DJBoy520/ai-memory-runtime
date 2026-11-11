@@ -134,6 +134,32 @@ def test_invalid_ack_retains_batch(tmp_path):
     assert not result.ok
     assert client.pending_count("s") == 1
 
+def test_directory_sync_failure_prevents_send(tmp_path, monkeypatch):
+    transport = MockTransport()
+    client = AmrSessionClient(spool_dir=tmp_path / "fsync", transport=transport)
+    original = os.fsync
+    def fail_directory(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("directory sync failed")
+        return original(fd)
+    monkeypatch.setattr(os, "fsync", fail_directory)
+    with pytest.raises(Exception, match="sync spool directory"):
+        client.record_messages("s", [{"message_id": "m", "role": "user", "content": "value"}])
+    assert transport.calls == []
+
+@pytest.mark.asyncio
+async def test_async_client_respects_pending_batch_order(tmp_path):
+    transport = MockTransport()
+    transport.fail_with = TransientDeliveryError("offline")
+    client = AsyncAmrSessionClient(spool_dir=tmp_path / "async-fifo", transport=transport)
+    await client.record_messages("s", [{"message_id": "m", "role": "user", "content": "old"}])
+    transport.fail_with = None
+    result = await client.record_messages("s", [{"message_id": "m", "role": "user", "content": "new"}])
+    assert not result.ok
+    assert len(transport.calls) == 1
+    await client.replay_pending("s")
+    assert [call["messages"][0]["content"] for call in transport.calls[-2:]] == ["old", "new"]
+
 def test_stable_message_id_contract(tmp_path: Path):
     session_id = "sess_stable_contract"
 

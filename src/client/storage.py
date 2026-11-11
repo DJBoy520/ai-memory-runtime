@@ -58,10 +58,7 @@ def ensure_directory(path: Path, mode: int = 0o700) -> None:
     """
     try:
         path.mkdir(parents=True, exist_ok=True, mode=mode)
-        try:
-            os.chmod(path, mode)
-        except OSError:
-            pass
+        os.chmod(path, mode)
     except Exception as e:
         raise SpoolStorageError(f"Failed to create directory '{path}': {e}") from e
 
@@ -94,10 +91,7 @@ def atomic_write(
     fd = -1
     try:
         fd = os.open(str(tmp_path), flags, file_mode)
-        try:
-            os.fchmod(fd, file_mode)
-        except (AttributeError, OSError):
-            pass
+        os.fchmod(fd, file_mode)
 
         # Write all bytes
         total_written = 0
@@ -127,10 +121,7 @@ def atomic_write(
             pass
 
     # Double check file permission
-    try:
-        os.chmod(tmp_path, file_mode)
-    except OSError:
-        pass
+    os.chmod(tmp_path, file_mode)
 
     # Atomic rename (POSIX guarantees replacement is atomic)
     try:
@@ -148,8 +139,8 @@ def atomic_write(
         try:
             dir_fd = os.open(str(parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             os.fsync(dir_fd)
-        except OSError:
-            pass
+        except OSError as e:
+            raise SpoolStorageError(f"Failed to sync spool directory '{parent}': {e}") from e
         finally:
             if dir_fd >= 0:
                 try:

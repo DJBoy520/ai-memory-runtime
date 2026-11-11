@@ -18,6 +18,7 @@ import os
 import socket
 import struct
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from src.client.boundaries import (
@@ -28,7 +29,9 @@ from src.client.boundaries import (
 
 logger = logging.getLogger("amr.client.transport")
 
-DEFAULT_UDS_SOCKET_PATH = "/run/user/1000/qdrant-bge.sock"
+DEFAULT_UDS_SOCKET_PATH = os.environ.get("AMR_SOCKET_PATH") or os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "qdrant-bge.sock"
+)
 MAX_FRAME_BYTES = 16 * 1024 * 1024  # 16 MB sanity safety limit
 HEADER_STRUCT = struct.Struct(">I")
 
@@ -130,11 +133,14 @@ class UdsTransport(BaseTransport):
             raise ValueError(f"Payload size {len(raw)} exceeds max frame limit {MAX_FRAME_BYTES}")
         return HEADER_STRUCT.pack(len(raw)) + raw
 
-    def _parse_response(self, raw_resp: bytes) -> Dict[str, Any]:
+    def _parse_response(self, raw_resp: bytes, expected_id: str) -> Dict[str, Any]:
         try:
             resp_json = json.loads(raw_resp.decode("utf-8"))
         except Exception as e:
             raise TransientDeliveryError(f"Failed to decode server JSON response: {e}") from e
+
+        if not isinstance(resp_json, dict) or resp_json.get("jsonrpc") != "2.0" or resp_json.get("id") != expected_id:
+            raise TransientDeliveryError("Mismatched or invalid JSON-RPC response")
 
         if "error" in resp_json and resp_json["error"]:
             err = resp_json["error"]
@@ -149,7 +155,7 @@ class UdsTransport(BaseTransport):
 
         if "result" in resp_json:
             return resp_json["result"]
-        return resp_json
+        raise TransientDeliveryError("JSON-RPC response has no result")
 
     def send_ingest(
         self,
@@ -160,7 +166,8 @@ class UdsTransport(BaseTransport):
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         effective_timeout = timeout if timeout is not None else self.request_timeout
-        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages)
+        request_id = uuid.uuid4().hex
+        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages, req_id=request_id)
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -189,7 +196,7 @@ class UdsTransport(BaseTransport):
 
             # Read response body
             body = _recv_exact(sock, resp_len)
-            return self._parse_response(body)
+            return self._parse_response(body, request_id)
         finally:
             try:
                 sock.close()
@@ -205,7 +212,8 @@ class UdsTransport(BaseTransport):
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         effective_timeout = timeout if timeout is not None else self.request_timeout
-        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages)
+        request_id = uuid.uuid4().hex
+        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages, req_id=request_id)
 
         try:
             reader, writer = await asyncio.wait_for(
@@ -233,7 +241,7 @@ class UdsTransport(BaseTransport):
                 _async_read_exact(reader, resp_len),
                 timeout=effective_timeout,
             )
-            return self._parse_response(body)
+            return self._parse_response(body, request_id)
         except asyncio.TimeoutError as e:
             raise TransientDeliveryError(f"Async AMR UDS timeout after {effective_timeout}s") from e
         except (ConnectionResetError, BrokenPipeError, ConnectionError) as e:
