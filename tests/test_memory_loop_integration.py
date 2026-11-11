@@ -23,6 +23,16 @@ def _offline_spool_worker(spool, socket_path, worker):
         client.record_messages("shared-session", [{"message_id": f"{worker}-{n}", "role": "user", "content": "value"}])
 
 
+def _crash_during_send(spool):
+    import os
+    from src.client import MockTransport
+    class CrashTransport(MockTransport):
+        def send_ingest(self, *args, **kwargs):
+            os._exit(17)
+    client = AmrSessionClient(spool_dir=spool, transport=CrashTransport(), auto_replay=False)
+    client.record_messages("crash-session", [{"message_id": "m", "role": "user", "content": "value"}])
+
+
 @pytest.mark.asyncio
 async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
     cfg = AppConfig()
@@ -110,3 +120,21 @@ def test_spool_preserves_concurrent_process_batches(tmp_path):
     batches = client.storage.list_batches_for_session("shared-session")
     assert len(batches) == 16
     assert len({b.messages[0].message_id for b in batches}) == 16
+
+
+def test_crash_after_spooling_preserves_batch_for_replay(tmp_path):
+    from src.client import MockTransport
+    spool = str(tmp_path / "crash-spool")
+    worker = multiprocessing.get_context("spawn").Process(target=_crash_during_send, args=(spool,))
+    worker.start()
+    worker.join(15)
+    if worker.is_alive():
+        worker.terminate()
+        worker.join()
+    assert worker.exitcode == 17
+    transport = MockTransport()
+    client = AmrSessionClient(spool_dir=spool, transport=transport, auto_replay=False)
+    assert client.pending_count("crash-session") == 1
+    assert client.replay_pending("crash-session")[0].ok
+    assert transport.calls[0]["messages"][0]["message_id"] == "m"
+    assert client.pending_count("crash-session") == 0
