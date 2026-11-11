@@ -10,6 +10,7 @@ AI Memory Runtime - Memory Context Pack Builder
 去重重排后截断在 30 条以内，作为只读背景直接注入 LLM System Prompt。
 """
 
+import inspect
 import time
 from typing import Any, Dict, List, Optional, Set
 from src.core.session_store import SessionStore
@@ -57,7 +58,8 @@ class ContextBuilder:
                 # 拼接新会话的最后几条内容作为 query
                 query_text = " ".join([m.get("content", "") for m in recent_messages[-5:]])[:1000]
                 if query_text.strip():
-                    embeddings = await self.engine.embed([query_text])
+                    embed_res = self.engine.embed([query_text])
+                    embeddings = await embed_res if inspect.iscoroutine(embed_res) else embed_res
                     if embeddings:
                         search_results = self.qdrant_manager.search_points(
                             collection_name="ai_memory",
@@ -66,12 +68,14 @@ class ContextBuilder:
                             score_threshold=0.3,
                         )
                         for pt in search_results:
-                            m_id = pt.payload.get("memory_id")
+                            payload = getattr(pt, "payload", None) or (pt.get("payload") if isinstance(pt, dict) else {})
+                            score = getattr(pt, "score", None) or (pt.get("score", 0.0) if isinstance(pt, dict) else 0.0)
+                            m_id = payload.get("memory_id") if isinstance(payload, dict) else None
                             if m_id:
                                 mem = self.session_store.get_memory(m_id)
                                 if mem and str(mem.get("status") or "").lower() in ("active", "candidate"):
                                     mem["_recall_source"] = "vector_top20"
-                                    mem["_score"] = pt.score
+                                    mem["_score"] = float(score)
                                     candidates_map[m_id] = mem
             except Exception as e:
                 # 向量召回若未就绪或降级，记录但继续依赖 SQLite 多维召回
@@ -113,11 +117,11 @@ class ContextBuilder:
                             mem["_recall_source"] = "entity_match"
                             candidates_map[m_id] = mem
 
-        # 4. 最近 7 天内发生过变更的记忆
+        # 4. 最近 7 天内发生过变更的记忆 (排除已删除)
         cursor.execute(
             """
             SELECT memory_id FROM memories
-            WHERE project_id = ? AND updated_at >= ?
+            WHERE project_id = ? AND updated_at >= ? AND LOWER(status) != 'deleted'
             ORDER BY updated_at DESC LIMIT 20
             """,
             (project_id, seven_days_ago),
@@ -130,11 +134,11 @@ class ContextBuilder:
                     mem["_recall_source"] = "recent_7d"
                     candidates_map[m_id] = mem
 
-        # 5. 历史已有的 SUPERSEDE 链条记忆
+        # 5. 历史已有的 SUPERSEDE 链条记忆 (排除已删除)
         cursor.execute(
             """
             SELECT memory_id FROM memories
-            WHERE project_id = ? AND (superseded_by IS NOT NULL OR superseded_at IS NOT NULL)
+            WHERE project_id = ? AND (superseded_by IS NOT NULL OR superseded_at IS NOT NULL) AND LOWER(status) != 'deleted'
             ORDER BY updated_at DESC LIMIT 10
             """,
             (project_id,),
