@@ -1251,8 +1251,7 @@ class SessionStore:
         """
         now = int(time.time())
 
-        with self.locked_write_transaction() as conn:
-            cursor = conn.cursor()
+        def ingest_in_transaction(cursor):
             stats = self._ingest_messages_locked(
                 cursor=cursor,
                 session_id=session_id,
@@ -1278,17 +1277,20 @@ class SessionStore:
                     now=now,
                 )
 
-        ret = {
-            "session_id": session_id,
-            "total_received": stats["total_received"],
-            "inserted": stats["inserted"],
-            "revision_updated": stats["revision_updated"],
-            "ignored": stats["ignored"],
-            "status": "success",
-        }
-        if chk_res:
-            ret["checkpoint"] = chk_res
-        return ret
+            ret = {
+                "session_id": session_id,
+                "total_received": stats["total_received"],
+                "inserted": stats["inserted"],
+                "revision_updated": stats["revision_updated"],
+                "ignored": stats["ignored"],
+                "status": "success",
+            }
+            if chk_res:
+                ret["checkpoint"] = chk_res
+            return ret
+
+        digest = compute_request_digest("session_ingest", {"session_id": session_id, "project_id": project_id, "messages": messages, "checkpoint": checkpoint})
+        return self.execute_idempotent(op="session_ingest", idem_key=idempotency_key, digest=digest, business_fn=ingest_in_transaction, agent_id_raw=agent_id)
 
     def save_checkpoint(
         self,

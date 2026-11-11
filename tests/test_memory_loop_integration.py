@@ -12,6 +12,7 @@ from src.interfaces.ipc.server import UDSServer
 from src.interfaces.mcp.bridge import MCPBridge
 from src.main import AMRApplication
 from src.service.memory_service import MemoryService
+from src.core.errors import IdempotencyConflict
 
 
 @pytest.mark.asyncio
@@ -58,4 +59,21 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
     finally:
         await server.stop()
         app.memory_service.close()
+        store.close()
+
+
+def test_ingest_checkpoint_idempotent_retry(tmp_path):
+    cfg = AppConfig()
+    cfg.storage.sqlite_path = str(tmp_path / "idempotency.db")
+    store = SessionStore(cfg)
+    try:
+        args = {"session_id": "s", "agent_id": "a", "project_id": "p", "messages": [{"message_id": "m", "role": "user", "content": "value"}], "checkpoint": {"completed": ["done"], "next_steps": ["next"]}, "idempotency_key": "key"}
+        first = store.ingest_messages(**args)
+        again = store.ingest_messages(**args)
+        assert again["idempotent_replay"] is True
+        assert again["checkpoint"]["checkpoint_id"] == first["checkpoint"]["checkpoint_id"]
+        assert len(store.get_session_checkpoints("s")) == 1
+        with pytest.raises(IdempotencyConflict):
+            store.ingest_messages(**dict(args, checkpoint={"completed": ["changed"]}))
+    finally:
         store.close()
