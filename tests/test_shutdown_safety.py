@@ -37,12 +37,14 @@ async def test_application_does_not_close_dependencies_if_server_drain_times_out
     app.outbox_worker = MagicMock()
     app.server = MagicMock()
     app.server.stop = MagicMock(side_effect=TimeoutError("Drain timeout reached with 1 active handlers still running"))
+    app.memory_service = MagicMock()
     app.engine = MagicMock()
     app.session_store = MagicMock()
     app.qdrant_manager = MagicMock()
 
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(app.stop(), timeout=2.0)
+    app.memory_service.aclose.assert_not_called()
     app.session_store.close.assert_not_called()
     app.qdrant_manager.close.assert_not_called()
     app.engine.close.assert_not_called()
@@ -54,12 +56,14 @@ async def test_application_does_not_close_dependencies_if_worker_times_out():
     app.outbox_worker = MagicMock()
     app.outbox_worker.stop.side_effect = TimeoutError("still running")
     app.server = MagicMock()
+    app.memory_service = MagicMock()
     app.engine = MagicMock()
     app.session_store = MagicMock()
     app.qdrant_manager = MagicMock()
 
     with pytest.raises(TimeoutError):
         await app.stop()
+    app.memory_service.aclose.assert_not_called()
     app.session_store.close.assert_not_called()
     app.qdrant_manager.close.assert_not_called()
     app.engine.close.assert_not_called()
@@ -1173,3 +1177,161 @@ async def test_memory_service_no_work_submitted_after_shutdown_begins():
     assert first_res["enrichment"] == "ok"
     assert call_count == 1
     assert service._closed is True
+
+
+@pytest.mark.asyncio
+async def test_application_stop_calls_memory_service_aclose_in_sequence():
+    """
+    验证 AMRApplication.stop() 的停机序列：
+    1. server.stop() 排空并关闭请求；
+    2. memory_service.aclose() 关闭在途任务并关闭 executor；
+    3. engine, session_store, qdrant_manager 关闭。
+    若 memory_service.aclose 抛出异常（例如超时），后续依赖不能被关闭。
+    """
+    call_order = []
+
+    app = object.__new__(AMRApplication)
+    app.outbox_worker = MagicMock()
+    app.outbox_worker.stop = MagicMock(side_effect=lambda: call_order.append("outbox_worker"))
+
+    async def fake_server_stop():
+        call_order.append("server")
+
+    app.server = MagicMock()
+    app.server.stop = MagicMock(side_effect=fake_server_stop)
+
+    async def fake_mem_aclose():
+        call_order.append("memory_service")
+
+    app.memory_service = MagicMock()
+    app.memory_service.aclose = MagicMock(side_effect=fake_mem_aclose)
+
+    async def fake_engine_aclose():
+        call_order.append("engine")
+
+    app.engine = MagicMock()
+    app.engine.aclose = MagicMock(side_effect=fake_engine_aclose)
+
+    app.session_store = MagicMock()
+    app.session_store.close = MagicMock(side_effect=lambda: call_order.append("session_store"))
+
+    app.qdrant_manager = MagicMock()
+    app.qdrant_manager.close = MagicMock(side_effect=lambda: call_order.append("qdrant"))
+
+    await app.stop()
+
+    assert call_order == [
+        "outbox_worker",
+        "server",
+        "memory_service",
+        "engine",
+        "session_store",
+        "qdrant",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_application_does_not_close_dependencies_if_memory_service_fails():
+    """
+    当 memory_service.aclose() 抛出异常（例如任务超时）时，
+    AMRApplication.stop() 必须抛出异常并阻止关闭底层的 engine、session_store 和 qdrant_manager。
+    """
+    app = object.__new__(AMRApplication)
+    app.outbox_worker = MagicMock()
+    app.server = MagicMock()
+
+    async def fake_server_stop():
+        pass
+
+    app.server.stop = MagicMock(side_effect=fake_server_stop)
+
+    async def hung_mem_aclose():
+        raise TimeoutError("MemoryService close timed out")
+
+    app.memory_service = MagicMock()
+    app.memory_service.aclose = MagicMock(side_effect=hung_mem_aclose)
+
+    app.engine = MagicMock()
+    app.session_store = MagicMock()
+    app.qdrant_manager = MagicMock()
+
+    with pytest.raises(TimeoutError, match="MemoryService close timed out"):
+        await app.stop()
+
+    app.engine.close.assert_not_called()
+    app.session_store.close.assert_not_called()
+    app.qdrant_manager.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_memory_service_concurrent_close_timeout_when_first_closer_times_out():
+    """
+    当第一个 closer 因在途任务超时抛出 TimeoutError 时，
+    后续并发的 closer 也应感知到超时并抛出 TimeoutError，而不是挂死或静默返回。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_concurrent_timeout", "content": "test"}
+
+    in_work_event = threading.Event()
+    release_work_event = threading.Event()
+
+    def hung_lookup(mid):
+        in_work_event.set()
+        release_work_event.wait(timeout=2.0)
+        return {"payload": {"meta": {"done": True}}}
+
+    qdrant.get_point_by_memory_id = hung_lookup
+
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+
+    get_task = asyncio.create_task(service.memory_get("mem_concurrent_timeout"))
+    await asyncio.to_thread(in_work_event.wait, 2.0)
+    assert in_work_event.is_set()
+
+    # 启动两个短超时的 aclose
+    t1 = asyncio.create_task(service.aclose(timeout=0.1))
+    await asyncio.sleep(0.02)
+    t2 = asyncio.create_task(service.aclose(timeout=0.1))
+
+    res1, res2 = await asyncio.gather(t1, t2, return_exceptions=True)
+    assert isinstance(res1, TimeoutError)
+    assert isinstance(res2, TimeoutError)
+
+    assert service._closed is False
+
+    release_work_event.set()
+    await get_task
+    await service.aclose(timeout=2.0)
+    assert service._closed is True
+
+
+
+@pytest.mark.asyncio
+async def test_memory_service_waiter_recovers_after_first_close_times_out():
+    store = MagicMock()
+    store.get_memory.return_value = {"memory_id": "m", "content": "x"}
+    entered, release = threading.Event(), threading.Event()
+    qdrant = MagicMock()
+    def lookup(_):
+        entered.set()
+        release.wait(3)
+        return None
+    qdrant.get_point_by_memory_id = lookup
+    service = MemoryService(engine=MagicMock(), qdrant_manager=qdrant, session_store=store)
+    request = asyncio.create_task(service.memory_get("m"))
+    assert await asyncio.to_thread(entered.wait, 2)
+    first = asyncio.create_task(service.aclose(timeout=0.2))
+    await asyncio.sleep(0.05)
+    second = asyncio.create_task(service.aclose())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(first, 2)
+    assert not second.done()
+    release.set()
+    await asyncio.wait_for(second, 2)
+    await request
+    assert service._closed

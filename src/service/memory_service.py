@@ -70,40 +70,33 @@ class MemoryService:
         return 7
 
     def close(self, timeout: Optional[float] = None) -> None:
-        """关闭富化线程池并等待在途任务完成。所有并发 close 均等待所有已提交任务执行完毕。"""
+        """Reject new work and drain the executor before returning."""
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         with self._close_lock:
             if self._closed:
                 return
-            is_first_closer = not self._closing
             self._closing = True
-
-        if is_first_closer:
-            with self._teardown_lock:
-                try:
-                    start_time = time.monotonic()
-                    deadline = (start_time + timeout) if timeout is not None else None
-
-                    while True:
-                        with self._active_enrich_lock:
-                            futures = list(self._active_enrich_futures)
-                        if not futures:
-                            break
-                        remaining = (deadline - time.monotonic()) if deadline is not None else None
-                        if remaining is not None and remaining <= 0:
-                            break
-                        concurrent.futures.wait(futures, timeout=min(remaining, 0.05) if remaining is not None else 0.05)
-
-                    try:
-                        self._enrich_executor.shutdown(wait=True, cancel_futures=True)
-                    except TypeError:
-                        self._enrich_executor.shutdown(wait=True)
-                finally:
-                    with self._close_lock:
-                        self._closed = True
-                    self._shutdown_event.set()
-        else:
-            if not self._shutdown_event.wait(timeout=timeout):
-                raise TimeoutError("MemoryService shutdown is still in progress")
+        acquired = self._teardown_lock.acquire() if deadline is None else self._teardown_lock.acquire(timeout=max(0.0, deadline - time.monotonic()))
+        if not acquired:
+            raise TimeoutError("MemoryService shutdown is still in progress")
+        try:
+            if self._closed:
+                return
+            while True:
+                with self._active_enrich_lock:
+                    futures = list(self._active_enrich_futures)
+                if not futures:
+                    break
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError("MemoryService close timed out with active enrichment tasks")
+                concurrent.futures.wait(futures, timeout=min(remaining, 0.05) if remaining is not None else 0.05)
+            self._enrich_executor.shutdown(wait=True, cancel_futures=True)
+            with self._close_lock:
+                self._closed = True
+            self._shutdown_event.set()
+        finally:
+            self._teardown_lock.release()
 
     async def aclose(self, timeout: Optional[float] = None) -> None:
         """异步优雅停机：等待在途富化完成并关闭线程池"""
