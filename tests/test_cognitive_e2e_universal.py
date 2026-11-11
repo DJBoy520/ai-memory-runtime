@@ -33,6 +33,26 @@ def temp_store():
 
 
 @pytest.mark.asyncio
+async def test_conflicting_session_sources_are_not_combined(temp_store):
+    temp_store.ingest_messages("same", "agent-a", "project-a", [{"message_id": "m1", "role": "user", "content": "original"}])
+    temp_store.record_raw_session("same", "agent-b", "project-b")
+    temp_store.record_raw_message("m2", "same", "user", "different project", 1)
+    result = await CognitiveScheduler(session_store=temp_store).run_pipeline_for_session("same")
+    assert result["status"] == "SESSION_ID_COLLISION"
+    assert result["written_candidates"] == 0
+
+
+@pytest.mark.asyncio
+async def test_conflicting_message_sources_are_not_combined(temp_store):
+    temp_store.ingest_messages("same", "agent-a", "project-a", [{"message_id": "m1", "role": "user", "content": "original"}])
+    temp_store.record_raw_session("same", "agent-a", "project-a")
+    temp_store.record_raw_message("m1", "same", "user", "conflicting content", 1)
+    result = await CognitiveScheduler(session_store=temp_store).run_pipeline_for_session("same")
+    assert result["status"] == "MESSAGE_ID_COLLISION"
+    assert result["written_candidates"] == 0
+
+
+@pytest.mark.asyncio
 async def test_mcp_session_ingest_to_scheduler_distillation_e2e(temp_store):
     """
     核心闭环 E2E 测试：

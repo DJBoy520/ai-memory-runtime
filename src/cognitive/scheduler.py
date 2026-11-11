@@ -168,6 +168,14 @@ class CognitiveScheduler:
 
         msgs_by_id: Dict[str, Dict[str, Any]] = {}
 
+        if "sessions" in existing_tables and "raw_sessions" in existing_tables:
+            cursor.execute("SELECT agent_id, project_id FROM sessions WHERE session_id = ?", (session_id,))
+            current = cursor.fetchone()
+            cursor.execute("SELECT agent_id, project_id FROM raw_sessions WHERE session_id = ?", (session_id,))
+            raw = cursor.fetchone()
+            if current and raw and (current["agent_id"], current["project_id"]) != (raw["agent_id"], raw["project_id"]):
+                return {"batch_id": batch_id, "session_id": session_id, "status": "SESSION_ID_COLLISION", "written_candidates": 0}
+
         # 优先从 raw_messages 读取
         if "raw_messages" in existing_tables:
             cursor.execute(
@@ -194,6 +202,8 @@ class CognitiveScheduler:
                 (session_id,),
             )
             for r in cursor.fetchall():
+                if r["message_id"] in msgs_by_id and (r["role"], r["content"]) != (msgs_by_id[r["message_id"]]["role"], msgs_by_id[r["message_id"]]["content"]):
+                    return {"batch_id": batch_id, "session_id": session_id, "status": "MESSAGE_ID_COLLISION", "written_candidates": 0}
                 if r["message_id"] not in msgs_by_id:
                     msgs_by_id[r["message_id"]] = dict(r)
 
@@ -368,9 +378,17 @@ class CognitiveScheduler:
                 conf = cand.get("self_assessed_confidence", 0.85)
                 target_mem_id = cand.get("target_memory_id")
 
+                db_cursor.execute("SELECT session_window_json, operation, subject, predicate, object, content, evidence_source_ids, extracted_spans, rationale, proposed_relation_json, llm_confidence, memory_id FROM curation_candidates WHERE candidate_id = ?", (cand_id,))
+                prior = db_cursor.fetchone()
+                if prior:
+                    if tuple(prior) != (session_window_json, op, subject, predicate, obj, content, ev_ids, spans, rationale, rel_json, conf, target_mem_id):
+                        db_conn.rollback()
+                        raise ValueError(f"Candidate ID conflict: {cand_id}")
+                    continue
+
                 db_cursor.execute(
                     """
-                    INSERT OR REPLACE INTO curation_candidates (
+                    INSERT INTO curation_candidates (
                         candidate_id, batch_id, memory_id, session_window_json,
                         operation, current_status, proposed_status, matched_rule_id,
                         reason, evidence_snapshot, subject, predicate, object,
