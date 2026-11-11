@@ -21,6 +21,7 @@ import torch
 
 from config.settings import ModelConfig
 from src.core.engine import BGEM3Engine, EngineError, ModelState
+from src.service.memory_service import MemoryService
 from src.service.outbox_worker import OutboxWorker
 from src.main import AMRApplication
 
@@ -365,3 +366,328 @@ def test_outbox_worker_stop_before_start():
     worker.stop()
     assert worker._running is False
     assert worker._lock_fd is None
+
+
+# =========================================================================
+# FINDING-ROBUST-03: MemoryService Enrichment Executor Lifecycle Management
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_memory_service_close_shuts_down_executor():
+    """
+    [ROBUST-03 验证: 线程池回收与优雅关闭]
+    验证 MemoryService.close() 正常关闭富化线程池，线程池标记已关闭且工作线程被终止。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+    store.get_memory.return_value = {"memory_id": "mem_001", "content": "text"}
+    qdrant.get_point_by_memory_id.return_value = {"payload": {"meta": {"foo": "bar"}}}
+
+    # 先发起一次富化，触发线程池 worker 线程的真实启动
+    res = await service.memory_get("mem_001")
+    assert res is not None
+    assert res["enrichment"] == "ok"
+    assert not service._enrich_executor._shutdown
+
+    # 执行关闭
+    service.close(timeout=2.0)
+    assert service._closed is True
+    assert service._enrich_executor._shutdown is True
+
+    # 幂等性：再次调用 close 不会抛出异常
+    service.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_service_in_flight_enrichment_drained_before_close():
+    """
+    [ROBUST-03 验证: 在途富化排空与资源保护]
+    验证在途的富化操作不会在 closed 资源上崩溃：
+    1. close() 等待在途任务完成；
+    2. close() 后外部依赖（如 Qdrant / Store）关闭；
+    3. 后续新发起的 memory_get 请求被拦截，直接降级为 degraded，绝对不向 closed executor 提交任务。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_slow", "content": "slow content"}
+
+    in_call_event = threading.Event()
+    finish_call_event = threading.Event()
+    resource_closed = False
+
+    def slow_point_lookup(mid):
+        if resource_closed:
+            raise RuntimeError("CRITICAL: Accessing closed resource!")
+        in_call_event.set()
+        # 等待外部指令再返回
+        finish_call_event.wait(timeout=2.0)
+        return {"payload": {"meta": {"tags": ["in_flight"]}}}
+
+    qdrant.get_point_by_memory_id = slow_point_lookup
+
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+
+    # 异步启动 memory_get
+    enrich_task = asyncio.create_task(service.memory_get("mem_slow"))
+
+    # 等待确认在途任务已经进入 qdrant.get_point_by_memory_id
+    await asyncio.to_thread(in_call_event.wait, 2.0)
+    assert in_call_event.is_set()
+
+    # 异步启动 service.aclose()
+    async def drain_and_close():
+        await service.aclose(timeout=2.0)
+        nonlocal resource_closed
+        resource_closed = True
+
+    close_task = asyncio.create_task(drain_and_close())
+
+    # 稍作等待，确保 close 正在等待在途任务
+    await asyncio.sleep(0.05)
+    assert not close_task.done(), "close_task should wait for in-flight enrichment"
+
+    # 此时如果来了一个新的 memory_get 请求，必须直接 degraded，不能进入线程池
+    new_req = await service.memory_get("mem_slow")
+    assert new_req["enrichment"] == "degraded"
+
+    # 释放在途任务
+    finish_call_event.set()
+    res = await enrich_task
+    await close_task
+
+    # 验证在途请求成功获取结果且没有访问关闭后的资源
+    assert res["enrichment"] == "ok"
+    assert res["meta"]["tags"] == ["in_flight"]
+    assert resource_closed is True
+
+
+@pytest.mark.asyncio
+async def test_memory_service_closed_rejects_new_enrichments():
+    """
+    [ROBUST-03 验证: 关闭后新请求防线]
+    已 closed 的 MemoryService 在调用 memory_get 时，安全退化为 degraded，
+    绝不向已被 shutdown 的 executor 提交任务抛出 RuntimeError。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_002", "content": "some text"}
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+    service.close()
+    assert service._closed is True
+
+    # 再次发起 memory_get，应该安全返回 SQLite 数据，enrichment 为 degraded
+    res = await service.memory_get("mem_002")
+    assert res is not None
+    assert res["memory_id"] == "mem_002"
+    assert res["content"] == "some text"
+    assert res["enrichment"] == "degraded"
+    # Qdrant 绝不应被调用
+    qdrant.get_point_by_memory_id.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_memory_service_concurrent_closes_both_wait_for_in_flight_work():
+    """
+    [ROBUST-03 验证: 并发双 close 等待在途任务]
+    验证存在两个并发 closer 时：
+    1. 两个 close() 调用都会阻塞等待正在执行的在途富化任务完成；
+    2. 第二个 close() 绝不提前返回（避免过早关闭 Qdrant 等外部资源）；
+    3. 在途富化安全执行完毕且不被破坏。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_concurrent", "content": "test content"}
+
+    in_work_event = threading.Event()
+    release_work_event = threading.Event()
+    work_finished = threading.Event()
+
+    def slow_lookup(mid):
+        in_work_event.set()
+        release_work_event.wait(timeout=2.0)
+        work_finished.set()
+        return {"payload": {"meta": {"done": True}}}
+
+    qdrant.get_point_by_memory_id = slow_lookup
+
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+
+    # 启动在途任务
+    get_task = asyncio.create_task(service.memory_get("mem_concurrent"))
+    await asyncio.to_thread(in_work_event.wait, 2.0)
+    assert in_work_event.is_set()
+
+    closer1_finished = False
+    closer2_finished = False
+
+    async def closer_1():
+        nonlocal closer1_finished
+        await service.aclose(timeout=2.0)
+        closer1_finished = True
+
+    async def closer_2():
+        nonlocal closer2_finished
+        await service.aclose(timeout=2.0)
+        closer2_finished = True
+
+    c1_task = asyncio.create_task(closer_1())
+    c2_task = asyncio.create_task(closer_2())
+
+    # 稍微等待，确保两个 closer 均已调用 aclose
+    await asyncio.sleep(0.05)
+    # 验证两个 closer 都在等待中，没有一个提前返回
+    assert not closer1_finished, "Closer 1 should not have finished before work is done"
+    assert not closer2_finished, "Closer 2 should not have finished before work is done"
+    assert not work_finished.is_set()
+
+    # 释放工作任务
+    release_work_event.set()
+
+    await asyncio.gather(c1_task, c2_task, get_task)
+
+    assert closer1_finished is True
+    assert closer2_finished is True
+    assert work_finished.is_set()
+    assert service._closed is True
+
+
+@pytest.mark.asyncio
+async def test_memory_service_close_waits_for_timed_out_asyncio_enrichment():
+    """
+    [ROBUST-03 验证: asyncio 层面超时的富化任务在 executor 中继续运行，close 必须等待其完成]
+    验证当 memory_get 触发 asyncio.wait_for 超时（0.2s）之后：
+    1. memory_get 降级返回 degraded；
+    2. 底层线程池中的 Qdrant 任务依然在运行；
+    3. 随后触发的 close() / aclose() 依然会等待此在途任务执行完成，
+       绝不提前 shutdown 导致正在运行的 Qdrant 查询被意外切断或资源提前关闭。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_timeout", "content": "content"}
+
+    in_lookup_event = threading.Event()
+    allow_finish_event = threading.Event()
+    qdrant_closed = False
+    qdrant_accessed_after_close = False
+
+    def hung_lookup(mid):
+        nonlocal qdrant_accessed_after_close
+        in_lookup_event.set()
+        # 等待超过 asyncio.wait_for(0.2s)
+        allow_finish_event.wait(timeout=2.0)
+        if qdrant_closed:
+            qdrant_accessed_after_close = True
+        return {"payload": {"meta": {"status": "eventually_done"}}}
+
+    qdrant.get_point_by_memory_id = hung_lookup
+
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+
+    # 发起请求，0.2s 后在 asyncio 层超时
+    get_res = await service.memory_get("mem_timeout")
+    # asyncio 层应该已经返回 degraded
+    assert get_res["enrichment"] == "degraded"
+    assert in_lookup_event.is_set()
+
+    # 此时底层 hung_lookup 仍在线程池中运行
+    close_done = False
+
+    async def do_close():
+        nonlocal close_done, qdrant_closed
+        await service.aclose(timeout=2.0)
+        qdrant_closed = True
+        close_done = True
+
+    close_task = asyncio.create_task(do_close())
+
+    # 确认 close 正在等待底层任务
+    await asyncio.sleep(0.05)
+    assert not close_done, "Close must wait for timed-out enrichment executor work to finish"
+
+    # 允许底层任务完成
+    allow_finish_event.set()
+    await close_task
+
+    assert close_done is True
+    assert qdrant_closed is True
+    assert not qdrant_accessed_after_close
+    assert service._closed is True
+
+
+@pytest.mark.asyncio
+async def test_memory_service_no_work_submitted_after_shutdown_begins():
+    """
+    [ROBUST-03 验证: shutdown 开始后不再允许提交任何新任务]
+    验证当 close 已经启动（_closing 为 True 但仍在等待在途任务完成时），
+    新到来的 memory_get 请求被原子拦截，直接降级，绝不向 executor 提交新任务。
+    """
+    store = MagicMock()
+    qdrant = MagicMock()
+    store.get_memory.return_value = {"memory_id": "mem_atomic", "content": "content"}
+
+    in_work_event = threading.Event()
+    release_work_event = threading.Event()
+
+    call_count = 0
+
+    def slow_lookup(mid):
+        nonlocal call_count
+        call_count += 1
+        in_work_event.set()
+        release_work_event.wait(timeout=2.0)
+        return {"payload": {"meta": {"count": call_count}}}
+
+    qdrant.get_point_by_memory_id = slow_lookup
+
+    service = MemoryService(
+        engine=MagicMock(),
+        qdrant_manager=qdrant,
+        session_store=store,
+    )
+
+    # 1. 提交第一个在途任务
+    first_task = asyncio.create_task(service.memory_get("mem_atomic"))
+    await asyncio.to_thread(in_work_event.wait, 2.0)
+    assert in_work_event.is_set()
+
+    # 2. 启动 close()（此时处于 closing 状态但尚未关闭）
+    close_task = asyncio.create_task(service.aclose(timeout=2.0))
+    await asyncio.sleep(0.05)
+    assert service._closing is True
+    assert service._closed is False
+
+    # 3. 尝试在此刻提交新的 memory_get
+    second_res = await service.memory_get("mem_atomic")
+    # 必须直接降级，且 call_count 不增加（未提交给 executor）
+    assert second_res["enrichment"] == "degraded"
+    assert call_count == 1
+
+    # 释放第一个任务
+    release_work_event.set()
+    first_res = await first_task
+    await close_task
+
+    assert first_res["enrichment"] == "ok"
+    assert call_count == 1
+    assert service._closed is True

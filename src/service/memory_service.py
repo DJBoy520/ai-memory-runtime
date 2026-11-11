@@ -5,6 +5,7 @@ AI Memory Runtime - Memory Service 核心语义服务层
 """
 
 import asyncio
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
@@ -54,12 +55,63 @@ class MemoryService:
         self._cached_tokenizer = None
         self._enrich_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mem_enrich")
         self._enrich_semaphore = threading.Semaphore(2)
+        self._closed: bool = False
+        self._closing: bool = False
+        self._close_lock = threading.Lock()
+        self._teardown_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
+        self._active_enrich_futures = set()
+        self._active_enrich_lock = threading.Lock()
 
     @property
     def idempotency_retention_days(self) -> int:
         if self.config and hasattr(self.config, "storage") and hasattr(self.config.storage, "idempotency_retention_days"):
             return self.config.storage.idempotency_retention_days
         return 7
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """关闭富化线程池并等待在途任务完成。所有并发 close 均等待所有已提交任务执行完毕。"""
+        with self._close_lock:
+            if self._closed:
+                return
+            is_first_closer = not self._closing
+            self._closing = True
+
+        if is_first_closer:
+            with self._teardown_lock:
+                try:
+                    start_time = time.monotonic()
+                    deadline = (start_time + timeout) if timeout is not None else None
+
+                    while True:
+                        with self._active_enrich_lock:
+                            futures = list(self._active_enrich_futures)
+                        if not futures:
+                            break
+                        remaining = (deadline - time.monotonic()) if deadline is not None else None
+                        if remaining is not None and remaining <= 0:
+                            break
+                        concurrent.futures.wait(futures, timeout=min(remaining, 0.05) if remaining is not None else 0.05)
+
+                    try:
+                        self._enrich_executor.shutdown(wait=True, cancel_futures=True)
+                    except TypeError:
+                        self._enrich_executor.shutdown(wait=True)
+                finally:
+                    with self._close_lock:
+                        self._closed = True
+                    self._shutdown_event.set()
+        else:
+            if not self._shutdown_event.wait(timeout=timeout):
+                raise TimeoutError("MemoryService shutdown is still in progress")
+
+    async def aclose(self, timeout: Optional[float] = None) -> None:
+        """异步优雅停机：等待在途富化完成并关闭线程池"""
+        await asyncio.to_thread(self.close, timeout=timeout)
+
+    def _discard_active_enrich_future(self, fut: concurrent.futures.Future) -> None:
+        with self._active_enrich_lock:
+            self._active_enrich_futures.discard(fut)
 
     def _generate_memory_id(self) -> str:
         """生成符合 mem_YYYYMMDD_xxxxxx 格式的全局唯一 ID"""
@@ -616,28 +668,38 @@ class MemoryService:
         enrichment_status = "degraded"
         payload = None
 
-        acquired = self._enrich_semaphore.acquire(blocking=False)
-        if acquired:
-            try:
-                loop = asyncio.get_running_loop()
-                point_info = await asyncio.wait_for(
-                    loop.run_in_executor(
-                        self._enrich_executor,
-                        self.qdrant.get_point_by_memory_id,
-                        mid,
-                    ),
-                    timeout=0.2,
-                )
-                if point_info and point_info.get("payload"):
-                    payload = point_info["payload"]
-                enrichment_status = "ok"
-            except Exception as e:
-                logger.warning(f"Qdrant enrichment degraded for {mid}: {e}")
+        if not self._closing and not self._closed:
+            acquired = self._enrich_semaphore.acquire(blocking=False)
+            if acquired:
+                fut = None
+                try:
+                    with self._close_lock:
+                        if self._closing or self._closed:
+                            raise RuntimeError("Service is closed or closing")
+                        fut = self._enrich_executor.submit(
+                            self.qdrant.get_point_by_memory_id,
+                            mid,
+                        )
+                        with self._active_enrich_lock:
+                            self._active_enrich_futures.add(fut)
+                    fut.add_done_callback(lambda f: self._discard_active_enrich_future(f))
+
+                    point_info = await asyncio.wait_for(
+                        asyncio.wrap_future(fut),
+                        timeout=0.2,
+                    )
+                    if point_info and point_info.get("payload"):
+                        payload = point_info["payload"]
+                    enrichment_status = "ok"
+                except Exception as e:
+                    logger.warning(f"Qdrant enrichment degraded for {mid}: {e}")
+                    enrichment_status = "degraded"
+                finally:
+                    self._enrich_semaphore.release()
+            else:
+                logger.warning(f"Qdrant enrichment degraded for {mid}: semaphore busy (zero queue)")
                 enrichment_status = "degraded"
-            finally:
-                self._enrich_semaphore.release()
         else:
-            logger.warning(f"Qdrant enrichment degraded for {mid}: semaphore busy (zero queue)")
             enrichment_status = "degraded"
 
         if enrichment_status == "ok" and payload:
