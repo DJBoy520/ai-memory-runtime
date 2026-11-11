@@ -189,6 +189,10 @@ class MCPBridge:
                     "memory_record": "memory.record",
                     "memory_update_status": "memory.update_status",
                     "memory_ingest_session": "session.ingest",
+                    "session_checkpoint": "session.checkpoint",
+                    "memory_session_checkpoint": "session.checkpoint",
+                    "session_get_handoff": "session.get_handoff",
+                    "memory_get_handoff": "session.get_handoff",
                 }
 
                 rpc_method = rpc_method_map.get(tool_name)
