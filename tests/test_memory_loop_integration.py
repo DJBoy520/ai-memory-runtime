@@ -1,5 +1,6 @@
 import asyncio
 import json
+import multiprocessing
 import time
 
 import pytest
@@ -14,6 +15,12 @@ from src.main import AMRApplication
 from src.service.memory_service import MemoryService
 from src.core.errors import IdempotencyConflict
 from src.client import UdsTransport, TransientDeliveryError
+
+
+def _offline_spool_worker(spool, socket_path, worker):
+    client = AmrSessionClient(spool_dir=spool, socket_path=socket_path, agent_id="agent-a", auto_replay=False)
+    for n in range(4):
+        client.record_messages("shared-session", [{"message_id": f"{worker}-{n}", "role": "user", "content": "value"}])
 
 
 @pytest.mark.asyncio
@@ -84,3 +91,22 @@ def test_spool_rejects_response_with_wrong_rpc_id():
     response = json.dumps({"jsonrpc": "2.0", "id": "other", "result": {"status": "success", "session_id": "s"}}).encode()
     with pytest.raises(TransientDeliveryError, match="response"):
         UdsTransport()._parse_response(response, "expected")
+
+
+def test_spool_preserves_concurrent_process_batches(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    spool = str(tmp_path / "spool")
+    socket_path = str(tmp_path / "missing.sock")
+    workers = [context.Process(target=_offline_spool_worker, args=(spool, socket_path, i)) for i in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(15)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join()
+        assert worker.exitcode == 0
+    client = AmrSessionClient(spool_dir=spool, socket_path=socket_path, auto_replay=False)
+    batches = client.storage.list_batches_for_session("shared-session")
+    assert len(batches) == 16
+    assert len({b.messages[0].message_id for b in batches}) == 16
