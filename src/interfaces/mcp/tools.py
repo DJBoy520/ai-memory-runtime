@@ -257,6 +257,16 @@ TOOL_DEFINITIONS = [
         }
     },
     {
+        "name": "memory_spool_status",
+        "description": "Show the current agent's durable session spool pending and quarantined batch counts.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "memory_spool_retry",
+        "description": "Retry pending session batches in the current agent's durable spool.",
+        "inputSchema": {"type": "object", "properties": {}}
+    },
+    {
         "name": "memory_candidates",
         "description": "List evidence-backed proposed memories for review in a project.",
         "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["project_id"]}
@@ -439,6 +449,8 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
                 raise ValueError("Each message requires a valid role.")
             if not isinstance(message.get("content"), str):
                 raise ValueError("Each message requires string content.")
+    elif name in ("memory_spool_status", "memory_spool_retry"):
+        pass
     elif name in ("memory_candidates", "memory_approve_candidate"):
         for field in (("project_id", "candidate_id") if name == "memory_approve_candidate" else ("project_id",)):
             if not isinstance(args.get(field), str) or not args[field].strip():

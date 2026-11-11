@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -75,6 +76,34 @@ class MCPBridge:
         self.socket_path = socket_path
         self.source_agent = source_agent
         self.call_timeout = call_timeout
+        self._spool_dir = os.environ.get("AMR_SPOOL_DIR")
+        self._spool_client = None
+        self._spool_init_lock = asyncio.Lock()
+
+    async def _session_spool(self):
+        """Initialize a per-agent durable queue only when explicitly configured."""
+        if not self._spool_dir:
+            return None
+        async with self._spool_init_lock:
+            if self._spool_client is None:
+                from src.client import AmrSessionClient
+                agent_dir = hashlib.sha256(self.source_agent.encode("utf-8")).hexdigest()
+                self._spool_client = await asyncio.to_thread(
+                    AmrSessionClient, spool_dir=Path(self._spool_dir) / agent_dir,
+                    agent_id=self.source_agent, socket_path=self.socket_path, auto_replay=True,
+                )
+        return self._spool_client
+
+    async def _replay_spool(self):
+        """Retry persisted batches while the MCP client process remains active."""
+        while True:
+            try:
+                spool = await self._session_spool()
+                if spool is not None:
+                    await asyncio.to_thread(spool.replay_pending)
+            except Exception:
+                sys.stderr.write("[AMR-Bridge] Session spool replay failed; will retry.\n")
+            await asyncio.sleep(30)
 
     async def _call_daemon(self, method: str, params: Dict[str, Any], req_id: Any) -> Dict[str, Any]:
         """Connect to UDS and dispatch RPC request to daemon."""
@@ -178,6 +207,14 @@ class MCPBridge:
 
             try:
                 validate_tool_args(tool_name, arguments)
+                if tool_name in ("memory_spool_status", "memory_spool_retry"):
+                    spool = await self._session_spool()
+                    if spool is None:
+                        raise ValueError("Session spool is not configured; set AMR_SPOOL_DIR")
+                    if tool_name == "memory_spool_retry":
+                        await asyncio.to_thread(spool.replay_pending)
+                    result = {"pending": await asyncio.to_thread(spool.pending_count), "quarantined": await asyncio.to_thread(spool.quarantined_count)}
+                    return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}}
                 # Map MCP tool calls to Daemon RPC methods
                 rpc_method_map = {
                     "memory_search": "memory.search",
@@ -222,7 +259,19 @@ class MCPBridge:
                 arguments["agent_id"] = self.source_agent
                 arguments["source_agent"] = self.source_agent
 
-                res = await self._call_daemon(rpc_method, arguments, req_id)
+                spool = await self._session_spool() if tool_name in ("memory_ingest_session", "session_checkpoint", "memory_session_checkpoint") else None
+                if spool is not None:
+                    is_checkpoint = tool_name in ("session_checkpoint", "memory_session_checkpoint")
+                    checkpoint = ({key: arguments[key] for key in ("completed", "in_progress", "next_steps", "context", "checkpoint_id") if key in arguments} if is_checkpoint else None)
+                    outcome = await asyncio.to_thread(spool.record_messages, arguments["session_id"], arguments.get("messages", []), arguments.get("project_id"), self.source_agent, None, checkpoint, arguments.get("idempotency_key"))
+                    if outcome.ok:
+                        res = outcome.server_response.get("checkpoint") if is_checkpoint else outcome.server_response
+                    elif outcome.quarantined:
+                        raise ValueError("Session was rejected and retained in the local dead-letter queue")
+                    else:
+                        res = {"status": "queued", "session_id": outcome.session_id, "batch_id": outcome.batch_id, "message_count": outcome.message_count}
+                else:
+                    res = await self._call_daemon(rpc_method, arguments, req_id)
                 formatted_text = json.dumps(res, ensure_ascii=False, indent=2)
 
                 return {
@@ -281,6 +330,8 @@ class MCPBridge:
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
+        replay_task = asyncio.create_task(self._replay_spool()) if self._spool_dir else None
+
         while True:
             line = await reader.readline()
             if not line:
@@ -298,6 +349,13 @@ class MCPBridge:
                     sys.stdout.flush()
             except Exception as err:
                 sys.stderr.write(f"[AMR-Bridge] stdio parse error: {err}\n")
+
+        if replay_task:
+            replay_task.cancel()
+            try:
+                await replay_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":

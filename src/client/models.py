@@ -169,6 +169,8 @@ class SessionBatch:
     agent_id: str
     messages: List[SessionMessage]
     project_id: Optional[str] = None
+    checkpoint: Optional[Dict[str, Any]] = None
+    idempotency_key: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     created_at_ns: int = field(default_factory=time.time_ns)
     attempts: int = 0
@@ -181,7 +183,7 @@ class SessionBatch:
             raise ValueError("SessionBatch requires a non-empty 'session_id'")
         if not self.agent_id or not str(self.agent_id).strip():
             raise ValueError("SessionBatch requires a non-empty 'agent_id'")
-        if not self.messages:
+        if not self.messages and not self.checkpoint:
             raise ValueError("SessionBatch requires at least one message")
         if not self.created_at_ns:
             self.created_at_ns = int(self.created_at * 1e9)
@@ -192,6 +194,8 @@ class SessionBatch:
             "session_id": self.session_id,
             "agent_id": self.agent_id,
             "project_id": self.project_id,
+            "checkpoint": self.checkpoint,
+            "idempotency_key": self.idempotency_key,
             "created_at": self.created_at,
             "created_at_ns": self.created_at_ns,
             "attempts": self.attempts,
@@ -222,6 +226,8 @@ class SessionBatch:
             session_id=data["session_id"],
             agent_id=data["agent_id"],
             project_id=data.get("project_id"),
+            checkpoint=data.get("checkpoint"),
+            idempotency_key=data.get("idempotency_key"),
             messages=msgs,
             created_at=data.get("created_at", time.time()),
             created_at_ns=data.get("created_at_ns", int(time.time() * 1e9)),

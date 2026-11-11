@@ -110,6 +110,8 @@ class UdsTransport(BaseTransport):
         project_id: Optional[str],
         messages: List[Dict[str, Any]],
         req_id: Optional[Union[str, int]] = None,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> bytes:
         if req_id is None:
             req_id = f"spool_{int(time.time() * 1000)}"
@@ -121,6 +123,9 @@ class UdsTransport(BaseTransport):
         }
         if project_id is not None:
             params["project_id"] = project_id
+        if checkpoint is not None:
+            params["checkpoint"] = checkpoint
+            params["idempotency_key"] = idempotency_key
 
         rpc_obj = {
             "jsonrpc": "2.0",
@@ -164,10 +169,12 @@ class UdsTransport(BaseTransport):
         project_id: Optional[str],
         messages: List[Dict[str, Any]],
         timeout: Optional[float] = None,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         effective_timeout = timeout if timeout is not None else self.request_timeout
         request_id = uuid.uuid4().hex
-        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages, req_id=request_id)
+        frame_bytes = self._build_payload(session_id, agent_id, project_id, messages, req_id=request_id, checkpoint=checkpoint, idempotency_key=idempotency_key)
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:

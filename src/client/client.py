@@ -125,6 +125,8 @@ class AmrSessionClient:
         project_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         timeout: Optional[float] = None,
+        checkpoint: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> IngestResult:
         """
         Record and ingest conversation messages for a session.
@@ -139,7 +141,9 @@ class AmrSessionClient:
         if not session_id or not str(session_id).strip():
             raise ValueError("Parameter 'session_id' is required and cannot be empty")
 
-        norm_messages = self._prepare_messages(session_id, messages)
+        norm_messages = self._prepare_messages(session_id, messages) if messages else []
+        if not norm_messages and not checkpoint:
+            raise ValueError("A non-empty message list or checkpoint is required")
         effective_agent = (agent_id or self.config.agent_id or "default_agent").strip()
         effective_project = project_id if project_id is not None else self.config.project_id
 
@@ -151,6 +155,8 @@ class AmrSessionClient:
             agent_id=effective_agent,
             project_id=effective_project,
             messages=norm_messages,
+            checkpoint=checkpoint,
+            idempotency_key=idempotency_key or (batch_id if checkpoint else None),
             created_at=time.time(),
             created_at_ns=time.time_ns(),
         )
@@ -179,12 +185,14 @@ class AmrSessionClient:
         req_timeout = timeout if timeout is not None else self.config.request_timeout
 
         try:
+            extra = {"checkpoint": batch.checkpoint, "idempotency_key": batch.idempotency_key} if batch.checkpoint else {}
             resp = self.transport.send_ingest(
                 session_id=batch.session_id,
                 agent_id=batch.agent_id,
                 project_id=batch.project_id,
                 messages=payload_messages,
                 timeout=req_timeout,
+                **extra,
             )
 
             if not isinstance(resp, dict) or resp.get("status") != "success" or resp.get("session_id") != batch.session_id:
@@ -339,9 +347,9 @@ class AsyncAmrSessionClient:
         self.transport = self._client.transport
         self.config = self._client.config
 
-    async def record_messages(self, session_id, messages, project_id=None, agent_id=None, timeout=None):
+    async def record_messages(self, session_id, messages, project_id=None, agent_id=None, timeout=None, checkpoint=None, idempotency_key=None):
         return await asyncio.to_thread(self._client.record_messages, session_id, messages,
-                                       project_id, agent_id, timeout)
+                                       project_id, agent_id, timeout, checkpoint, idempotency_key)
 
     async def replay_pending(self, session_id=None, max_batches=None, timeout=None):
         return await asyncio.to_thread(self._client.replay_pending, session_id, max_batches, timeout)

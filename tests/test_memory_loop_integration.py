@@ -95,6 +95,42 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_mcp_bridge_replays_after_process_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("AMR_SPOOL_DIR", str(tmp_path / "mcp-spool"))
+    cfg = AppConfig()
+    cfg.storage.sqlite_path = str(tmp_path / "bridge.db")
+    cfg.server.allowed_agents = ["agent-a"]
+    store = SessionStore(cfg)
+    path = str(tmp_path / "offline.sock")
+    first = MCPBridge(socket_path=path, source_agent="agent-a")
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "memory_ingest_session", "arguments": {"session_id": "s", "project_id": "p", "messages": [{"message_id": "m", "role": "user", "content": "saved offline"}]}}}
+    queued = await first.handle_request(request)
+    assert json.loads(queued["result"]["content"][0]["text"])["status"] == "queued"
+    checkpoint = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "session_checkpoint", "arguments": {"session_id": "s", "project_id": "p", "completed": ["done"], "next_steps": ["continue"], "idempotency_key": "checkpoint-key"}}}
+    queued_checkpoint = await first.handle_request(checkpoint)
+    assert json.loads(queued_checkpoint["result"]["content"][0]["text"])["status"] == "queued"
+    status_request = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "memory_spool_status", "arguments": {}}}
+    status = await first.handle_request(status_request)
+    assert json.loads(status["result"]["content"][0]["text"])["pending"] == 2
+    app = AMRApplication.__new__(AMRApplication)
+    app.config = cfg
+    app.session_store = store
+    app.memory_service = MemoryService(engine=object(), qdrant_manager=object(), session_store=store, config=cfg)
+    server = UDSServer(name="test", socket_path=path, handler=app.dispatch_business_rpc)
+    await server.start()
+    try:
+        restarted = MCPBridge(socket_path=path, source_agent="agent-a")
+        await restarted._session_spool()
+        assert store.get_messages("s")[0]["content"] == "saved offline"
+        assert restarted._spool_client.pending_count("s") == 0
+        assert store.get_handoff("p")["handoffs"][0]["next_steps"] == ["continue"]
+    finally:
+        await server.stop()
+        app.memory_service.close()
+        store.close()
+
+
 def test_ingest_checkpoint_idempotent_retry(tmp_path):
     cfg = AppConfig()
     cfg.storage.sqlite_path = str(tmp_path / "idempotency.db")

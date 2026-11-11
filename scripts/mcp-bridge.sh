@@ -7,6 +7,7 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export AMR_SOURCE_AGENT="${AMR_SOURCE_AGENT:-openclaw}"
+export AMR_SPOOL_DIR="${AMR_SPOOL_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/amr/mcp-spool}"
 # AMR_SOCKET_PATH is preserved if set in environment
 
 PYTHON_BIN="${ROOT}/.venv/bin/python"
