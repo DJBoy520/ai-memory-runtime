@@ -342,14 +342,9 @@ class SpoolStorage:
                 if not remaining:
                     # Session is completely drained
                     lock_file = sess_dir / ".session.lock"
-                    try:
-                        lock_file.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    try:
-                        sess_dir.rmdir()
-                    except OSError:
-                        pass
+                    # Keep the lock inode and directory: unlinking a held flock
+                    # allows another process to create and lock a different inode.
+                    pass
             except Exception:
                 pass
 

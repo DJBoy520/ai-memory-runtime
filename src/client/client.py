@@ -160,6 +160,12 @@ class AmrSessionClient:
             # Step 1: PERSISTENCE FIRST (Spool-before-send)
             self.storage.save_batch(batch)
 
+            # Never send a newer batch ahead of an unacknowledged older batch.
+            pending = self.storage.list_batches_for_session(session_id)
+            if pending and pending[0].batch_id != batch.batch_id:
+                return IngestResult(ok=False, session_id=session_id, batch_id=batch.batch_id,
+                                    message_count=len(batch.messages), error="Queued behind earlier unacknowledged batch")
+
             # Step 2: Attempt network delivery
             return self._send_and_commit_batch(batch, timeout=timeout, is_retry=False)
 
@@ -180,6 +186,9 @@ class AmrSessionClient:
                 messages=payload_messages,
                 timeout=req_timeout,
             )
+
+            if not isinstance(resp, dict) or resp.get("status") != "success" or resp.get("session_id") != batch.session_id:
+                raise TransientDeliveryError("Invalid or mismatched session ingest acknowledgement")
 
             # Step 3: On verified success ack -> Delete ONLY this batch file!
             self.storage.delete_batch(batch.session_id, batch.batch_id)
@@ -433,6 +442,9 @@ class AsyncAmrSessionClient:
                 messages=payload_messages,
                 timeout=req_timeout,
             )
+
+            if not isinstance(resp, dict) or resp.get("status") != "success" or resp.get("session_id") != batch.session_id:
+                raise TransientDeliveryError("Invalid or mismatched session ingest acknowledgement")
 
             # On verified ack -> delete ONLY this batch
             await asyncio.to_thread(self.storage.delete_batch, batch.session_id, batch.batch_id)

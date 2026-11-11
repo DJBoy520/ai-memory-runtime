@@ -115,6 +115,25 @@ def test_independent_batches_with_identical_messages_have_distinct_ids(tmp_path)
     client.replay_pending("s")
     assert [call["messages"][0]["message_id"] for call in transport.calls[-2:]] == ids
 
+def test_new_batch_waits_for_older_unconfirmed_batch(tmp_path):
+    transport = MockTransport()
+    transport.fail_with = TransientDeliveryError("offline")
+    client = AmrSessionClient(spool_dir=tmp_path / "fifo", transport=transport)
+    client.record_messages(session_id="s", messages=[{"message_id": "m", "role": "user", "content": "old"}])
+    transport.fail_with = None
+    result = client.record_messages(session_id="s", messages=[{"message_id": "m", "role": "user", "content": "new"}])
+    assert not result.ok
+    assert len(transport.calls) == 1
+    assert len(client.replay_pending("s")) == 2
+    assert [call["messages"][0]["content"] for call in transport.calls[-2:]] == ["old", "new"]
+
+def test_invalid_ack_retains_batch(tmp_path):
+    transport = MockTransport(handler=lambda *_: {"status": "success", "session_id": "wrong"})
+    client = AmrSessionClient(spool_dir=tmp_path / "invalid-ack", transport=transport)
+    result = client.record_messages(session_id="s", messages=[{"message_id": "m", "role": "user", "content": "value"}])
+    assert not result.ok
+    assert client.pending_count("s") == 1
+
 def test_stable_message_id_contract(tmp_path: Path):
     session_id = "sess_stable_contract"
 
