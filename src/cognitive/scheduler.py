@@ -23,6 +23,7 @@ from src.cognitive.evidence_validator import EvidenceValidator
 from src.cognitive.coverage_validator import CoverageValidator
 from src.cognitive.context_builder import ContextBuilder
 from src.cognitive.prompt_manager import PromptManager
+from src.cognitive.model_worker import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class CognitiveScheduler:
         llm_worker: Optional[Callable[[str, str], Any]] = None,
         default_max_retries: int = 3,
         default_retry_delay: float = 0.0,
+        model_name: Optional[str] = None,
     ):
         self.session_store = session_store
         self.context_builder = context_builder or ContextBuilder(session_store=self.session_store)
@@ -51,6 +53,7 @@ class CognitiveScheduler:
         self.llm_worker = llm_worker
         self.default_max_retries = default_max_retries
         self.default_retry_delay = default_retry_delay
+        self.model_name = model_name or getattr(llm_worker, "model_name", "cognitive_worker")
 
     def scan_incremental_sessions(
         self,
@@ -282,15 +285,17 @@ class CognitiveScheduler:
                     break
                 except Exception as ex:
                     last_err = ex
+                    clean_ex = sanitize_text(str(ex))
                     logger.warning(
-                        f"LLM worker attempt {attempt}/{retries_limit} failed for session {session_id}: {ex}"
+                        f"LLM worker attempt {attempt}/{retries_limit} failed for session {session_id}: {clean_ex}"
                     )
                     if attempt < retries_limit:
                         if delay > 0:
                             await asyncio.sleep(delay)
                     else:
+                        clean_last = sanitize_text(str(last_err))
                         logger.error(
-                            f"All {retries_limit} LLM worker attempts failed for session {session_id}: {last_err}"
+                            f"All {retries_limit} LLM worker attempts failed for session {session_id}: {clean_last}"
                         )
                         return {
                             "batch_id": batch_id,
@@ -298,7 +303,7 @@ class CognitiveScheduler:
                             "project_id": project_id,
                             "agent_id": agent_id,
                             "status": "LLM_ERROR",
-                            "error": str(last_err),
+                            "error": clean_last,
                             "attempts": retries_limit,
                             "proposals_count": 0,
                             "written_candidates": 0,
@@ -403,7 +408,7 @@ class CognitiveScheduler:
                         op, rationale or f"Cognitive distillation from session {session_id}",
                         spans, subject, predicate, obj,
                         content, ev_ids, spans, disposition_json,
-                        rationale, rel_json, PromptManager.PROMPT_VERSION, "cognitive_worker",
+                        rationale, rel_json, PromptManager.PROMPT_VERSION, self.model_name,
                         conf, now_ts
                     ),
                 )

@@ -95,12 +95,24 @@ class SearchConfig(BaseModel):
     default_score_threshold: Optional[float] = None
 
 
+class DistillationConfig(BaseModel):
+    """会话认知提纯配置 (RFC-004 & RFC-005)"""
+    enable_external_model: bool = False
+    base_url: str = "http://localhost:8000/v1"
+    model: str = "gpt-4o"
+    api_key: Optional[str] = ""
+    timeout: float = 30.0
+    max_retries: int = 3
+    retry_delay: float = 1.0
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    distillation: DistillationConfig = Field(default_factory=DistillationConfig)
 
     # 兼容 database 属性访问
     @property
