@@ -53,12 +53,14 @@ class SessionHarvester:
         self._load_existing_state()
 
     def _load_existing_state(self):
+        self.existing_session_ids = set()
         c = self.conn.cursor()
-        c.execute("SELECT session_id FROM raw_sessions")
-        self.existing_session_ids = set(r[0] for r in c.fetchall())
-        c.execute("SELECT DISTINCT content_hash FROM raw_messages")
-        self.existing_content_hashes = set(r[0] for r in c.fetchall())
-        logger.info(f"Loaded existing AMR state: {len(self.existing_session_ids)} raw_sessions, {len(self.existing_content_hashes)} raw_messages hashes")
+        try:
+            c.execute("SELECT session_id FROM raw_sessions")
+            self.existing_session_ids = set(r[0] for r in c.fetchall())
+            logger.info(f"Loaded existing AMR state: {len(self.existing_session_ids)} raw_sessions")
+        except sqlite3.OperationalError:
+            pass
 
     def harvest_hermes(self) -> List[Dict[str, Any]]:
         """从 ~/.hermes/state.db 搜集未入库的新会话"""
@@ -77,8 +79,6 @@ class SessionHarvester:
         harvested = []
         for s in sessions:
             sid = s["id"]
-            if sid in self.existing_session_ids:
-                continue
             if not s["message_count"] or s["message_count"] == 0:
                 continue
 
@@ -134,9 +134,7 @@ class SessionHarvester:
                 if not d.startswith("session-"):
                     continue
                 sid = d.replace("session-", "")
-                if sid in self.existing_session_ids:
-                    continue
-                
+
                 sdir = os.path.join(root, d)
                 zst_files = [f for f in os.listdir(sdir) if f.endswith(".zstd")]
                 if not zst_files:
@@ -213,8 +211,6 @@ class SessionHarvester:
         for t in trajs:
             fname = os.path.basename(t)
             sid = fname.split(".")[0]
-            if sid in self.existing_session_ids:
-                continue
 
             lines = []
             try:
@@ -306,26 +302,25 @@ class SessionHarvester:
                 """,
                 (sid, s["agent_id"], s["project_id"], s["started_at"], s["ended_at"], s["status"])
             )
-            inserted_sessions += 1
+            if cur.rowcount > 0:
+                inserted_sessions += 1
+                self.existing_session_ids.add(sid)
 
             # 2. 插入 raw_messages
             for m in s["messages"]:
                 chash = m["content_hash"]
-                # 检查内容哈希去重
-                if chash in self.existing_content_hashes:
-                    skipped_messages += 1
-                    continue
-                
                 cur.execute(
                     """
-                    INSERT OR IGNORE INTO raw_messages 
+                    INSERT OR IGNORE INTO raw_messages
                     (message_id, session_id, role, content, content_hash, sequence, source_type, is_synthetic, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, 'imported', 0, ?)
                     """,
                     (m["message_id"], sid, m["role"], m["content"], chash, m["sequence"], m["created_at"])
                 )
-                self.existing_content_hashes.add(chash)
-                inserted_messages += 1
+                if cur.rowcount > 0:
+                    inserted_messages += 1
+                else:
+                    skipped_messages += 1
 
         self.conn.commit()
         logger.info(f"Committed batch: {inserted_sessions} sessions, {inserted_messages} messages, {skipped_messages} skipped dups")
