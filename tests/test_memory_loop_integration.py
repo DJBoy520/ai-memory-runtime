@@ -13,6 +13,7 @@ from src.interfaces.mcp.bridge import MCPBridge
 from src.main import AMRApplication
 from src.service.memory_service import MemoryService
 from src.core.errors import IdempotencyConflict
+from src.client import UdsTransport, TransientDeliveryError
 
 
 @pytest.mark.asyncio
@@ -77,3 +78,9 @@ def test_ingest_checkpoint_idempotent_retry(tmp_path):
             store.ingest_messages(**dict(args, checkpoint={"completed": ["changed"]}))
     finally:
         store.close()
+
+
+def test_spool_rejects_response_with_wrong_rpc_id():
+    response = json.dumps({"jsonrpc": "2.0", "id": "other", "result": {"status": "success", "session_id": "s"}}).encode()
+    with pytest.raises(TransientDeliveryError, match="response"):
+        UdsTransport()._parse_response(response, "expected")
