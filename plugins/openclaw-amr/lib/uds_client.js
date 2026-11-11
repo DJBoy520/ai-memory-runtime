@@ -8,7 +8,7 @@
  * 3. State Machine: Handles chunks, fragmentation, partial frames, and multiple concatenated frames (sticky packets).
  * 4. Safety: Rejects malformed frames (length 0 or > 4MB: 4 * 1024 * 1024).
  * 5. Hard Deadline: Aborts socket via socket.destroy(new Error("AMR_DEADLINE_EXCEEDED")) to ensure zero ghost callbacks.
- * 6. Fire-and-forget: Supports notify() for session ingestion with 0ms host wait.
+ * 6. Reliability: Supports confirmed request() with deadline for requests (including session ingestion) and notify() for backward-compatible unconfirmed broadcasts.
  * 7. Fail-open: Never crashes the host process.
  */
 
@@ -225,11 +225,14 @@ export class AmrUdsClient {
         for (const payload of payloads) {
           try {
             const resp = JSON.parse(payload.toString("utf8"));
-            if (resp && resp.id === id) {
+            if (resp && (resp.id === id || (resp.id === null && resp.error))) {
               if (resp.error) {
-                const err = new Error(resp.error.message || "AMR RPC Error");
-                err.code = resp.error.code;
-                err.data = resp.error.data;
+                const errMsg = typeof resp.error === "object" ? resp.error.message : resp.error;
+                const err = new Error(errMsg || "AMR RPC Error");
+                if (typeof resp.error === "object") {
+                  err.code = resp.error.code;
+                  err.data = resp.error.data;
+                }
                 finishReject(err);
               } else {
                 finishResolve(resp.result);
@@ -248,6 +251,12 @@ export class AmrUdsClient {
       });
 
       socket.on("end", () => {
+        if (!settled) {
+          finishReject(new Error("AMR_CONNECTION_CLOSED: socket closed prematurely before response"));
+        }
+      });
+
+      socket.on("close", () => {
         if (!settled) {
           finishReject(new Error("AMR_CONNECTION_CLOSED: socket closed prematurely before response"));
         }
