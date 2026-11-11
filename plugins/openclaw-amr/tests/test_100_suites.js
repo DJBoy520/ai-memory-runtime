@@ -797,8 +797,11 @@ test("TC-065: 缺失 sessionId 拦截并报错", () => {
 test("TC-066: ctx.sessionKey 替代映射", async () => {
   let capturedPayload = null;
   const testSock = `/tmp/test-uds-${Date.now()}-${Math.random().toString(16).slice(2)}.sock`;
-  const server = await createMockUdsServer(testSock, (req) => {
+  const server = await createMockUdsServer(testSock, (req, socket) => {
     capturedPayload = req.params;
+    if (req.id !== undefined) {
+      socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { success: true } }));
+    }
   });
 
   try {
@@ -1156,8 +1159,13 @@ test("TC-093: 真实提问全流程：Prefetch 触发与上下文回填", async 
 test("TC-094: 真实提问全流程：Session Ingestion 数据映射与发送", async () => {
   const testSock = `/tmp/test-uds-${Date.now()}-${Math.random().toString(16).slice(2)}.sock`;
   let ingested = null;
-  const server = await createMockUdsServer(testSock, (req) => {
+  let receivedReq = null;
+  const server = await createMockUdsServer(testSock, (req, socket) => {
+    receivedReq = req;
     ingested = req.params;
+    if (req.id !== undefined) {
+      socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { success: true } }));
+    }
   });
 
   try {
@@ -1166,16 +1174,17 @@ test("TC-094: 真实提问全流程：Session Ingestion 数据映射与发送", 
       pluginConfig: { socketPath: testSock },
       on(h, fn) { if (h === "agent_end") hookFn = fn; }
     });
-    await hookFn({
+    const hookResult = await hookFn({
       messages: [
         { role: "user", content: "请问 1+1 等于几？" },
         { role: "assistant", content: "等于 2。" }
       ]
     }, { sessionId: "sess-calc-100" });
-    await new Promise((r) => setTimeout(r, 60));
     assert.ok(ingested);
+    assert.ok(receivedReq && typeof receivedReq.id === "number", "Request must have a numeric request id");
     assert.equal(ingested.session_id, "sess-calc-100");
     assert.equal(ingested.messages.length, 2);
+    assert.equal(hookResult?.ok, true);
   } finally {
     server.close();
     if (fs.existsSync(testSock)) fs.unlinkSync(testSock);

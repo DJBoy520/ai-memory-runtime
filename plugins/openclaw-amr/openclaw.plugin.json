@@ -16,7 +16,8 @@
       "order": 10,
       "properties": [
         "socketPath",
-        "deadlineMs"
+        "deadlineMs",
+        "ingestDeadlineMs"
       ]
     },
     {
@@ -46,6 +47,13 @@
         "minimum": 10,
         "maximum": 5000,
         "description": "Hard deadline in milliseconds for memory prefetch before socket destruction"
+      },
+      "ingestDeadlineMs": {
+        "type": "number",
+        "default": 1500,
+        "minimum": 50,
+        "maximum": 30000,
+        "description": "Hard deadline in milliseconds for session save confirmation request before socket destruction"
       },
       "scoreThreshold": {
         "type": "number",

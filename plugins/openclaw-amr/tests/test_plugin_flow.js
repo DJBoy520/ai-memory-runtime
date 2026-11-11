@@ -47,6 +47,18 @@ test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
           };
           socket.write(encodeFrame(resp));
         }
+
+        if (req.method === "session.ingest") {
+          const resp = {
+            jsonrpc: "2.0",
+            id: req.id,
+            result: {
+              session_id: req.params.session_id,
+              inserted_count: req.params.messages?.length || 0,
+            }
+          };
+          socket.write(encodeFrame(resp));
+        }
       }
     });
   });
@@ -104,10 +116,9 @@ test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
       success: true
     };
 
-    await registeredHooks["agent_end"](endEvent, agentCtx);
-
-    // Wait short time for async notify
-    await new Promise((r) => setTimeout(r, 100));
+    const ingestOutcome = await registeredHooks["agent_end"](endEvent, agentCtx);
+    assert.ok(ingestOutcome?.ok, "agent_end should confirm successful save");
+    assert.equal(ingestOutcome?.messageCount, 2);
 
     // Verify received calls on mock UDS
     const searchCall = receivedRequests.find((r) => r.method === "memory.search");
@@ -117,7 +128,8 @@ test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
     assert.equal(searchCall.params.query, "What are the rules for plugin development?");
     assert.equal(searchCall.params.project_id, "project-amr");
 
-    assert.ok(ingestCall, "session.ingest should be called via notify");
+    assert.ok(ingestCall, "session.ingest should be called via confirmed request");
+    assert.ok(typeof ingestCall.id === "number", "session.ingest should contain numeric request id");
     assert.equal(ingestCall.params.session_id, "test-sess-001");
     assert.equal(ingestCall.params.agent_id, "openclaw");
     assert.equal(ingestCall.params.messages.length, 2);

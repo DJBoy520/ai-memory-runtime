@@ -5,9 +5,10 @@
  * Capabilities:
  * 1. Zero-Friction Prefetch: Intercepts before_prompt_build, queries AMR UDS with hard deadline,
  *    and injects sanitized XML memory block into system context.
- * 2. Zero-Friction Ingest: Hooks agent_end / session_end to fire-and-forget session conversation
- *    into AMR's SQLite sessions.db via UDS session.ingest.
+ * 2. Reliable Session Ingest: Hooks agent_end to persist session conversations into AMR's SQLite
+ *    sessions.db via confirmed UDS session.ingest request with configurable deadline timeout.
  * 3. Fail-Open Architecture: Catches all errors at boundary, zero crashes, zero VRAM overhead.
+ *    Clear error recording without unhandled host disruptions. No persistent offline retries promised.
  */
 
 import { AmrUdsClient } from "./lib/uds_client.js";
@@ -53,6 +54,11 @@ export const plugin = {
     const cfg = api.pluginConfig || {};
     const socketPath = cfg.socketPath;
     const deadlineMs = typeof cfg.deadlineMs === "number" ? cfg.deadlineMs : 80;
+    const ingestDeadlineMs = typeof cfg.ingestDeadlineMs === "number"
+      ? cfg.ingestDeadlineMs
+      : (typeof cfg.ingestTimeoutMs === "number"
+          ? cfg.ingestTimeoutMs
+          : 1500);
     const scoreThreshold = typeof cfg.scoreThreshold === "number" ? cfg.scoreThreshold : 0.65;
     const limit = typeof cfg.limit === "number" ? cfg.limit : 3;
     const maxItemChars = typeof cfg.maxItemChars === "number" ? cfg.maxItemChars : 1000;
@@ -64,7 +70,7 @@ export const plugin = {
       defaultDeadlineMs: deadlineMs,
     });
 
-    logger.info(`Initialized openclaw-amr plugin. Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms`);
+    logger.info(`Initialized openclaw-amr plugin. Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms, IngestDeadline: ${ingestDeadlineMs}ms`);
 
     // =========================================================================
     // Hook 1: Input Prefetch & Injection (before_prompt_build)
@@ -131,8 +137,10 @@ export const plugin = {
       // Hook 2: Session Ingestion (agent_end)
       // =========================================================================
       register("agent_end", async (event, ctx) => {
+        const startTime = Date.now();
+        let sessionId = null;
         try {
-          const sessionId = ctx?.sessionId || ctx?.sessionKey || event?.runId;
+          sessionId = ctx?.sessionId || ctx?.sessionKey || event?.runId;
           if (!sessionId) {
             logger.debug("agent_end: skipped ingest, no sessionId found in context");
             return;
@@ -155,10 +163,26 @@ export const plugin = {
             return;
           }
 
-          logger.debug(`Triggering async session.ingest for session ${sessionId} (${ingestPayload.messages.length} messages)`);
-          udsClient.notify("session.ingest", ingestPayload);
+          logger.debug(`Triggering confirmed session.ingest for session ${sessionId} (${ingestPayload.messages.length} messages, timeout: ${ingestDeadlineMs}ms)`);
+          const ingestResult = await udsClient.request("session.ingest", ingestPayload, ingestDeadlineMs);
+          const elapsedMs = Date.now() - startTime;
+          logger.info(`Session ${sessionId} successfully saved to AMR (${ingestPayload.messages.length} messages, ${elapsedMs}ms)`);
+          return {
+            ok: true,
+            sessionId,
+            messageCount: ingestPayload.messages.length,
+            result: ingestResult,
+          };
         } catch (err) {
-          logger.throttledError("agent_end_err", `Error in agent_end ingest hook: ${err.message}`);
+          const elapsedMs = Date.now() - startTime;
+          const errDetail = err?.code ? `[code: ${err.code}] ${err.message}` : err?.message || String(err);
+          const logMsg = `Failed to save session ${sessionId || "unknown"} to AMR (${elapsedMs}ms): ${errDetail}`;
+          logger.error(logMsg);
+          return {
+            ok: false,
+            sessionId,
+            error: errDetail,
+          };
         }
       });
     } else {
