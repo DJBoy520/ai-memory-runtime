@@ -1177,6 +1177,11 @@ class SessionStore:
         if not checkpoint_id:
             checkpoint_id = f"chk_{now}_{uuid.uuid4().hex[:8]}"
 
+        cursor.execute("SELECT session_id, agent_id, project_id FROM session_checkpoints WHERE checkpoint_id = ?", (checkpoint_id,))
+        previous = cursor.fetchone()
+        if previous and (previous["session_id"], previous["agent_id"], previous["project_id"]) != (session_id, agent_id, project_id):
+            raise ValueError("Checkpoint ID belongs to a different session, agent, or project")
+
         completed_json = json.dumps(norm_completed, ensure_ascii=False)
         in_progress_json = json.dumps(norm_in_progress, ensure_ascii=False)
         next_steps_json = json.dumps(norm_next_steps, ensure_ascii=False)
@@ -1337,6 +1342,8 @@ class SessionStore:
                 "in_progress": norm_in_progress,
                 "next_steps": norm_next_steps,
                 "context": norm_ctx,
+                "checkpoint_id": checkpoint_id,
+                "messages": messages,
             }
             digest = compute_request_digest("session_checkpoint", payload)
 

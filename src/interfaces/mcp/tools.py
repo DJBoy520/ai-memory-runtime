@@ -429,5 +429,18 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
                 raise ValueError("Each message requires a valid role.")
             if not isinstance(message.get("content"), str):
                 raise ValueError("Each message requires string content.")
+    elif name in ("session_checkpoint", "memory_session_checkpoint", "session_get_handoff", "memory_get_handoff"):
+        for field in (("session_id", "project_id") if name in ("session_checkpoint", "memory_session_checkpoint") else ("project_id",)):
+            if not isinstance(args.get(field), str) or not args[field].strip():
+                raise ValueError(f"Parameter '{field}' is required.")
+        if name in ("session_checkpoint", "memory_session_checkpoint"):
+            for field in ("completed", "next_steps", "in_progress"):
+                if field in ("completed", "next_steps") or field in args:
+                    if not isinstance(args.get(field), list) or any(not isinstance(item, str) for item in args[field]):
+                        raise ValueError(f"Parameter '{field}' must be a list of strings.")
+            if "messages" in args:
+                validate_tool_args("memory_ingest_session", {"session_id": args["session_id"], "messages": args["messages"]})
+        if "limit" in args and (isinstance(args["limit"], bool) or not isinstance(args["limit"], int) or not 1 <= args["limit"] <= 100):
+            raise ValueError("Parameter 'limit' must be an integer from 1 to 100.")
     else:
         raise ValueError(f"Unknown tool name: {name}")
