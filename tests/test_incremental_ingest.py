@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS raw_messages (
 """
 
 
+def test_legacy_id_collision_and_atomic_conflict(temp_db):
+    harvester = SessionHarvester(db_path=temp_db)
+    def session(sid, content):
+        return {"session_id": sid, "agent_id": "hermes", "project_id": "general",
+                "started_at": 1, "ended_at": None, "status": "active", "messages": [{
+                    "message_id": "msg_hermes_abcdefgh_1", "role": "user", "content": content,
+                    "content_hash": compute_content_hash("user", content), "sequence": 1, "created_at": 1}]}
+    a, b = session("abcdefgh-one", "first"), session("abcdefgh-two", "second")
+    assert harvester.commit_sessions([a, b])["messages"] == 2
+    assert harvester.commit_sessions([a, b])["skipped_msgs"] == 2
+    with pytest.raises(ValueError, match="message ID conflict"):
+        harvester.commit_sessions([session("new-session", "new"), session("abcdefgh-one", "changed")])
+    assert harvester.conn.execute("SELECT count(*) FROM raw_sessions WHERE session_id='new-session'").fetchone()[0] == 0
+    assert harvester.conn.execute("SELECT count(*) FROM raw_messages").fetchone()[0] == 2
+
+
 @pytest.fixture
 def temp_db(tmp_path: Path) -> Path:
     db_file = tmp_path / "test_sessions.db"
