@@ -11,6 +11,7 @@ AI Memory Runtime - Cognitive Scheduler (认知提纯流水线驱动主控)
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -23,9 +24,17 @@ from src.cognitive.evidence_validator import EvidenceValidator
 from src.cognitive.coverage_validator import CoverageValidator
 from src.cognitive.context_builder import ContextBuilder
 from src.cognitive.prompt_manager import PromptManager
-from src.cognitive.model_worker import sanitize_text
+from src.cognitive.model_worker import ModelAPIError, ModelTimeoutError
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_worker_error(exc):
+    if isinstance(exc, ModelTimeoutError):
+        return "Model timed out"
+    if isinstance(exc, ModelAPIError):
+        return f"Model API error HTTP {exc.status_code}"
+    return type(exc).__name__
 
 
 class CognitiveScheduler:
@@ -285,7 +294,7 @@ class CognitiveScheduler:
                     break
                 except Exception as ex:
                     last_err = ex
-                    clean_ex = sanitize_text(str(ex))
+                    clean_ex = _safe_worker_error(ex)
                     logger.warning(
                         f"LLM worker attempt {attempt}/{retries_limit} failed for session {session_id}: {clean_ex}"
                     )
@@ -293,7 +302,7 @@ class CognitiveScheduler:
                         if delay > 0:
                             await asyncio.sleep(delay)
                     else:
-                        clean_last = sanitize_text(str(last_err))
+                        clean_last = _safe_worker_error(last_err)
                         logger.error(
                             f"All {retries_limit} LLM worker attempts failed for session {session_id}: {clean_last}"
                         )
@@ -354,10 +363,11 @@ class CognitiveScheduler:
             else:
                 cand["rejection_reason"] = ev_reason
                 invalid_candidates.append(cand)
-                logger.info(f"Proposal rejected by EvidenceValidator for session {session_id}: {ev_reason}")
+                logger.info("Proposal rejected by EvidenceValidator for session %s", session_id)
 
         # 5. 写入 curation_candidates 隔离表（14 天 Dry-Run 铁律，绝不写 memories SSOT）
         written_count = 0
+        valid_candidate_ids = []
         session_window_json = json.dumps({
             "session_ids": [session_id],
             "start_msg_id": raw_msg_ids[0] if raw_msg_ids else None,
@@ -370,7 +380,6 @@ class CognitiveScheduler:
             db_cursor = db_conn.cursor()
 
             for cand in valid_candidates:
-                cand_id = cand.get("proposal_id") or f"prop_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
                 op = cand.get("operation", "EXTRACT")
                 subject = cand.get("subject", "")
                 predicate = cand.get("predicate", "")
@@ -383,10 +392,25 @@ class CognitiveScheduler:
                 conf = cand.get("self_assessed_confidence", 0.85)
                 target_mem_id = cand.get("target_memory_id")
 
-                db_cursor.execute("SELECT session_window_json, operation, subject, predicate, object, content, evidence_source_ids, extracted_spans, rationale, proposed_relation_json, llm_confidence, memory_id FROM curation_candidates WHERE candidate_id = ?", (cand_id,))
+                # Model-provided IDs are not globally unique and can be reused
+                # across runs or sessions. Derive identity from the source and
+                # substantive proposal instead, so reprocessing is idempotent.
+                identity = {"session_id": session_id, "operation": op, "subject": subject,
+                            "predicate": predicate, "object": obj, "content": content,
+                            "evidence_source_ids": cand.get("evidence_source_ids", []),
+                            "extracted_spans": cand.get("extracted_spans", []),
+                            "target_memory_id": target_mem_id}
+                cand_id = "cand_" + hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
+                valid_candidate_ids.append(cand_id)
+
+                db_cursor.execute("SELECT session_window_json, operation, subject, predicate, object, content, evidence_source_ids, extracted_spans FROM curation_candidates WHERE candidate_id = ?", (cand_id,))
                 prior = db_cursor.fetchone()
                 if prior:
-                    if tuple(prior) != (session_window_json, op, subject, predicate, obj, content, ev_ids, spans, rationale, rel_json, conf, target_mem_id):
+                    try:
+                        prior_sessions = json.loads(prior["session_window_json"])["session_ids"]
+                    except (TypeError, ValueError, KeyError):
+                        prior_sessions = None
+                    if (prior_sessions, prior["operation"], prior["subject"], prior["predicate"], prior["object"], prior["content"], prior["evidence_source_ids"], prior["extracted_spans"]) != ([session_id], op, subject, predicate, obj, content, ev_ids, spans):
                         db_conn.rollback()
                         raise ValueError(f"Candidate ID conflict: {cand_id}")
                     continue
@@ -427,7 +451,7 @@ class CognitiveScheduler:
             "invalid_candidates": len(invalid_candidates),
             "written_candidates": written_count,
             "reconciled_dispositions_count": len(reconciled_disps),
-            "valid_candidate_ids": [c.get("proposal_id") for c in valid_candidates if c.get("proposal_id")],
+            "valid_candidate_ids": valid_candidate_ids,
             "invalid_details": [
                 {"proposal_id": c.get("proposal_id"), "reason": c.get("rejection_reason")}
                 for c in invalid_candidates

@@ -185,7 +185,7 @@ async def test_mcp_session_ingest_to_scheduler_distillation_e2e(temp_store):
     rows = cur.fetchall()
     assert len(rows) == 1
     cand = dict(rows[0])
-    assert cand["candidate_id"] == "prop_valid_pg"
+    assert cand["candidate_id"] == pipeline_res["valid_candidate_ids"][0]
     assert cand["state"] == "PROPOSED"
     assert "10.0.10.5" in cand["content"]
 
@@ -278,7 +278,7 @@ async def test_scheduler_mock_model_transient_failure_and_retry(temp_store):
     )
     assert always_fail_count == 2
     assert fail_res["status"] == "LLM_ERROR"
-    assert "Persistent Upstream Outage" in fail_res["error"]
+    assert fail_res["error"] == "RuntimeError"  # arbitrary worker text may contain private content
     assert fail_res["written_candidates"] == 0
 
 
@@ -384,7 +384,7 @@ async def test_evidence_validator_strictly_rejects_hallucinations_and_tampered_s
     cur = conn.cursor()
     cur.execute("SELECT candidate_id FROM curation_candidates WHERE batch_id = 'batch_tamper_audit'")
     written_ids = [row["candidate_id"] for row in cur.fetchall()]
-    assert written_ids == ["prop_legit"]
+    assert written_ids == res["valid_candidate_ids"]
 
 
 @pytest.mark.asyncio

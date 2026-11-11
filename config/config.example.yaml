@@ -53,3 +53,13 @@ search:
   project_fallback_ids:
     - "global"
     - "general"
+
+# External model use is disabled unless explicitly configured. The runner
+# creates proposals only; reviewing a proposal is a separate operation.
+distillation:
+  enable_external_model: false
+  base_url: "http://localhost:8000/v1"
+  model: "your-model"
+  timeout: 120.0
+  max_retries: 3
+  retry_delay: 1.0

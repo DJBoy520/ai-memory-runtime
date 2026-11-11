@@ -1,0 +1,17 @@
+[Unit]
+Description=AMR session memory distillation
+After=network.target amr.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+Environment="PYTHONPATH=%h/WorkSpaces/ai-memory-runtime"
+EnvironmentFile=-%h/.config/amr/distillation.env
+# Retry older failures even when outside the normal lookback window. The second
+# invocation still runs if a failure remains, so new sessions are not starved.
+ExecStart=-%h/WorkSpaces/ai-memory-runtime/.venv/bin/python scripts/amr_distill_runner.py --retry-failed --limit 5 --format json
+ExecStart=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python scripts/amr_distill_runner.py --limit 5 --format json
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/WorkSpaces/ai-memory-runtime/data
+

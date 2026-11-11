@@ -281,12 +281,9 @@ async def main_async() -> int:
 
     # 3. 构造工作器
     if is_external_enabled:
-        masked_k = mask_secret(resolved_cfg.get("api_key", ""))
         logger.info(
-            "External model explicitly enabled: base_url=%s, model=%s, api_key=%s, timeout=%.1fs",
-            resolved_cfg["base_url"],
+            "External model explicitly enabled: model=%s, timeout=%.1fs",
             resolved_cfg["model"],
-            masked_k or "(none)",
             resolved_cfg["timeout"],
         )
         worker = OpenAICompatibleWorker(
@@ -375,8 +372,7 @@ def main() -> None:
         print("\n[!] 用户中断提纯流程。")
         sys.exit(130)
     except Exception as ex:
-        clean_msg = sanitize_text(str(ex))
-        logger.error("Distillation runner failed fatally: %s", clean_msg)
+        logger.error("Distillation runner failed fatally: %s", type(ex).__name__)
         sys.exit(2)
 
 

@@ -333,7 +333,7 @@ async def test_cognitive_scheduler_pipeline_dry_run_isolation(temp_db):
     candidates_rows = cursor.fetchall()
     assert len(candidates_rows) == 1
     cand_row = dict(candidates_rows[0])
-    assert cand_row["candidate_id"] == "prop_valid_01"
+    assert cand_row["candidate_id"] == res["valid_candidate_ids"][0]
     assert cand_row["state"] == "PROPOSED"
     assert cand_row["operation"] == "EXTRACT"
     assert "/run/user/1000/qdrant-bge.sock" in cand_row["content"]

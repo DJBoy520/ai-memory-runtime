@@ -15,6 +15,9 @@ from src.interfaces.ipc.server import UDSServer
 from src.interfaces.mcp.bridge import MCPBridge
 from src.main import AMRApplication
 from src.service.memory_service import MemoryService
+from src.service.outbox_worker import OutboxWorker
+from src.core.qdrant import QdrantManager
+from qdrant_client import QdrantClient
 from src.core.errors import IdempotencyConflict
 from src.service.candidate_review import approve_candidate
 from src.client import UdsTransport, TransientDeliveryError
@@ -49,10 +52,16 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
     assert client.pending_count("sess-a") == 1
 
     cfg.server.allowed_agents = ["agent-a", "agent-b"]
+    class FakeEngine:
+        async def embed(self, texts):
+            return [[0.1] * 1024 for _ in texts]
+    QdrantManager.reset_instance()
+    index = QdrantManager(config=cfg.qdrant, client=QdrantClient(":memory:"))
+    engine = FakeEngine()
     app = AMRApplication.__new__(AMRApplication)
     app.config = cfg
     app.session_store = store
-    app.memory_service = MemoryService(engine=object(), qdrant_manager=object(), session_store=store, config=cfg)
+    app.memory_service = MemoryService(engine=engine, qdrant_manager=index, session_store=store, config=cfg)
     server = UDSServer(name="test", socket_path=socket, handler=app.dispatch_business_rpc)
     await server.start()
     try:
@@ -65,7 +74,8 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         distill = await CognitiveScheduler(session_store=store).run_pipeline_for_session("sess-a", batch_id="batch-a", mock_llm_result=llm)
         assert distill["project_id"] == "project-a"
         assert distill["written_candidates"] == 1
-        row = store.get_connection().execute("SELECT state FROM curation_candidates WHERE candidate_id = 'candidate-a'").fetchone()
+        candidate_id = distill["valid_candidate_ids"][0]
+        row = store.get_connection().execute("SELECT state FROM curation_candidates WHERE candidate_id = ?", (candidate_id,)).fetchone()
         assert row["state"] == "PROPOSED"
 
         a = MCPBridge(socket_path=socket, source_agent="agent-a")
@@ -73,16 +83,22 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         async def call(bridge, name, arguments):
             return await bridge.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
         listed = await call(b, "memory_candidates", {"project_id": "project-a"})
-        assert json.loads(listed["result"]["content"][0]["text"])["candidates"][0]["candidate_id"] == "candidate-a"
-        wrong = await call(b, "memory_approve_candidate", {"project_id": "project-b", "candidate_id": "candidate-a"})
+        assert json.loads(listed["result"]["content"][0]["text"])["candidates"][0]["candidate_id"] == candidate_id
+        wrong = await call(b, "memory_approve_candidate", {"project_id": "project-b", "candidate_id": candidate_id})
         assert wrong["result"].get("isError")
-        approved = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "candidate-a"})
+        approved = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id})
         assert not approved["result"].get("isError")
         approved_data = json.loads(approved["result"]["content"][0]["text"])
         memory_id = approved_data["memory_id"]
-        again = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "candidate-a"})
+        again = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id})
         assert json.loads(again["result"]["content"][0]["text"])["memory_id"] == memory_id
         assert store.get_connection().execute("SELECT count(*) FROM memory_projection_outbox WHERE memory_id = ?", (memory_id,)).fetchone()[0] == 1
+        worker = OutboxWorker(session_store=store, qdrant_manager=index, engine=engine, batch_size=10)
+        assert await worker.run_once() == 1
+        recalled = await call(b, "memory_search", {"query": "primary database", "project_id": "project-a"})
+        assert any(item["memory_id"] == memory_id for item in json.loads(recalled["result"]["content"][0]["text"])["results"])
+        isolated_search = await call(b, "memory_search", {"query": "primary database", "project_id": "project-b"})
+        assert all(item["memory_id"] != memory_id for item in json.loads(isolated_search["result"]["content"][0]["text"])["results"])
         saved = await call(a, "session_checkpoint", {"session_id": "sess-a", "project_id": "project-a", "completed": ["database selected"], "next_steps": ["apply migration"], "idempotency_key": "cp-a"})
         assert not saved["result"].get("isError")
         result = await call(b, "session_get_handoff", {"project_id": "project-a"})
@@ -93,6 +109,7 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         await server.stop()
         app.memory_service.close()
         store.close()
+        QdrantManager.reset_instance()
 
 
 @pytest.mark.asyncio

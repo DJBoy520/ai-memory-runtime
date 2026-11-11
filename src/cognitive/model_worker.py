@@ -76,6 +76,7 @@ class ModelAPIError(WorkerError):
 
     def __init__(self, status_code: int, message: str, body: Optional[str] = None):
         self.status_code = status_code
+        self.response_format_unsupported = bool(body and "response_format" in body.lower())
         self.raw_message = message
         clean_msg = sanitize_text(message)
         super().__init__(f"ModelAPIError (HTTP {status_code}): {clean_msg}")
@@ -174,29 +175,16 @@ class OpenAICompatibleWorker(BaseModelWorker):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 status_code = resp.status
-                body = resp.read().decode("utf-8")
+                body_bytes = resp.read(4 * 1024 * 1024 + 1)
+                if len(body_bytes) > 4 * 1024 * 1024:
+                    raise ModelResponseParseError("Model response exceeds size limit")
+                body = body_bytes.decode("utf-8")
                 return status_code, body
         except urllib.error.HTTPError as ex:
-            err_body = ""
-            try:
-                err_body = ex.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
             status = ex.code
-            clean_reason = sanitize_text(str(ex.reason))
-            # 尝试提取上游 JSON 错误详情，避免泄露内部明细
-            if err_body:
-                try:
-                    err_json = json.loads(err_body)
-                    if isinstance(err_json, dict) and "error" in err_json:
-                        err_obj = err_json["error"]
-                        if isinstance(err_obj, dict) and "message" in err_obj:
-                            clean_reason = sanitize_text(str(err_obj["message"]))
-                        elif isinstance(err_obj, str):
-                            clean_reason = sanitize_text(err_obj)
-                except Exception:
-                    pass
-            raise ModelAPIError(status_code=status, message=f"HTTP {status}: {clean_reason}") from ex
+            # Upstream errors can echo the prompt, including arbitrary private text.
+            body = ex.read(16384).decode("utf-8", errors="replace")
+            raise ModelAPIError(status_code=status, message=f"HTTP {status}", body=body) from ex
         except (socket.timeout, TimeoutError) as ex:
             raise ModelTimeoutError(f"HTTP request timed out after {timeout:.1f}s") from ex
         except urllib.error.URLError as ex:
@@ -252,7 +240,7 @@ class OpenAICompatibleWorker(BaseModelWorker):
             )
         except ModelAPIError as api_err:
             # 兼容某些不支持 response_format="json_object" 的第三方后端，自动降级重试一次
-            if api_err.status_code == 400 and "response_format" in str(api_err).lower():
+            if api_err.status_code == 400 and api_err.response_format_unsupported:
                 logger.info("Endpoint does not support response_format, retrying without it...")
                 payload.pop("response_format", None)
                 payload_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")

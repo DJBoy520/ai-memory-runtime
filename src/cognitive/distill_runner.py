@@ -9,6 +9,7 @@ AI Memory Runtime - Cognitive Distillation Runner & Batch Orchestrator
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -164,16 +165,20 @@ class DistillationRunner:
         self.default_retry_delay = default_retry_delay
 
         # 确定装配的工作器
-        if model_worker is not None:
-            self.model_worker = model_worker
-        elif self.dry_run or not self.allow_external:
+        if self.dry_run or not self.allow_external:
             # 安全默认：装载 DryRunWorker，绝对不调用外部网络
             self.model_worker = DryRunWorker()
+        elif model_worker is not None:
+            self.model_worker = model_worker
         else:
             raise ValueError(
                 "External model is allowed but no model_worker was provided. "
                 "Explicitly construct OpenAICompatibleWorker or supply model configuration."
             )
+        if isinstance(self.model_worker, DryRunWorker):
+            self.dry_run = True
+        if self.dry_run and scheduler is not None and not isinstance(scheduler.llm_worker, DryRunWorker):
+            raise ValueError("Dry-run cannot use a scheduler with an external model worker")
 
         # 调度器装配
         self.scheduler = scheduler or CognitiveScheduler(
@@ -218,10 +223,26 @@ class DistillationRunner:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_distill_status ON curation_distillation_state(status, next_retry_at);"
             )
+            columns = {row[1] for row in cur.execute("PRAGMA table_info(curation_distillation_state)")}
+            if "source_digest" not in columns:
+                cur.execute("ALTER TABLE curation_distillation_state ADD COLUMN source_digest TEXT")
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_distill_batch ON curation_distillation_state(batch_id);"
             )
             conn.commit()
+
+    def _source_digest(self, session_id: str) -> str:
+        with self.session_store._lock:
+            cur = self.session_store.get_connection().cursor()
+            payload = []
+            for table in ("sessions", "raw_sessions"):
+                cur.execute(f"SELECT agent_id, project_id FROM {table} WHERE session_id = ?", (session_id,))
+                row = cur.fetchone()
+                payload.append([table, list(row) if row else None])
+            for table in ("messages", "raw_messages"):
+                cur.execute(f"SELECT message_id, role, content, sequence FROM {table} WHERE session_id = ? ORDER BY message_id", (session_id,))
+                payload.append([table, [list(row) for row in cur.fetchall()]])
+            return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
     def scan_sessions(
         self,
@@ -280,20 +301,19 @@ class DistillationRunner:
             return [dict(r) for r in failed_rows]
 
         # 场景 C: 正常增量扫描
-        scanned = self.scheduler.scan_incremental_sessions(lookback_seconds=lookback_seconds, limit=limit)
+        # Apply the requested limit after filtering already-processed sessions;
+        # otherwise old successes can permanently hide newer work.
+        scanned = self.scheduler.scan_incremental_sessions(lookback_seconds=lookback_seconds, limit=2147483647)
         if not scanned or force:
-            return scanned
+            return scanned[:limit]
 
         # 过滤掉已经成功处理过的 session_id
-        session_ids = [s["session_id"] for s in scanned]
-        placeholders = ",".join("?" for _ in session_ids)
         cur.execute(
-            f"SELECT session_id FROM curation_distillation_state WHERE status = 'SUCCESS' AND session_id IN ({placeholders})",
-            tuple(session_ids),
+            "SELECT session_id, source_digest FROM curation_distillation_state WHERE status = 'SUCCESS'"
         )
-        succeeded_ids = {r[0] for r in cur.fetchall()}
+        succeeded = {r[0]: r[1] for r in cur.fetchall()}
 
-        return [s for s in scanned if s["session_id"] not in succeeded_ids]
+        return [s for s in scanned if succeeded.get(s["session_id"]) != self._source_digest(s["session_id"])][:limit]
 
     async def run_pipeline_for_session(
         self,
@@ -309,6 +329,15 @@ class DistillationRunner:
         batch_id = batch_id or f"distill_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         retries_limit = max_retries if max_retries is not None else self.default_max_retries
         delay = retry_delay if retry_delay is not None else self.default_retry_delay
+        source_digest = self._source_digest(session_id)
+
+        # A dry-run must not mark real work as processed: doing so would hide
+        # the same session from a subsequent run using a configured model.
+        if self.dry_run:
+            return await self.scheduler.run_pipeline_for_session(
+                session_id=session_id, batch_id=batch_id,
+                max_retries=retries_limit, retry_delay=delay,
+            )
 
         # 登记或更新状态为 RUNNING
         with self.session_store._lock:
@@ -368,10 +397,11 @@ class DistillationRunner:
                         candidates_count = ?,
                         last_error = NULL,
                         last_error_type = NULL,
+                        source_digest = ?,
                         updated_at = ?
                     WHERE session_id = ?
                     """,
-                    (written, now_after, session_id),
+                    (written, source_digest, now_after, session_id),
                 )
                 logger.info(
                     "Session %s distillation succeeded: %d candidates proposed",

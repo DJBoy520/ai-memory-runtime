@@ -106,6 +106,13 @@ class FakeOpenAIHandler(BaseHTTPRequestHandler):
             self.wfile.write(b'{"error": {"message": "Upstream internal error 500", "code": 500}}')
             return
 
+        if mode == "echo_private_error":
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"message": "private-conversation-sentinel"}}).encode())
+            return
+
         # 4. 模拟 429 速率限制
         if mode == "rate_limit":
             self.send_response(429)
@@ -272,6 +279,60 @@ def test_openai_worker_direct_gate_rejection():
     assert "disabled by default" in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_dry_run_does_not_mark_session_processed(temp_db, fake_http_model):
+    seed_test_session_data(temp_db, "dry-then-real")
+    worker = OpenAICompatibleWorker(base_url=fake_http_model.base_url, model="test", allow_external=True)
+    dry = DistillationRunner(session_store=temp_db, model_worker=worker, allow_external=True, dry_run=True)
+    await dry.run_batch(lookback_seconds=3600)
+    assert fake_http_model.request_count == 0
+    real = DistillationRunner(session_store=temp_db, model_worker=worker, allow_external=True)
+    assert any(s["session_id"] == "dry-then-real" for s in real.scan_sessions(lookback_seconds=3600))
+
+
+@pytest.mark.asyncio
+async def test_successful_session_is_rescanned_after_append(temp_db, fake_http_model):
+    sid = "growing-session"
+    seed_test_session_data(temp_db, sid)
+    worker = OpenAICompatibleWorker(base_url=fake_http_model.base_url, model="test", allow_external=True)
+    runner = DistillationRunner(session_store=temp_db, model_worker=worker, allow_external=True)
+    result = await runner.run_batch(lookback_seconds=3600)
+    assert result["sessions_succeeded"] == 1
+    assert not any(s["session_id"] == sid for s in runner.scan_sessions(lookback_seconds=3600))
+    temp_db.ingest_messages(sid, "test_agent", "test_project", [{"message_id": "new-message", "role": "user", "content": "A later message", "timestamp": int(time.time())}])
+    assert any(s["session_id"] == sid for s in runner.scan_sessions(lookback_seconds=3600))
+    rerun = await runner.run_batch(lookback_seconds=3600)
+    assert rerun["sessions_succeeded"] == 1
+    assert temp_db.get_connection().execute("SELECT count(*) FROM curation_candidates").fetchone()[0] == 1
+
+
+def test_processed_sessions_do_not_starve_unprocessed_with_small_limit(temp_db):
+    for sid in ("one", "two", "three"):
+        seed_test_session_data(temp_db, sid)
+    runner = DistillationRunner(session_store=temp_db, allow_external=False)
+    ordered = runner.scheduler.scan_incremental_sessions(lookback_seconds=3600, limit=100)
+    conn = temp_db.get_connection()
+    for session in ordered[:2]:
+        sid = session["session_id"]
+        conn.execute("INSERT INTO curation_distillation_state (session_id, batch_id, status, created_at, updated_at, source_digest) VALUES (?, 'b', 'SUCCESS', 1, 1, ?)", (sid, runner._source_digest(sid)))
+    conn.commit()
+    scanned = runner.scan_sessions(lookback_seconds=3600, limit=1)
+    assert [s["session_id"] for s in scanned] == [ordered[2]["session_id"]]
+
+
+@pytest.mark.asyncio
+async def test_model_error_cannot_echo_private_content_into_logs(temp_db, fake_http_model, caplog):
+    seed_test_session_data(temp_db, "private-test")
+    fake_http_model.mode = "echo_private_error"
+    worker = OpenAICompatibleWorker(base_url=fake_http_model.base_url, model="test", allow_external=True)
+    runner = DistillationRunner(session_store=temp_db, model_worker=worker, allow_external=True, default_max_retries=1)
+    with caplog.at_level(logging.DEBUG):
+        summary = await runner.run_batch(lookback_seconds=3600)
+    assert summary["sessions_failed"] == 1
+    assert "private-conversation-sentinel" not in " ".join(r.getMessage() for r in caplog.records)
+    assert "private-conversation-sentinel" not in json.dumps(summary)
+
+
 # =========================================================================
 # 2. 端到端扫描、假 HTTP 模型提炼与 14 天 Dry-Run 验证
 # =========================================================================
@@ -325,7 +386,7 @@ async def test_fake_http_model_scanning_and_distillation(temp_db, fake_http_mode
     # curation_candidates 隔离表中存在 PROPOSED 记录
     conn = temp_db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM curation_candidates WHERE candidate_id = 'prop_fake_01'")
+    cur.execute("SELECT * FROM curation_candidates WHERE state = 'PROPOSED'")
     cand = cur.fetchone()
     assert cand is not None
     assert cand["state"] == "PROPOSED"

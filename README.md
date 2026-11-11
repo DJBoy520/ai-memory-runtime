@@ -151,7 +151,7 @@ AMR 提供开箱即用的跨环境桥接脚本 `scripts/mcp-bridge.sh`（自动�
 ```
 *安全注意：客户端标识由环境变量 `AMR_SOURCE_AGENT` 决定，且必须在 `config.yaml` 的 `allowed_agents` 白名单中；不可在请求载荷中伪造未授权身份。*
 
-#### 提供的 9 个 MCP 工具：
+#### 主要 MCP 工具：
 1. `memory_search`：语义检索（弱一致，默认仅召回 `ACTIVE` 现役记忆，支持命名空间与历史查询）；
 2. `memory_create`：创建记忆（强一致落盘返回 `pending`，支持 `idempotency_key` 与溯源审计）；
 3. `memory_get`：按 ID 获取详情（强一致，直查 SQLite SSOT）；
@@ -162,7 +162,13 @@ AMR 提供开箱即用的跨环境桥接脚本 `scripts/mcp-bridge.sh`（自动�
 8. `memory_record`：旧版兼容写入接口；
 9. `memory_update_status`：旧版兼容状态变更接口。
 
-`memory_ingest_session` 需要客户端主动调用；仅配置 MCP 不会自动触发会话开始或结束事件。每条消息应提供稳定的 `message_id`，重试时保持相同 ID；一个 `session_id` 绑定最初的 Agent 和项目，其他 Agent 或项目须使用不同的会话 ID。归档会话与生成长期记忆是独立步骤；会话入库不代表已自动提炼为可搜索记忆。
+会话接续与治理工具：`session_checkpoint` 写入项目检查点，`session_get_handoff` 按项目读取交接；`memory_candidates` 列出有证据的待审核候选，`memory_approve_candidate` 审核通过后创建正式记忆并异步索引。`memory_spool_status` / `memory_spool_retry` 用于查看和重试本机待发送队列。检查点和候选按项目过滤；项目标识是数据作用域，不构成不同本机进程之间的安全隔离。
+
+使用 `scripts/mcp-bridge.sh` 接入时，`memory_ingest_session` 与 `session_checkpoint` 会先写本机持久队列。AMR 不可用时返回 `status="queued"`，表示本机已排队、尚未确认服务端落盘；服务恢复后，桥运行期间定期重试，重新启动桥时也会重试。队列默认位于 `$XDG_DATA_HOME/amr/mcp-spool`（未设置时为 `~/.local/share/amr/mcp-spool`），包含会话内容，文件权限为 0600。直接运行 Python 桥时需设置 `AMR_SPOOL_DIR` 才启用队列。
+
+`scripts/amr_distill_runner.py` 可扫描新增或变更的会话并产生待审核候选。默认不调用外部模型；配置 OpenAI 兼容端点后可使用 `systemd/amr-distillation.timer` 定时运行。候选不会自动变为正式记忆；需要调用 `memory_candidates` 审阅来源，再调用 `memory_approve_candidate`。审批成功只代表 SQLite 已提交和索引任务已排队，语义搜索在后台投影完成后可见。
+
+`memory_ingest_session` 和 `session_checkpoint` 需要客户端主动调用；仅配置 MCP 不会自动触发会话开始或结束事件。每条消息应提供稳定的 `message_id`，重试时保持相同 ID；一个 `session_id` 绑定最初的 Agent 和项目，其他 Agent 或项目须使用不同的会话 ID。归档会话与生成长期记忆是独立步骤；会话入库不代表已自动提炼为可搜索记忆。
 
 ---
 
