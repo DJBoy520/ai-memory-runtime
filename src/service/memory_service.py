@@ -840,9 +840,11 @@ class MemoryService:
         agent_id: str,
         project_id: Optional[str],
         messages: List[Dict[str, Any]],
+        checkpoint: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        原始会话流水幂等摄取
+        原始会话流水幂等摄取，支持附带会话检查点
         直接转发调用 SessionStore.ingest_messages 进行流水幂等入库，不调用大模型。
         """
         return await asyncio.to_thread(
@@ -851,6 +853,55 @@ class MemoryService:
             agent_id=agent_id,
             project_id=project_id,
             messages=messages,
+            checkpoint=checkpoint,
+            idempotency_key=idempotency_key,
+        )
+
+    async def session_checkpoint(
+        self,
+        session_id: str,
+        agent_id: str,
+        project_id: str,
+        completed: Any,
+        in_progress: Any = None,
+        next_steps: Any = None,
+        context: Optional[Union[Dict[str, Any], str]] = None,
+        checkpoint_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        持久化会话检查点与跨 Agent 交接（完成、未完成、下一步）。
+        """
+        return await asyncio.to_thread(
+            self.session_store.save_checkpoint,
+            session_id=session_id,
+            agent_id=agent_id,
+            project_id=project_id,
+            completed=completed,
+            in_progress=in_progress,
+            next_steps=next_steps,
+            context=context,
+            checkpoint_id=checkpoint_id,
+            idempotency_key=idempotency_key,
+            messages=messages,
+        )
+
+    async def session_get_handoff(
+        self,
+        project_id: str,
+        session_id: Optional[str] = None,
+        limit: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        按项目检索结构化交接记录（完成、未完成、下一步）。
+        严格隔离跨项目数据。
+        """
+        return await asyncio.to_thread(
+            self.session_store.get_handoff,
+            project_id=project_id,
+            session_id=session_id,
+            limit=limit,
         )
 
     # =========================================================================

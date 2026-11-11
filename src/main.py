@@ -218,6 +218,36 @@ class AMRApplication:
                     agent_id=agent_id,
                     project_id=params.get("project_id"),
                     messages=params.get("messages", []),
+                    checkpoint=params.get("checkpoint"),
+                    idempotency_key=params.get("idempotency_key"),
+                )
+            elif method in ("session.checkpoint", "session_checkpoint", "memory.session_checkpoint"):
+                session_id = params.get("session_id")
+                if not session_id or not isinstance(session_id, str) or not session_id.strip():
+                    raise RpcInvalidArgument("Parameter 'session_id' is required and must be a non-empty string.")
+                project_id = params.get("project_id")
+                if not project_id or not isinstance(project_id, str) or not project_id.strip():
+                    raise RpcInvalidArgument("Parameter 'project_id' is required and must be a non-empty string.")
+                return await self.memory_service.session_checkpoint(
+                    session_id=session_id.strip(),
+                    agent_id=agent_id,
+                    project_id=project_id.strip(),
+                    completed=params.get("completed", []),
+                    in_progress=params.get("in_progress", []),
+                    next_steps=params.get("next_steps", []),
+                    context=params.get("context"),
+                    checkpoint_id=params.get("checkpoint_id"),
+                    idempotency_key=params.get("idempotency_key"),
+                    messages=params.get("messages"),
+                )
+            elif method in ("session.get_handoff", "session_get_handoff", "session.handoff", "memory.get_handoff"):
+                project_id = params.get("project_id")
+                if not project_id or not isinstance(project_id, str) or not project_id.strip():
+                    raise RpcInvalidArgument("Parameter 'project_id' is required and must be a non-empty string.")
+                return await self.memory_service.session_get_handoff(
+                    project_id=project_id.strip(),
+                    session_id=params.get("session_id"),
+                    limit=params.get("limit", 1),
                 )
             elif method in ("system.health", "system_health", "system.ping", "ping"):
                 return {

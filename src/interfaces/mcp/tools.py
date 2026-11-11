@@ -255,6 +255,88 @@ TOOL_DEFINITIONS = [
             },
             "required": ["session_id", "messages"]
         }
+    },
+    {
+        "name": "session_checkpoint",
+        "description": "Create a persistent structured session checkpoint and cross-agent handoff containing completed work, in-progress items, and next steps for the project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Session identifier"},
+                "project_id": {"type": "string", "description": "Project identifier for project isolation"},
+                "completed": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Completed tasks or achievements",
+                },
+                "in_progress": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "In-progress, pending, or uncompleted items",
+                },
+                "next_steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Recommended next actions for subsequent agents",
+                },
+                "context": {
+                    "type": "object",
+                    "description": "Optional environment or task metadata (e.g. branch, modified files)",
+                },
+                "messages": {
+                    "type": "array",
+                    "description": "Optional dialogue messages to ingest alongside checkpoint",
+                },
+                "checkpoint_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+            "required": ["session_id", "project_id", "completed", "next_steps"],
+        },
+    },
+    {
+        "name": "session_get_handoff",
+        "description": "Retrieve the latest structured cross-agent handoff (completed, in-progress, next steps) for a project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project identifier to query handoff for"},
+                "session_id": {"type": "string", "description": "Optional session identifier to filter"},
+                "limit": {"type": "integer", "description": "Maximum number of handoffs to return (default 1)"},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "memory_session_checkpoint",
+        "description": "Alias for session_checkpoint: Create a structured session checkpoint and cross-agent handoff.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "project_id": {"type": "string"},
+                "completed": {"type": "array", "items": {"type": "string"}},
+                "in_progress": {"type": "array", "items": {"type": "string"}},
+                "next_steps": {"type": "array", "items": {"type": "string"}},
+                "context": {"type": "object"},
+                "messages": {"type": "array"},
+                "checkpoint_id": {"type": "string"},
+                "idempotency_key": {"type": "string"},
+            },
+            "required": ["session_id", "project_id", "completed", "next_steps"],
+        },
+    },
+    {
+        "name": "memory_get_handoff",
+        "description": "Alias for session_get_handoff: Retrieve the latest cross-agent handoff for a project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "session_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["project_id"],
+        },
     }
 ]
 

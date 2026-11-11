@@ -277,6 +277,23 @@ CREATE TABLE IF NOT EXISTS _amr_migrations (
     applied_at INTEGER NOT NULL,
     details TEXT
 );
+
+-- 12. 会话检查点与跨 Agent 结构化交接表 (Session Checkpoint & Cross-Agent Handoff)
+CREATE TABLE IF NOT EXISTS session_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    completed TEXT NOT NULL,        -- JSON Array: 完成事项
+    in_progress TEXT NOT NULL,      -- JSON Array: 未完成/进行中事项
+    next_steps TEXT NOT NULL,       -- JSON Array: 下一步建议
+    context TEXT DEFAULT '{}',       -- JSON Object: 上下文状态/分支/变量
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_chk_project_created ON session_checkpoints(project_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chk_session_created ON session_checkpoints(session_id, created_at DESC);
 """
 
 
@@ -567,6 +584,26 @@ class SessionStore:
                     details TEXT
                 );
             """)
+
+            # 确保 session_checkpoints 表及索引存在
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS session_checkpoints (
+                    checkpoint_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    completed TEXT NOT NULL,
+                    in_progress TEXT NOT NULL,
+                    next_steps TEXT NOT NULL,
+                    context TEXT DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_chk_project_created ON session_checkpoints(project_id, created_at DESC);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_chk_session_created ON session_checkpoints(session_id, created_at DESC);")
+
             cursor.execute("SELECT migration_id FROM _amr_migrations;")
             applied_migrations = {row[0] for row in cursor.fetchall()}
             now = int(time.time())
@@ -897,165 +934,655 @@ class SessionStore:
             );
         """)
 
+    @staticmethod
+    def _normalize_handoff_list(val: Any) -> List[Any]:
+        """规范化交接任务列表，支持列表、单字符串、JSON 序列化字符串。"""
+        if val is None:
+            return []
+        if isinstance(val, list):
+            return val
+        if isinstance(val, (str, bytes)):
+            s = val.decode("utf-8") if isinstance(val, bytes) else val
+            s = s.strip()
+            if not s:
+                return []
+            if s.startswith("[") and s.endswith("]"):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    pass
+            return [s]
+        return [str(val)]
+
+    def _ingest_messages_locked(
+        self,
+        cursor: sqlite3.Cursor,
+        session_id: str,
+        agent_id: str,
+        project_id: Optional[str],
+        messages: List[Dict[str, Any]],
+        now: int,
+    ) -> Dict[str, Any]:
+        """在已有事务锁内执行消息明细摄取与会话元数据聚合维护。"""
+        inserted = 0
+        revision_updated = 0
+        ignored = 0
+        total_received = len(messages)
+
+        # 1. 检查/创建 session 记录
+        cursor.execute(
+            "SELECT session_id, agent_id, project_id, started_at, ended_at, message_count FROM sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        sess_row = cursor.fetchone()
+
+        earliest_ts = now
+        latest_ts = now
+        if messages:
+            msg_timestamps = [m.get("timestamp", now) for m in messages if isinstance(m.get("timestamp"), (int, float))]
+            if msg_timestamps:
+                earliest_ts = int(min(msg_timestamps))
+                latest_ts = int(max(msg_timestamps))
+
+        if sess_row is None:
+            cursor.execute(
+                """
+                INSERT INTO sessions (session_id, agent_id, project_id, started_at, ended_at, message_count, status)
+                VALUES (?, ?, ?, ?, ?, 0, 'active')
+                """,
+                (session_id, agent_id, project_id, earliest_ts, latest_ts),
+            )
+        else:
+            if sess_row["agent_id"] != agent_id:
+                raise ValueError("Session ID already belongs to a different agent; use a unique session ID")
+            if project_id and sess_row["project_id"] and project_id != sess_row["project_id"]:
+                raise ValueError("Session ID already belongs to a different project; use a unique session ID")
+            current_ended_at = sess_row["ended_at"] or 0
+            new_ended_at = max(current_ended_at, latest_ts)
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET ended_at = ?, project_id = COALESCE(?, project_id)
+                WHERE session_id = ?
+                """,
+                (new_ended_at, project_id, session_id),
+            )
+
+        # 2. 逐条处理消息
+        for idx, msg in enumerate(messages):
+            msg_id = msg.get("message_id") or msg.get("id") or f"{session_id}_{idx+1}_{now}"
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(str(p.get("text", p) if isinstance(p, dict) else p) for p in content)
+            seq = msg.get("sequence", idx + 1)
+            ts = int(msg.get("timestamp", now))
+            c_hash = compute_content_hash(role, content)
+
+            # 查询已有消息
+            cursor.execute(
+                "SELECT content_hash FROM messages WHERE session_id = ? AND message_id = ?",
+                (session_id, msg_id),
+            )
+            existing = cursor.fetchone()
+
+            if existing is None:
+                cursor.execute(
+                    """
+                    INSERT INTO messages (session_id, message_id, role, content, content_hash, sequence, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, msg_id, role, content, c_hash, seq, ts),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
+                    VALUES (?, ?, ?, 'ingested', NULL)
+                    """,
+                    (session_id, msg_id, now),
+                )
+                inserted += 1
+            else:
+                if existing["content_hash"] == c_hash:
+                    cursor.execute(
+                        """
+                        INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
+                        VALUES (?, ?, ?, 'ignored', NULL)
+                        """,
+                        (session_id, msg_id, now),
+                    )
+                    ignored += 1
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE messages
+                        SET role = ?, content = ?, content_hash = ?, sequence = ?, timestamp = ?
+                        WHERE session_id = ? AND message_id = ?
+                        """,
+                        (role, content, c_hash, seq, ts, session_id, msg_id),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
+                        VALUES (?, ?, ?, 'revision_updated', NULL)
+                        """,
+                        (session_id, msg_id, now),
+                    )
+                    revision_updated += 1
+
+        # 3. 重新聚合更新 sessions 的 message_count 与 ended_at
+        cursor.execute(
+            "SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts FROM messages WHERE session_id = ?",
+            (session_id,),
+        )
+        stat_row = cursor.fetchone()
+        total_cnt = stat_row["cnt"] if stat_row else 0
+        max_ts = stat_row["max_ts"] if stat_row and stat_row["max_ts"] is not None else latest_ts
+
+        cursor.execute(
+            """
+            UPDATE sessions
+            SET message_count = ?, ended_at = MAX(COALESCE(ended_at, 0), ?)
+            WHERE session_id = ?
+            """,
+            (total_cnt, max_ts, session_id),
+        )
+
+        return {
+            "total_received": total_received,
+            "inserted": inserted,
+            "revision_updated": revision_updated,
+            "ignored": ignored,
+        }
+
+    def _save_checkpoint_locked(
+        self,
+        cursor: sqlite3.Cursor,
+        session_id: str,
+        agent_id: str,
+        project_id: str,
+        completed: Union[List[Any], str],
+        in_progress: Union[List[Any], str],
+        next_steps: Union[List[Any], str],
+        context: Optional[Union[Dict[str, Any], str]] = None,
+        checkpoint_id: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        now: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """在已有事务锁内执行检查点与交接数据持久化。"""
+        if now is None:
+            now = int(time.time())
+
+        norm_completed = self._normalize_handoff_list(completed)
+        norm_in_progress = self._normalize_handoff_list(in_progress)
+        norm_next_steps = self._normalize_handoff_list(next_steps)
+
+        if context is None:
+            norm_context = {}
+        elif isinstance(context, dict):
+            norm_context = context
+        elif isinstance(context, str):
+            try:
+                norm_context = json.loads(context)
+            except Exception:
+                norm_context = {"raw": context}
+        else:
+            norm_context = {"raw": str(context)}
+
+        # 1. 维护 sessions 表记录并验证归属
+        cursor.execute(
+            "SELECT session_id, agent_id, project_id, started_at, ended_at, message_count FROM sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        sess_row = cursor.fetchone()
+        if sess_row is None:
+            cursor.execute(
+                """
+                INSERT INTO sessions (session_id, agent_id, project_id, started_at, ended_at, message_count, status)
+                VALUES (?, ?, ?, ?, ?, 0, 'active')
+                """,
+                (session_id, agent_id, project_id, now, now),
+            )
+        else:
+            if sess_row["agent_id"] != agent_id:
+                raise ValueError("Session ID already belongs to a different agent; use a unique session ID")
+            if project_id and sess_row["project_id"] and project_id != sess_row["project_id"]:
+                raise ValueError("Session ID already belongs to a different project; use a unique session ID")
+            current_ended_at = sess_row["ended_at"] or 0
+            new_ended_at = max(current_ended_at, now)
+            cursor.execute(
+                """
+                UPDATE sessions
+                SET ended_at = ?, project_id = COALESCE(?, project_id)
+                WHERE session_id = ?
+                """,
+                (new_ended_at, project_id, session_id),
+            )
+
+        # 2. 如果携带了 messages，则在同事务内摄取
+        msg_stats = None
+        if messages:
+            msg_stats = self._ingest_messages_locked(
+                cursor=cursor,
+                session_id=session_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                messages=messages,
+                now=now,
+            )
+
+        # 3. 插入或更新 session_checkpoints
+        if not checkpoint_id:
+            checkpoint_id = f"chk_{now}_{uuid.uuid4().hex[:8]}"
+
+        completed_json = json.dumps(norm_completed, ensure_ascii=False)
+        in_progress_json = json.dumps(norm_in_progress, ensure_ascii=False)
+        next_steps_json = json.dumps(norm_next_steps, ensure_ascii=False)
+        context_json = json.dumps(norm_context, ensure_ascii=False)
+
+        cursor.execute(
+            """
+            INSERT INTO session_checkpoints (
+                checkpoint_id, session_id, agent_id, project_id,
+                completed, in_progress, next_steps, context,
+                created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(checkpoint_id) DO UPDATE SET
+                completed = excluded.completed,
+                in_progress = excluded.in_progress,
+                next_steps = excluded.next_steps,
+                context = excluded.context,
+                updated_at = excluded.updated_at;
+            """,
+            (
+                checkpoint_id,
+                session_id,
+                agent_id,
+                project_id,
+                completed_json,
+                in_progress_json,
+                next_steps_json,
+                context_json,
+                now,
+                now,
+            ),
+        )
+
+        res = {
+            "status": "ok",
+            "checkpoint_id": checkpoint_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "project_id": project_id,
+            "completed": norm_completed,
+            "in_progress": norm_in_progress,
+            "next_steps": norm_next_steps,
+            "context": norm_context,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if msg_stats:
+            res["messages_ingested"] = msg_stats
+        return res
+
     def ingest_messages(
         self,
         session_id: str,
         agent_id: str,
         project_id: Optional[str],
         messages: List[Dict[str, Any]],
+        checkpoint: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        幂等摄取会话消息。
+        幂等摄取会话消息，可选在同一事务内持久化会话检查点。
         - 若不存在：插入 messages 表，ingest_log 记 status='ingested'，inserted + 1
         - 若存在且 content_hash 相同：忽略，ingest_log 记 status='ignored'，ignored + 1
         - 若存在但 content_hash 不同：判定为 revision，更新 messages 表，ingest_log 记 status='revision_updated'，revision_updated + 1
+        - 若附带 checkpoint：原子持久化结构化交接（完成、未完成、下一步）。
         """
         now = int(time.time())
-        inserted = 0
-        revision_updated = 0
-        ignored = 0
-        total_received = len(messages)
+
+        with self.locked_write_transaction() as conn:
+            cursor = conn.cursor()
+            stats = self._ingest_messages_locked(
+                cursor=cursor,
+                session_id=session_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                messages=messages,
+                now=now,
+            )
+
+            chk_res = None
+            if checkpoint and isinstance(checkpoint, dict):
+                chk_res = self._save_checkpoint_locked(
+                    cursor=cursor,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project_id=project_id or "default",
+                    completed=checkpoint.get("completed", []),
+                    in_progress=checkpoint.get("in_progress", []),
+                    next_steps=checkpoint.get("next_steps", []),
+                    context=checkpoint.get("context"),
+                    checkpoint_id=checkpoint.get("checkpoint_id"),
+                    messages=None,
+                    now=now,
+                )
+
+        ret = {
+            "session_id": session_id,
+            "total_received": stats["total_received"],
+            "inserted": stats["inserted"],
+            "revision_updated": stats["revision_updated"],
+            "ignored": stats["ignored"],
+            "status": "success",
+        }
+        if chk_res:
+            ret["checkpoint"] = chk_res
+        return ret
+
+    def save_checkpoint(
+        self,
+        session_id: str,
+        agent_id: str,
+        project_id: str,
+        completed: Union[List[Any], str],
+        in_progress: Union[List[Any], str] = None,
+        next_steps: Union[List[Any], str] = None,
+        context: Optional[Union[Dict[str, Any], str]] = None,
+        checkpoint_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        持久化会话检查点与跨 Agent 交接（完成、未完成、下一步）。
+        支持事务安全、原子消息摄取以及基于 idempotency_key 的幂等仲裁。
+        """
+        if not session_id or not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("Parameter 'session_id' is required and must be a non-empty string.")
+        if not project_id or not isinstance(project_id, str) or not project_id.strip():
+            raise ValueError("Parameter 'project_id' is required and must be a non-empty string.")
+        if not agent_id or not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("Parameter 'agent_id' is required and must be a non-empty string.")
+
+        session_id = session_id.strip()
+        project_id = project_id.strip()
+        agent_id = agent_id.strip()
+
+        norm_completed = self._normalize_handoff_list(completed)
+        norm_in_progress = self._normalize_handoff_list(in_progress)
+        norm_next_steps = self._normalize_handoff_list(next_steps)
+
+        if context is None:
+            norm_ctx = {}
+        elif isinstance(context, dict):
+            norm_ctx = context
+        elif isinstance(context, str):
+            try:
+                norm_ctx = json.loads(context)
+            except Exception:
+                norm_ctx = {"raw": context}
+        else:
+            norm_ctx = {"raw": str(context)}
+
+        if idempotency_key:
+            payload = {
+                "session_id": session_id,
+                "project_id": project_id,
+                "completed": norm_completed,
+                "in_progress": norm_in_progress,
+                "next_steps": norm_next_steps,
+                "context": norm_ctx,
+            }
+            digest = compute_request_digest("session_checkpoint", payload)
+
+            def _business_fn(cur):
+                res = self._save_checkpoint_locked(
+                    cursor=cur,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    project_id=project_id,
+                    completed=norm_completed,
+                    in_progress=norm_in_progress,
+                    next_steps=norm_next_steps,
+                    context=norm_ctx,
+                    checkpoint_id=checkpoint_id,
+                    messages=messages,
+                )
+                return res["checkpoint_id"], res
+
+            return self.execute_idempotent(
+                op="session_checkpoint",
+                idem_key=idempotency_key,
+                digest=digest,
+                business_fn=_business_fn,
+                agent_id_raw=agent_id,
+            )
+
+        with self.locked_write_transaction() as conn:
+            cur = conn.cursor()
+            return self._save_checkpoint_locked(
+                cursor=cur,
+                session_id=session_id,
+                agent_id=agent_id,
+                project_id=project_id,
+                completed=norm_completed,
+                in_progress=norm_in_progress,
+                next_steps=norm_next_steps,
+                context=norm_ctx,
+                checkpoint_id=checkpoint_id,
+                messages=messages,
+            )
+
+    def get_handoff(
+        self,
+        project_id: str,
+        session_id: Optional[str] = None,
+        limit: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        按项目检索结构化交接记录（完成、未完成、下一步）。
+        严格项目隔离：只返回属于指定 project_id 的检查点交接；
+        若指定 session_id，则必须同时匹配 project_id 与 session_id。
+        """
+        if not project_id or not isinstance(project_id, str) or not project_id.strip():
+            raise ValueError("Parameter 'project_id' is required and must be a non-empty string.")
+
+        project_id = project_id.strip()
+        safe_limit = max(1, min(int(limit) if isinstance(limit, (int, float)) else 1, 100))
 
         with self._lock:
             conn = self._get_connection()
-            cursor = conn.cursor()
-            try:
-                # 1. 检查/创建 session 记录
-                cursor.execute(
-                    "SELECT session_id, agent_id, project_id, started_at, ended_at, message_count FROM sessions WHERE session_id = ?",
-                    (session_id,),
-                )
-                sess_row = cursor.fetchone()
-
-                earliest_ts = now
-                latest_ts = now
-                if messages:
-                    msg_timestamps = [m.get("timestamp", now) for m in messages if isinstance(m.get("timestamp"), (int, float))]
-                    if msg_timestamps:
-                        earliest_ts = int(min(msg_timestamps))
-                        latest_ts = int(max(msg_timestamps))
-
-                if sess_row is None:
-                    cursor.execute(
-                        """
-                        INSERT INTO sessions (session_id, agent_id, project_id, started_at, ended_at, message_count, status)
-                        VALUES (?, ?, ?, ?, ?, 0, 'active')
-                        """,
-                        (session_id, agent_id, project_id, earliest_ts, latest_ts),
-                    )
-                else:
-                    if sess_row["agent_id"] != agent_id:
-                        raise ValueError("Session ID already belongs to a different agent; use a unique session ID")
-                    if project_id and sess_row["project_id"] and project_id != sess_row["project_id"]:
-                        raise ValueError("Session ID already belongs to a different project; use a unique session ID")
-                    # 如果会话已存在，若提供了更新的 project_id 或 agent_id 可同步，也可以拓展 ended_at
-                    current_ended_at = sess_row["ended_at"] or 0
-                    new_ended_at = max(current_ended_at, latest_ts)
-                    cursor.execute(
-                        """
-                        UPDATE sessions
-                        SET ended_at = ?, project_id = COALESCE(?, project_id)
-                        WHERE session_id = ?
-                        """,
-                        (new_ended_at, project_id, session_id),
-                    )
-
-                # 2. 逐条处理消息
-                for idx, msg in enumerate(messages):
-                    msg_id = msg.get("message_id") or msg.get("id") or f"{session_id}_{idx+1}_{now}"
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = "\n".join(str(p.get("text", p) if isinstance(p, dict) else p) for p in content)
-                    seq = msg.get("sequence", idx + 1)
-                    ts = int(msg.get("timestamp", now))
-                    c_hash = compute_content_hash(role, content)
-
-                    # 查询已有消息
-                    cursor.execute(
-                        "SELECT content_hash FROM messages WHERE session_id = ? AND message_id = ?",
-                        (session_id, msg_id),
-                    )
-                    existing = cursor.fetchone()
-
-                    if existing is None:
-                        # 新增插入
-                        cursor.execute(
-                            """
-                            INSERT INTO messages (session_id, message_id, role, content, content_hash, sequence, timestamp)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (session_id, msg_id, role, content, c_hash, seq, ts),
-                        )
-                        cursor.execute(
-                            """
-                            INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
-                            VALUES (?, ?, ?, 'ingested', NULL)
-                            """,
-                            (session_id, msg_id, now),
-                        )
-                        inserted += 1
-                    else:
-                        if existing["content_hash"] == c_hash:
-                            # 完全相同，忽略
-                            cursor.execute(
-                                """
-                                INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
-                                VALUES (?, ?, ?, 'ignored', NULL)
-                                """,
-                                (session_id, msg_id, now),
-                            )
-                            ignored += 1
-                        else:
-                            # 发生 revision 更新
-                            cursor.execute(
-                                """
-                                UPDATE messages
-                                SET role = ?, content = ?, content_hash = ?, sequence = ?, timestamp = ?
-                                WHERE session_id = ? AND message_id = ?
-                                """,
-                                (role, content, c_hash, seq, ts, session_id, msg_id),
-                            )
-                            cursor.execute(
-                                """
-                                INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg)
-                                VALUES (?, ?, ?, 'revision_updated', NULL)
-                                """,
-                                (session_id, msg_id, now),
-                            )
-                            revision_updated += 1
-
-                # 3. 重新聚合更新 sessions 的 message_count 与 ended_at
-                cursor.execute(
-                    "SELECT COUNT(*) as cnt, MAX(timestamp) as max_ts FROM messages WHERE session_id = ?",
-                    (session_id,),
-                )
-                stat_row = cursor.fetchone()
-                total_cnt = stat_row["cnt"] if stat_row else 0
-                max_ts = stat_row["max_ts"] if stat_row and stat_row["max_ts"] is not None else latest_ts
-
-                cursor.execute(
+            cur = conn.cursor()
+            if session_id and str(session_id).strip():
+                cur.execute(
                     """
-                    UPDATE sessions
-                    SET message_count = ?, ended_at = MAX(COALESCE(ended_at, 0), ?)
-                    WHERE session_id = ?
+                    SELECT checkpoint_id, session_id, agent_id, project_id,
+                           completed, in_progress, next_steps, context,
+                           created_at, updated_at
+                    FROM session_checkpoints
+                    WHERE project_id = ? AND session_id = ?
+                    ORDER BY created_at DESC, checkpoint_id DESC
+                    LIMIT ?
                     """,
-                    (total_cnt, max_ts, session_id),
+                    (project_id, str(session_id).strip(), safe_limit),
                 )
+            else:
+                cur.execute(
+                    """
+                    SELECT checkpoint_id, session_id, agent_id, project_id,
+                           completed, in_progress, next_steps, context,
+                           created_at, updated_at
+                    FROM session_checkpoints
+                    WHERE project_id = ?
+                    ORDER BY created_at DESC, checkpoint_id DESC
+                    LIMIT ?
+                    """,
+                    (project_id, safe_limit),
+                )
+            rows = cur.fetchall()
 
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                raise e
+        handoffs = []
+        for r in rows:
+            try:
+                comp = json.loads(r["completed"])
+            except Exception:
+                comp = [r["completed"]]
+            try:
+                inp = json.loads(r["in_progress"])
+            except Exception:
+                inp = [r["in_progress"]]
+            try:
+                nxt = json.loads(r["next_steps"])
+            except Exception:
+                nxt = [r["next_steps"]]
+            try:
+                ctx = json.loads(r["context"]) if r["context"] else {}
+            except Exception:
+                ctx = {"raw": r["context"]}
 
+            handoffs.append({
+                "checkpoint_id": r["checkpoint_id"],
+                "session_id": r["session_id"],
+                "agent_id": r["agent_id"],
+                "project_id": r["project_id"],
+                "completed": comp,
+                "in_progress": inp,
+                "next_steps": nxt,
+                "context": ctx,
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            })
+
+        latest = handoffs[0] if handoffs else None
         return {
-            "session_id": session_id,
-            "total_received": total_received,
-            "inserted": inserted,
-            "revision_updated": revision_updated,
-            "ignored": ignored,
-            "status": "success",
+            "project_id": project_id,
+            "handoff": latest,
+            "handoffs": handoffs,
+            "count": len(handoffs),
         }
+
+    def get_checkpoint(
+        self,
+        checkpoint_id: str,
+        project_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """获取单个检查点详情，支持可选项目隔离过滤"""
+        if not checkpoint_id or not isinstance(checkpoint_id, str):
+            return None
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            if project_id:
+                cur.execute(
+                    """
+                    SELECT checkpoint_id, session_id, agent_id, project_id,
+                           completed, in_progress, next_steps, context,
+                           created_at, updated_at
+                    FROM session_checkpoints
+                    WHERE checkpoint_id = ? AND project_id = ?
+                    """,
+                    (checkpoint_id.strip(), project_id.strip()),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT checkpoint_id, session_id, agent_id, project_id,
+                           completed, in_progress, next_steps, context,
+                           created_at, updated_at
+                    FROM session_checkpoints
+                    WHERE checkpoint_id = ?
+                    """,
+                    (checkpoint_id.strip(),),
+                )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            try:
+                comp = json.loads(row["completed"])
+            except Exception:
+                comp = [row["completed"]]
+            try:
+                inp = json.loads(row["in_progress"])
+            except Exception:
+                inp = [row["in_progress"]]
+            try:
+                nxt = json.loads(row["next_steps"])
+            except Exception:
+                nxt = [row["next_steps"]]
+            try:
+                ctx = json.loads(row["context"]) if row["context"] else {}
+            except Exception:
+                ctx = {"raw": row["context"]}
+
+            return {
+                "checkpoint_id": row["checkpoint_id"],
+                "session_id": row["session_id"],
+                "agent_id": row["agent_id"],
+                "project_id": row["project_id"],
+                "completed": comp,
+                "in_progress": inp,
+                "next_steps": nxt,
+                "context": ctx,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+
+    def get_session_checkpoints(self, session_id: str) -> List[Dict[str, Any]]:
+        """获取指定会话下的所有检查点列表（按时间倒序）"""
+        if not session_id or not isinstance(session_id, str):
+            return []
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT checkpoint_id, session_id, agent_id, project_id,
+                       completed, in_progress, next_steps, context,
+                       created_at, updated_at
+                FROM session_checkpoints
+                WHERE session_id = ?
+                ORDER BY created_at DESC, checkpoint_id DESC
+                """,
+                (session_id.strip(),),
+            )
+            rows = cur.fetchall()
+
+        res = []
+        for row in rows:
+            try:
+                comp = json.loads(row["completed"])
+            except Exception:
+                comp = [row["completed"]]
+            try:
+                inp = json.loads(row["in_progress"])
+            except Exception:
+                inp = [row["in_progress"]]
+            try:
+                nxt = json.loads(row["next_steps"])
+            except Exception:
+                nxt = [row["next_steps"]]
+            try:
+                ctx = json.loads(row["context"]) if row["context"] else {}
+            except Exception:
+                ctx = {"raw": row["context"]}
+            res.append({
+                "checkpoint_id": row["checkpoint_id"],
+                "session_id": row["session_id"],
+                "agent_id": row["agent_id"],
+                "project_id": row["project_id"],
+                "completed": comp,
+                "in_progress": inp,
+                "next_steps": nxt,
+                "context": ctx,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+        return res
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """获取单个会话主表信息"""
