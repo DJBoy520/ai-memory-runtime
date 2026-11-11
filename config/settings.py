@@ -15,6 +15,7 @@ class ServerConfig(BaseModel):
     admin_socket: str = Field(default_factory=lambda: os.path.join(_get_default_runtime_dir(), "qdrant-bge-admin.sock"))
     socket_mode: int = 0o600
     max_request_bytes: int = 4 * 1024 * 1024  # 4MB
+    drain_timeout_seconds: float = 5.0
     allowed_agents: List[str] = Field(
         default_factory=lambda: [
             "hermes",

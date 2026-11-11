@@ -415,6 +415,11 @@ class AMRApplication:
         await asyncio.to_thread(self.outbox_worker.stop)
         logger.info("Stopping AMR Dual UDS Server...")
         await self.server.stop()
+        if hasattr(self, "memory_service") and self.memory_service is not None:
+            if hasattr(self.memory_service, "aclose"):
+                await self.memory_service.aclose()
+            elif hasattr(self.memory_service, "close"):
+                await asyncio.to_thread(self.memory_service.close)
         if hasattr(self.engine, "aclose"):
             await self.engine.aclose()
         else:
