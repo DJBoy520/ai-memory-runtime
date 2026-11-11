@@ -53,12 +53,11 @@ class SessionHarvester:
         self._load_existing_state()
 
     def _load_existing_state(self):
+        self.existing_session_ids = set()
         c = self.conn.cursor()
         c.execute("SELECT session_id FROM raw_sessions")
         self.existing_session_ids = set(r[0] for r in c.fetchall())
-        c.execute("SELECT DISTINCT content_hash FROM raw_messages")
-        self.existing_content_hashes = set(r[0] for r in c.fetchall())
-        logger.info(f"Loaded existing AMR state: {len(self.existing_session_ids)} raw_sessions, {len(self.existing_content_hashes)} raw_messages hashes")
+        logger.info(f"Loaded existing AMR state: {len(self.existing_session_ids)} raw_sessions")
 
     def harvest_hermes(self) -> List[Dict[str, Any]]:
         """从 ~/.hermes/state.db 搜集未入库的新会话"""
@@ -77,8 +76,6 @@ class SessionHarvester:
         harvested = []
         for s in sessions:
             sid = s["id"]
-            if sid in self.existing_session_ids:
-                continue
             if not s["message_count"] or s["message_count"] == 0:
                 continue
 
@@ -134,9 +131,7 @@ class SessionHarvester:
                 if not d.startswith("session-"):
                     continue
                 sid = d.replace("session-", "")
-                if sid in self.existing_session_ids:
-                    continue
-                
+
                 sdir = os.path.join(root, d)
                 zst_files = [f for f in os.listdir(sdir) if f.endswith(".zstd")]
                 if not zst_files:
@@ -213,8 +208,6 @@ class SessionHarvester:
         for t in trajs:
             fname = os.path.basename(t)
             sid = fname.split(".")[0]
-            if sid in self.existing_session_ids:
-                continue
 
             lines = []
             try:
@@ -296,38 +289,60 @@ class SessionHarvester:
         inserted_messages = 0
         skipped_messages = 0
 
-        for s in session_list:
-            sid = s["session_id"]
-            # 1. 插入 raw_sessions
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO raw_sessions (session_id, agent_id, project_id, started_at, ended_at, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (sid, s["agent_id"], s["project_id"], s["started_at"], s["ended_at"], s["status"])
-            )
-            inserted_sessions += 1
-
-            # 2. 插入 raw_messages
-            for m in s["messages"]:
-                chash = m["content_hash"]
-                # 检查内容哈希去重
-                if chash in self.existing_content_hashes:
-                    skipped_messages += 1
-                    continue
-                
+        try:
+            for s in session_list:
+                sid = s["session_id"]
+                # 1. 插入 raw_sessions
                 cur.execute(
                     """
-                    INSERT OR IGNORE INTO raw_messages 
-                    (message_id, session_id, role, content, content_hash, sequence, source_type, is_synthetic, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 'imported', 0, ?)
+                    INSERT OR IGNORE INTO raw_sessions (session_id, agent_id, project_id, started_at, ended_at, status)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (m["message_id"], sid, m["role"], m["content"], chash, m["sequence"], m["created_at"])
+                    (sid, s["agent_id"], s["project_id"], s["started_at"], s["ended_at"], s["status"])
                 )
-                self.existing_content_hashes.add(chash)
-                inserted_messages += 1
+                if cur.rowcount > 0:
+                    inserted_sessions += 1
+                else:
+                    cur.execute("SELECT agent_id FROM raw_sessions WHERE session_id = ?", (sid,))
+                    existing_session = cur.fetchone()
+                    if not existing_session or existing_session["agent_id"] != s["agent_id"]:
+                        raise ValueError(f"Import session ID conflict: {sid}")
 
-        self.conn.commit()
+                # 2. 插入 raw_messages
+                for m in s["messages"]:
+                    chash = m["content_hash"]
+                    message_id = m["message_id"]
+                    cur.execute("SELECT session_id, role, content FROM raw_messages WHERE message_id = ?", (message_id,))
+                    existing = cur.fetchone()
+                    if existing and existing["session_id"] != sid:
+                        # Legacy IDs use only the first eight characters of the session ID.
+                        # Use a deterministic full-session fallback when that prefix collides.
+                        digest = hashlib.sha256(f"{s['agent_id']}\0{sid}\0{message_id}".encode()).hexdigest()
+                        message_id = f"import_{digest}"
+                        cur.execute("SELECT session_id, role, content FROM raw_messages WHERE message_id = ?", (message_id,))
+                        existing = cur.fetchone()
+                    if existing:
+                        if (existing["session_id"], existing["role"], existing["content"]) != (sid, m["role"], m["content"]):
+                            raise ValueError(f"Import message ID conflict: {message_id}")
+                        skipped_messages += 1
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO raw_messages
+                        (message_id, session_id, role, content, content_hash, sequence, source_type, is_synthetic, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 'imported', 0, ?)
+                        """,
+                        (message_id, sid, m["role"], m["content"], chash, m["sequence"], m["created_at"])
+                    )
+                    if cur.rowcount > 0:
+                        inserted_messages += 1
+                    else:
+                        skipped_messages += 1
+
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         logger.info(f"Committed batch: {inserted_sessions} sessions, {inserted_messages} messages, {skipped_messages} skipped dups")
         return {
             "sessions": inserted_sessions,
