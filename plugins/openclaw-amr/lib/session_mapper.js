@@ -93,11 +93,18 @@ export function mapSessionToIngest(params) {
     }
 
     const role = normalizeRole(rawMsg.role || rawMsg.senderKind);
-    const msgId =
-      rawMsg.message_id ||
-      rawMsg.messageId ||
-      rawMsg.id ||
-      `msg_${sessionId}_${seq}_${crypto.randomBytes(4).toString("hex")}`;
+    let msgId = rawMsg.message_id || rawMsg.messageId || rawMsg.id;
+    if (!msgId) {
+      // Deterministic message ID incorporating sessionId, monotonic sequence, role, and content digest.
+      // Sequence guarantees distinct IDs even when content is identical (preventing message loss),
+      // while determinism ensures idempotent replay without duplicate inserts.
+      const digest = crypto
+        .createHash("sha256")
+        .update(`${sessionId}:${seq}:${role}:${content}`)
+        .digest("hex")
+        .slice(0, 8);
+      msgId = `msg_${sessionId}_${seq}_${digest}`;
+    }
 
     let timestamp = nowSec;
     if (typeof rawMsg.timestamp === "number") {

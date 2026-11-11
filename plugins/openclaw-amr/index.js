@@ -14,7 +14,10 @@
 import { AmrUdsClient } from "./lib/uds_client.js";
 import { buildMemoryContext } from "./lib/context_builder.js";
 import { mapSessionToIngest } from "./lib/session_mapper.js";
+import { SessionPersistenceManager } from "./lib/session_persistence.js";
 import { logger } from "./lib/logger.js";
+
+export { SessionPersistenceManager };
 
 /**
  * Checks if input is a system heartbeat or noise query that should bypass memory prefetch.
@@ -70,7 +73,37 @@ export const plugin = {
       defaultDeadlineMs: deadlineMs,
     });
 
-    logger.info(`Initialized openclaw-amr plugin. Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms, IngestDeadline: ${ingestDeadlineMs}ms`);
+    const persistence = new SessionPersistenceManager({
+      storageDir: cfg.persistenceDir || cfg.spoolDir || cfg.storageDir,
+      udsClient,
+      ingestDeadlineMs,
+      autoReplayOnStartup: typeof cfg.autoReplayOnStartup === "boolean"
+        ? cfg.autoReplayOnStartup
+        : Boolean(cfg.persistenceDir || cfg.spoolDir || process.env.AMR_SESSION_SPOOL_DIR),
+      logger,
+    });
+
+    plugin.persistence = persistence;
+    plugin.getPersistenceManager = () => persistence;
+    plugin.replayOfflineSessions = (opts) => persistence.replayPending(opts);
+    if (api) {
+      api.amrPersistence = persistence;
+    }
+
+    if (persistence.autoReplayOnStartup) {
+      setImmediate(async () => {
+        try {
+          const replayRes = await persistence.replayPending();
+          if (replayRes.replayed > 0) {
+            logger.info(`Startup replay completed: ${replayRes.succeeded}/${replayRes.replayed} sessions sent to AMR`);
+          }
+        } catch (err) {
+          logger.debug(`Startup replay skipped or failed: ${err.message}`);
+        }
+      });
+    }
+
+    logger.info(`Initialized openclaw-amr plugin. Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms, IngestDeadline: ${ingestDeadlineMs}ms, PersistenceDir: ${persistence.getStorageDir()}`);
 
     // =========================================================================
     // Hook 1: Input Prefetch & Injection (before_prompt_build)
@@ -163,20 +196,61 @@ export const plugin = {
             return;
           }
 
-          logger.debug(`Triggering confirmed session.ingest for session ${sessionId} (${ingestPayload.messages.length} messages, timeout: ${ingestDeadlineMs}ms)`);
-          const ingestResult = await udsClient.request("session.ingest", ingestPayload, ingestDeadlineMs);
-          const elapsedMs = Date.now() - startTime;
-          logger.info(`Session ${sessionId} successfully saved to AMR (${ingestPayload.messages.length} messages, ${elapsedMs}ms)`);
-          return {
-            ok: true,
-            sessionId,
-            messageCount: ingestPayload.messages.length,
-            result: ingestResult,
-          };
+          // Persist-First: Save session to disk before network transmission
+          let persistedRecord = null;
+          try {
+            persistedRecord = await persistence.persistSession(sessionId, ingestPayload, "pending");
+          } catch (persistErr) {
+            logger.warn(`Failed to persist session ${sessionId} offline: ${persistErr.message}`);
+          }
+
+          try {
+            logger.debug(`Triggering confirmed session.ingest for session ${sessionId} (${ingestPayload.messages.length} messages, timeout: ${ingestDeadlineMs}ms)`);
+            const ingestResult = await udsClient.request("session.ingest", ingestPayload, ingestDeadlineMs);
+            const elapsedMs = Date.now() - startTime;
+            logger.info(`Session ${sessionId} successfully saved to AMR (${ingestPayload.messages.length} messages, ${elapsedMs}ms)`);
+
+            if (persistedRecord) {
+              try {
+                await persistence.markSuccess(sessionId, ingestResult);
+              } catch (markErr) {
+                logger.warn(`Failed to mark session ${sessionId} success: ${markErr.message}`);
+              }
+            }
+
+            return {
+              ok: true,
+              sessionId,
+              messageCount: ingestPayload.messages.length,
+              result: ingestResult,
+              persisted: !!persistedRecord,
+            };
+          } catch (sendErr) {
+            const elapsedMs = Date.now() - startTime;
+            const errDetail = sendErr?.code ? `[code: ${sendErr.code}] ${sendErr.message}` : sendErr?.message || String(sendErr);
+            const logMsg = `Failed to save session ${sessionId || "unknown"} to AMR (${elapsedMs}ms): ${errDetail}`;
+            logger.error(logMsg);
+
+            // Failure retention: retain record on disk with incremented retry count and error tracking
+            if (persistedRecord) {
+              try {
+                await persistence.markFailed(sessionId, sendErr);
+              } catch (markErr) {
+                logger.warn(`Failed to update failed status for session ${sessionId}: ${markErr.message}`);
+              }
+            }
+
+            return {
+              ok: false,
+              sessionId,
+              error: errDetail,
+              persisted: !!persistedRecord,
+            };
+          }
         } catch (err) {
           const elapsedMs = Date.now() - startTime;
           const errDetail = err?.code ? `[code: ${err.code}] ${err.message}` : err?.message || String(err);
-          const logMsg = `Failed to save session ${sessionId || "unknown"} to AMR (${elapsedMs}ms): ${errDetail}`;
+          const logMsg = `Failed to process agent_end for session ${sessionId || "unknown"} (${elapsedMs}ms): ${errDetail}`;
           logger.error(logMsg);
           return {
             ok: false,
