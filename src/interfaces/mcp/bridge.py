@@ -193,6 +193,8 @@ class MCPBridge:
                     "memory_session_checkpoint": "session.checkpoint",
                     "session_get_handoff": "session.get_handoff",
                     "memory_get_handoff": "session.get_handoff",
+                    "memory_candidates": "memory.candidates",
+                    "memory_approve_candidate": "memory.approve_candidate",
                 }
 
                 rpc_method = rpc_method_map.get(tool_name)

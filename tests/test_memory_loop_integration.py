@@ -1,6 +1,7 @@
 import asyncio
 import json
 import multiprocessing
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 import pytest
@@ -15,6 +16,7 @@ from src.interfaces.mcp.bridge import MCPBridge
 from src.main import AMRApplication
 from src.service.memory_service import MemoryService
 from src.core.errors import IdempotencyConflict
+from src.service.candidate_review import approve_candidate
 from src.client import UdsTransport, TransientDeliveryError
 
 
@@ -49,6 +51,7 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
     cfg.server.allowed_agents = ["agent-a", "agent-b"]
     app = AMRApplication.__new__(AMRApplication)
     app.config = cfg
+    app.session_store = store
     app.memory_service = MemoryService(engine=object(), qdrant_manager=object(), session_store=store, config=cfg)
     server = UDSServer(name="test", socket_path=socket, handler=app.dispatch_business_rpc)
     await server.start()
@@ -69,6 +72,17 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         b = MCPBridge(socket_path=socket, source_agent="agent-b")
         async def call(bridge, name, arguments):
             return await bridge.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+        listed = await call(b, "memory_candidates", {"project_id": "project-a"})
+        assert json.loads(listed["result"]["content"][0]["text"])["candidates"][0]["candidate_id"] == "candidate-a"
+        wrong = await call(b, "memory_approve_candidate", {"project_id": "project-b", "candidate_id": "candidate-a"})
+        assert wrong["result"].get("isError")
+        approved = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "candidate-a"})
+        assert not approved["result"].get("isError")
+        approved_data = json.loads(approved["result"]["content"][0]["text"])
+        memory_id = approved_data["memory_id"]
+        again = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "candidate-a"})
+        assert json.loads(again["result"]["content"][0]["text"])["memory_id"] == memory_id
+        assert store.get_connection().execute("SELECT count(*) FROM memory_projection_outbox WHERE memory_id = ?", (memory_id,)).fetchone()[0] == 1
         saved = await call(a, "session_checkpoint", {"session_id": "sess-a", "project_id": "project-a", "completed": ["database selected"], "next_steps": ["apply migration"], "idempotency_key": "cp-a"})
         assert not saved["result"].get("isError")
         result = await call(b, "session_get_handoff", {"project_id": "project-a"})
@@ -102,6 +116,33 @@ def test_spool_rejects_response_with_wrong_rpc_id():
     response = json.dumps({"jsonrpc": "2.0", "id": "other", "result": {"status": "success", "session_id": "s"}}).encode()
     with pytest.raises(TransientDeliveryError, match="response"):
         UdsTransport()._parse_response(response, "expected")
+
+
+def test_candidate_approval_is_atomic_and_concurrent(tmp_path, monkeypatch):
+    cfg = AppConfig()
+    cfg.storage.sqlite_path = str(tmp_path / "review.db")
+    store = SessionStore(cfg)
+    try:
+        store.ingest_messages("s", "a", "p", [{"message_id": "m", "role": "user", "content": "Evidence for this approved fact"}])
+        conn = store.get_connection()
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c", "b", json.dumps({"session_ids": ["s"]}), "EXTRACT", "COGNITIVE_DISTILL", "Evidence for this approved fact", json.dumps(["m"]), json.dumps([{"message_id": "m", "span": "Evidence for this approved fact"}]), "PROPOSED", 1))
+        conn.commit()
+        original = store.enqueue_projection_task
+        def fail(*args, **kwargs):
+            raise RuntimeError("projection enqueue failed")
+        monkeypatch.setattr(store, "enqueue_projection_task", fail)
+        with pytest.raises(RuntimeError, match="enqueue"):
+            approve_candidate(store, "c", "p", "reviewer")
+        assert conn.execute("SELECT state FROM curation_candidates WHERE candidate_id = 'c'").fetchone()[0] == "PROPOSED"
+        assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 0
+        monkeypatch.setattr(store, "enqueue_projection_task", original)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: approve_candidate(store, "c", "p", "reviewer"), range(2)))
+        assert results[0]["memory_id"] == results[1]["memory_id"]
+        assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM memory_projection_outbox").fetchone()[0] == 1
+    finally:
+        store.close()
 
 
 def test_empty_evidence_is_rejected():

@@ -257,6 +257,16 @@ TOOL_DEFINITIONS = [
         }
     },
     {
+        "name": "memory_candidates",
+        "description": "List evidence-backed proposed memories for review in a project.",
+        "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["project_id"]}
+    },
+    {
+        "name": "memory_approve_candidate",
+        "description": "Approve a reviewed project memory candidate and queue it for search indexing. Evidence and project are checked again.",
+        "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, "required": ["project_id", "candidate_id"]}
+    },
+    {
         "name": "session_checkpoint",
         "description": "Create a persistent structured session checkpoint and cross-agent handoff containing completed work, in-progress items, and next steps for the project.",
         "inputSchema": {
@@ -429,6 +439,12 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
                 raise ValueError("Each message requires a valid role.")
             if not isinstance(message.get("content"), str):
                 raise ValueError("Each message requires string content.")
+    elif name in ("memory_candidates", "memory_approve_candidate"):
+        for field in (("project_id", "candidate_id") if name == "memory_approve_candidate" else ("project_id",)):
+            if not isinstance(args.get(field), str) or not args[field].strip():
+                raise ValueError(f"Parameter '{field}' is required.")
+        if "limit" in args and (isinstance(args["limit"], bool) or not isinstance(args["limit"], int) or not 1 <= args["limit"] <= 100):
+            raise ValueError("Parameter 'limit' must be an integer from 1 to 100.")
     elif name in ("session_checkpoint", "memory_session_checkpoint", "session_get_handoff", "memory_get_handoff"):
         for field in (("session_id", "project_id") if name in ("session_checkpoint", "memory_session_checkpoint") else ("project_id",)):
             if not isinstance(args.get(field), str) or not args[field].strip():

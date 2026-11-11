@@ -37,6 +37,7 @@ from src.interfaces.ipc.errors import RpcInvalidArgument, RpcMethodNotFound, Rpc
 from src.interfaces.ipc.server import DualUDSServer
 from src.service.memory_service import MemoryService
 from src.service.memory_status import normalize_status
+from src.service.candidate_review import list_candidates, approve_candidate
 from src.service.metrics import METRICS
 from src.service.outbox_worker import OutboxWorker
 
@@ -249,6 +250,10 @@ class AMRApplication:
                     session_id=params.get("session_id"),
                     limit=params.get("limit", 1),
                 )
+            elif method == "memory.candidates":
+                return await asyncio.to_thread(list_candidates, self.session_store, params.get("project_id"), params.get("limit", 20))
+            elif method == "memory.approve_candidate":
+                return await asyncio.to_thread(approve_candidate, self.session_store, params.get("candidate_id"), params.get("project_id"), agent_id)
             elif method in ("system.health", "system_health", "system.ping", "ping"):
                 return {
                     "status": "healthy",
