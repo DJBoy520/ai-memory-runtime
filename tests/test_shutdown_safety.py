@@ -26,6 +26,28 @@ from src.main import AMRApplication
 
 
 @pytest.mark.asyncio
+async def test_application_does_not_close_dependencies_if_server_drain_times_out():
+    """
+    [CRITICAL 验证]
+    当 DualUDSServer.stop() 抛出 TimeoutError 时（在途 handler 超时未排空），
+    AMRApplication.stop() 必须抛出 TimeoutError 并阻止关闭底层的 session_store、qdrant_manager 和 engine。
+    """
+    app = object.__new__(AMRApplication)
+    app.outbox_worker = MagicMock()
+    app.server = MagicMock()
+    app.server.stop = MagicMock(side_effect=TimeoutError("Drain timeout reached with 1 active handlers still running"))
+    app.engine = MagicMock()
+    app.session_store = MagicMock()
+    app.qdrant_manager = MagicMock()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(app.stop(), timeout=2.0)
+    app.session_store.close.assert_not_called()
+    app.qdrant_manager.close.assert_not_called()
+    app.engine.close.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_application_does_not_close_dependencies_if_worker_times_out():
     app = object.__new__(AMRApplication)
     app.outbox_worker = MagicMock()
@@ -365,3 +387,463 @@ def test_outbox_worker_stop_before_start():
     worker.stop()
     assert worker._running is False
     assert worker._lock_fd is None
+
+
+# =========================================================================
+# FINDING-ROBUST-07: UDSServer Safe Draining & Active Client Teardown
+# =========================================================================
+
+from src.interfaces.ipc.server import DualUDSServer, UDSServer
+from src.interfaces.ipc.protocol import (
+    ConnectionClosedError,
+    make_jsonrpc_request,
+    read_frame,
+    write_frame,
+)
+import tempfile
+
+
+@pytest.mark.asyncio
+async def test_uds_server_idle_clients_closed_on_shutdown():
+    """
+    [ROBUST-07 验证 - 空闲客户端场景]
+    客户端建立连接后处于空闲长连接状态（等待接收或未发送新请求）。
+    当 server.stop() 调用时：
+    1. 服务端应主动关闭存量空闲客户端 StreamWriter 并取消挂起任务；
+    2. 客户端读取时应感知到 EOF / ConnectionClosedError；
+    3. stop() 结束后，没有残留的活跃连接记录与悬挂任务。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sock_path = str(Path(tmpdir) / "idle_test.sock")
+
+        async def handler(method: str, params: dict):
+            return {"echo": method}
+
+        server = UDSServer(
+            name="test_idle",
+            socket_path=sock_path,
+            handler=handler,
+            drain_timeout=2.0,
+        )
+        await server.start()
+
+        # 客户端 1、客户端 2 连接并保持空闲
+        reader1, writer1 = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=sock_path), timeout=2.0
+        )
+        reader2, writer2 = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=sock_path), timeout=2.0
+        )
+
+        # 显式等待服务端接收两个连接（避免事件循环调度时差导致未接受）
+        async def wait_server_accept(count: int, timeout: float = 2.0):
+            deadline = time.monotonic() + timeout
+            while len(server._active_connections) < count:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"Server accepted only {len(server._active_connections)}/{count} connections")
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_server_accept(2), timeout=2.0)
+        assert len(server._active_connections) == 2
+
+        # 触发优雅关闭
+        await asyncio.wait_for(server.stop(), timeout=3.0)
+
+        assert len(server._active_connections) == 0
+        assert len(server._active_handlers) == 0
+
+        # 客户端 1 和 2 此时读取应立刻感知到 EOF / ConnectionClosedError
+        with pytest.raises(ConnectionClosedError):
+            await asyncio.wait_for(read_frame(reader1), timeout=2.0)
+        with pytest.raises(ConnectionClosedError):
+            await asyncio.wait_for(read_frame(reader2), timeout=2.0)
+
+        writer1.close()
+        await asyncio.wait_for(writer1.wait_closed(), timeout=2.0)
+        writer2.close()
+        await asyncio.wait_for(writer2.wait_closed(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_uds_server_in_flight_handlers_drain_safely_before_dependencies_closed():
+    """
+    [ROBUST-07 验证 - 在途请求安全排空场景]
+    请求已进入 handler 执行（模拟访问依赖如 Database / Engine）。
+    在 handler 执行期间发起 server.stop()：
+    1. server.stop() 必须等待在途请求正常完成返回（而不是中断底层资源导致报错）；
+    2. 客户端成功收到正常响应；
+    3. 模拟依赖在 server.stop() 返回后才被关闭，期间 dependency.is_closed 保持 False；
+    4. 确保在 stop() 返回时，无任何 handler 仍在运行。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sock_path = str(Path(tmpdir) / "inflight_test.sock")
+
+        dependency_closed = False
+        in_flight_handler_started = asyncio.Event()
+        can_finish_handler = asyncio.Event()
+        handler_completed = False
+
+        async def handler(method: str, params: dict):
+            nonlocal handler_completed
+            # 标记 handler 已开始
+            in_flight_handler_started.set()
+            # 检查依赖是否仍存活
+            assert not dependency_closed, "Dependency was accessed after being closed!"
+            # 等待 stop() 启动并尝试排空
+            await asyncio.wait_for(can_finish_handler.wait(), timeout=3.0)
+            assert not dependency_closed, "Dependency closed while handler was running!"
+            handler_completed = True
+            return {"status": "success", "processed_during_shutdown": True}
+
+        server = UDSServer(
+            name="test_inflight",
+            socket_path=sock_path,
+            handler=handler,
+            drain_timeout=3.0,
+        )
+        await server.start()
+
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=sock_path), timeout=2.0
+        )
+
+        # 发送请求
+        req = make_jsonrpc_request("memory.process", {"data": "test"}, req_id=999)
+        await asyncio.wait_for(write_frame(writer, req), timeout=2.0)
+
+        # 等待 handler 开始执行
+        await asyncio.wait_for(in_flight_handler_started.wait(), timeout=2.0)
+
+        # 此时在后台发起 stop()
+        stop_task = asyncio.create_task(server.stop())
+
+        # 给 stop_task 一小段时间进入 wait 阶段
+        await asyncio.sleep(0.05)
+        assert not stop_task.done(), "stop() should wait for in-flight handler to drain"
+
+        # 允许 handler 完成
+        can_finish_handler.set()
+
+        # 等待 stop_task 完成
+        await asyncio.wait_for(stop_task, timeout=4.0)
+
+        # stop 成功返回后，模拟上层释放依赖
+        dependency_closed = True
+
+        assert handler_completed is True
+        assert len(server._active_handlers) == 0
+        assert len(server._active_connections) == 0
+
+        # 客户端应成功收到响应
+        resp = await asyncio.wait_for(read_frame(reader), timeout=2.0)
+        assert resp["id"] == 999
+        assert resp["result"]["status"] == "success"
+
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_uds_server_drain_timeout_raises_timeout_error_without_cancelling():
+    """
+    [ROBUST-07 验证 - 有界超时保护与线程安全]
+    如果某个请求 handler 阻塞超时（如 awaiting asyncio.to_thread），
+    server.stop(drain_timeout=0.2) 严禁 cancel handler 并声称成功关闭，
+    而必须抛出 TimeoutError，从而阻止上层应用释放底层依赖。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sock_path = str(Path(tmpdir) / "hung_test.sock")
+
+        handler_started = asyncio.Event()
+        handler_done_or_cancelled = False
+
+        async def hung_handler(method: str, params: dict):
+            nonlocal handler_done_or_cancelled
+            handler_started.set()
+            try:
+                await asyncio.sleep(100.0)  # 模拟长时间任务（如底层线程池）
+                handler_done_or_cancelled = True
+            except asyncio.CancelledError:
+                handler_done_or_cancelled = True
+                raise
+            return {"status": "never"}
+
+        server = UDSServer(
+            name="test_hung",
+            socket_path=sock_path,
+            handler=hung_handler,
+            drain_timeout=0.2,
+        )
+        await server.start()
+
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=sock_path), timeout=2.0
+        )
+        req = make_jsonrpc_request("hung.method", {}, req_id=500)
+        await asyncio.wait_for(write_frame(writer, req), timeout=2.0)
+
+        await asyncio.wait_for(handler_started.wait(), timeout=2.0)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError, match="Drain timeout reached with 1 active handlers still running"):
+            await asyncio.wait_for(server.stop(drain_timeout=0.2), timeout=2.0)
+        elapsed = time.monotonic() - t0
+
+        assert 0.18 <= elapsed <= 1.0, f"Shutdown duration unexpected: {elapsed:.2f}s"
+        # 核心保证：handler 绝对没有被 cancel！
+        assert handler_done_or_cancelled is False, "Active handler was cancelled unexpectedly!"
+        assert len(server._active_handlers) == 1
+
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+
+        # 善后测试中的挂起 handler 以免测试泄漏
+        for h in list(server._active_handlers):
+            h.cancel()
+        await asyncio.gather(*server._active_handlers, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_dual_uds_server_drain_on_shutdown():
+    """
+    [ROBUST-07 验证 - DualUDSServer 统一优雅排空]
+    验证业务 Socket 和管理 Socket 都能由 DualUDSServer 协调执行优雅排空，
+    并且在任一服务排空超时时正确向外传播 TimeoutError。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        biz_sock = str(Path(tmpdir) / "biz.sock")
+        adm_sock = str(Path(tmpdir) / "adm.sock")
+
+        biz_started = asyncio.Event()
+        biz_can_finish = asyncio.Event()
+
+        async def biz_handler(method: str, params: dict):
+            biz_started.set()
+            await asyncio.wait_for(biz_can_finish.wait(), timeout=3.0)
+            return {"role": "business"}
+
+        async def adm_handler(method: str, params: dict):
+            return {"role": "admin"}
+
+        from config.settings import AppConfig, ServerConfig
+        cfg = AppConfig(
+            server=ServerConfig(
+                business_socket=biz_sock,
+                admin_socket=adm_sock,
+                socket_mode=0o600,
+                drain_timeout_seconds=2.0,
+            )
+        )
+
+        dual_server = DualUDSServer(
+            config=cfg,
+            business_handler=biz_handler,
+            admin_handler=adm_handler,
+        )
+        await dual_server.start()
+
+        # 分别连接业务端和管理端
+        r_biz, w_biz = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=biz_sock), timeout=2.0
+        )
+        r_adm, w_adm = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=adm_sock), timeout=2.0
+        )
+
+        # 业务端发送在途请求
+        await asyncio.wait_for(
+            write_frame(w_biz, make_jsonrpc_request("test.biz", {}, req_id=1)),
+            timeout=2.0,
+        )
+        await asyncio.wait_for(biz_started.wait(), timeout=2.0)
+
+        async def wait_dual_server_accept(timeout: float = 2.0):
+            deadline = time.monotonic() + timeout
+            while len(dual_server.business_server._active_connections) < 1 or len(dual_server.admin_server._active_connections) < 1:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("DualUDSServer failed to register active connections in time")
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_dual_server_accept(), timeout=2.0)
+
+        # 管理端处于空闲状态
+        assert len(dual_server.business_server._active_connections) == 1
+        assert len(dual_server.admin_server._active_connections) == 1
+
+        stop_task = asyncio.create_task(dual_server.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        biz_can_finish.set()
+        await asyncio.wait_for(stop_task, timeout=3.0)
+
+        # 业务端收到结果
+        resp_biz = await asyncio.wait_for(read_frame(r_biz), timeout=2.0)
+        assert resp_biz["result"]["role"] == "business"
+
+        # 管理端作为空闲长连接被关闭，读取到 EOF
+        with pytest.raises(ConnectionClosedError):
+            await asyncio.wait_for(read_frame(r_adm), timeout=2.0)
+
+        w_biz.close()
+        await asyncio.wait_for(w_biz.wait_closed(), timeout=2.0)
+        w_adm.close()
+        await asyncio.wait_for(w_adm.wait_closed(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_dual_uds_server_stop_propagates_failure():
+    """
+    [ROBUST-07 验证 - DualUDSServer 失败传播]
+    当 DualUDSServer 中某个 server stop() 抛出异常（如排空超时）时，
+    DualUDSServer.stop() 必须向调用方传播该异常，不得静默吞掉。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        biz_sock = str(Path(tmpdir) / "biz_fail.sock")
+        adm_sock = str(Path(tmpdir) / "adm_fail.sock")
+
+        biz_started = asyncio.Event()
+
+        async def hung_biz_handler(method: str, params: dict):
+            biz_started.set()
+            await asyncio.sleep(100.0)
+            return {"role": "business"}
+
+        async def adm_handler(method: str, params: dict):
+            return {"role": "admin"}
+
+        from config.settings import AppConfig, ServerConfig
+        cfg = AppConfig(
+            server=ServerConfig(
+                business_socket=biz_sock,
+                admin_socket=adm_sock,
+                socket_mode=0o600,
+                drain_timeout_seconds=0.2,
+            )
+        )
+
+        dual_server = DualUDSServer(
+            config=cfg,
+            business_handler=hung_biz_handler,
+            admin_handler=adm_handler,
+        )
+        await dual_server.start()
+
+        r_biz, w_biz = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=biz_sock), timeout=2.0
+        )
+        await asyncio.wait_for(
+            write_frame(w_biz, make_jsonrpc_request("test.biz", {}, req_id=1)),
+            timeout=2.0,
+        )
+        await asyncio.wait_for(biz_started.wait(), timeout=2.0)
+
+        # 停止 DualUDSServer，预期抛出 TimeoutError
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(dual_server.stop(drain_timeout=0.2), timeout=2.0)
+
+        w_biz.close()
+        await asyncio.wait_for(w_biz.wait_closed(), timeout=2.0)
+
+        # 善后挂起任务
+        for h in list(dual_server.business_server._active_handlers):
+            h.cancel()
+        await asyncio.gather(*dual_server.business_server._active_handlers, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_uds_server_active_handlers_no_leak_on_notification_and_exception():
+    """
+    [ROBUST-07 验证 - 回归测试通知与异常场景下 _active_handlers 不泄漏]
+    1. Notification 请求执行完成（无论是成功返回还是抛出异常）后，_active_handlers 必须被及时清空；
+    2. 常规 Request handler 抛出业务异常返回 error response 后，_active_handlers 也必须被及时清空。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sock_path = str(Path(tmpdir) / "handler_cleanup_test.sock")
+
+        async def handler(method: str, params: dict):
+            if method == "notify.success":
+                return "ok"
+            elif method == "notify.error":
+                raise ValueError("Notification error")
+            elif method == "request.error":
+                raise RuntimeError("Request failure")
+            return {"echo": method}
+
+        server = UDSServer(
+            name="test_cleanup",
+            socket_path=sock_path,
+            handler=handler,
+            drain_timeout=2.0,
+        )
+        await server.start()
+
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path=sock_path), timeout=2.0
+        )
+
+        # 1. 发送正常的 Notification 请求 (无 id)
+        notify_req = {"jsonrpc": "2.0", "method": "notify.success", "params": {}}
+        await asyncio.wait_for(write_frame(writer, notify_req), timeout=2.0)
+        # 等待事件循环调度 handler 完成
+        await asyncio.sleep(0.05)
+        assert len(server._active_handlers) == 0, "Notification success leaked in _active_handlers!"
+
+        # 2. 发送抛出异常的 Notification 请求
+        notify_err_req = {"jsonrpc": "2.0", "method": "notify.error", "params": {}}
+        await asyncio.wait_for(write_frame(writer, notify_err_req), timeout=2.0)
+        await asyncio.sleep(0.05)
+        assert len(server._active_handlers) == 0, "Notification error leaked in _active_handlers!"
+
+        # 3. 发送抛出异常的常规 Request
+        req_err = make_jsonrpc_request("request.error", {}, req_id=101)
+        await asyncio.wait_for(write_frame(writer, req_err), timeout=2.0)
+        resp = await asyncio.wait_for(read_frame(reader), timeout=2.0)
+        assert resp["id"] == 101
+        assert "error" in resp
+        assert len(server._active_handlers) == 0, "Request exception leaked in _active_handlers!"
+
+        # 4. 正常关闭 server，验证完全排空且无挂起 handler
+        await asyncio.wait_for(server.stop(), timeout=2.0)
+        assert len(server._active_handlers) == 0
+        assert len(server._active_connections) == 0
+
+        writer.close()
+        await asyncio.wait_for(writer.wait_closed(), timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_dual_uds_server_stop_multiple_exceptions_python310_compatible():
+    """
+    [ROBUST-07 验证 - DualUDSServer 多异常无 ExceptionGroup 且兼容 Python 3.10]
+    当 business_server 与 admin_server 同时抛出异常时，
+    DualUDSServer.stop() 应安全向外传播异常（不使用 Python 3.11+ 的 ExceptionGroup），
+    并且其余异常通过日志记录。
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        biz_sock = str(Path(tmpdir) / "biz_multi_fail.sock")
+        adm_sock = str(Path(tmpdir) / "adm_multi_fail.sock")
+
+        from config.settings import AppConfig, ServerConfig
+        cfg = AppConfig(
+            server=ServerConfig(
+                business_socket=biz_sock,
+                admin_socket=adm_sock,
+                socket_mode=0o600,
+                drain_timeout_seconds=0.2,
+            )
+        )
+
+        from unittest.mock import AsyncMock
+        dual_server = DualUDSServer(
+            config=cfg,
+            business_handler=AsyncMock(),
+            admin_handler=AsyncMock(),
+        )
+
+        # 模拟两个 server stop() 均抛出异常
+        dual_server.business_server.stop = AsyncMock(side_effect=TimeoutError("Biz timeout"))
+        dual_server.admin_server.stop = AsyncMock(side_effect=RuntimeError("Admin failure"))
+
+        with pytest.raises(TimeoutError, match="Biz timeout"):
+            await dual_server.stop()

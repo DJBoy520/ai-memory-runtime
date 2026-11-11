@@ -4,7 +4,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, Callable, Coroutine, Dict, Optional, Set
 
 from config.settings import AppConfig, settings
 from src.core.errors import (
@@ -49,18 +49,24 @@ class UDSServer:
         handler: RPCHandler,
         socket_mode: int = 0o600,
         max_request_bytes: int = 4 * 1024 * 1024,
+        drain_timeout: float = 5.0,
     ):
         self.name = name
         self.socket_path = Path(socket_path)
         self.handler = handler
         self.socket_mode = socket_mode
         self.max_request_bytes = max_request_bytes
+        self.drain_timeout = drain_timeout
         self.server: Optional[asyncio.Server] = None
         self._running = False
+        self._active_connections: Dict[asyncio.StreamWriter, asyncio.Task] = {}
+        self._active_handlers: Set[asyncio.Future] = set()
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        curr_task = asyncio.current_task()
+        self._active_connections[writer] = curr_task
         try:
             while self._running:
                 try:
@@ -84,6 +90,9 @@ class UDSServer:
                     except Exception:
                         pass
                     continue
+
+                if not self._running:
+                    break
 
                 if not isinstance(req, dict):
                     logger.warning("[%s] Invalid Request: root payload must be an object (got %s)", self.name, type(req).__name__)
@@ -123,11 +132,16 @@ class UDSServer:
                             break
                     continue
 
+                handler_fut = asyncio.ensure_future(self.handler(method, params))
+                self._active_handlers.add(handler_fut)
+                handler_fut.add_done_callback(self._active_handlers.discard)
                 try:
-                    res = await self.handler(method, params)
+                    res = await asyncio.shield(handler_fut)
                     if is_notification:
                         continue
                     resp = make_jsonrpc_response(res, req_id=req_id)
+                except asyncio.CancelledError:
+                    raise
                 except Exception as ex:
                     if is_notification:
                         logger.warning("[%s] Notification handler error executing method '%s': %s", self.name, method, ex)
@@ -147,6 +161,7 @@ class UDSServer:
         except Exception as e:
             logger.exception("[%s] Unexpected socket error: %s", self.name, e)
         finally:
+            self._active_connections.pop(writer, None)
             writer.close()
             try:
                 await writer.wait_closed()
@@ -288,18 +303,79 @@ class UDSServer:
             oct(self.socket_mode),
         )
 
-    async def stop(self) -> None:
+    async def stop(self, drain_timeout: Optional[float] = None) -> None:
         self._running = False
+
+        # 1. 停止接收新的连接请求
         if self.server:
             self.server.close()
-            await self.server.wait_closed()
+            # 注意：不应在此处等待 self.server.wait_closed()，因为在 asyncio 中，
+            # server.wait_closed() 会等待所有已连接的客户端连接彻底断开才返回。
+            # 如果在此处阻塞等待，会导致下面的超时排空与主动关闭客户端逻辑无法执行。
+
+        timeout = drain_timeout if drain_timeout is not None else self.drain_timeout
+
+        # 2. 等待活跃请求 handlers 在超时时间内安全完成
+        drain_error: Optional[Exception] = None
+        if self._active_handlers:
+            handlers_snapshot = list(self._active_handlers)
+            done, pending = await asyncio.wait(handlers_snapshot, timeout=timeout)
+            if pending:
+                logger.error(
+                    "[%s] Drain timeout (%.2fs) reached: %d active handlers still running",
+                    self.name,
+                    timeout,
+                    len(pending),
+                )
+                # 关键安全约束：绝对不能 cancel 活跃 handler 并汇报成功关闭！
+                # handler 可能正在 await asyncio.to_thread，其后台工作线程仍会继续运行。
+                # 必须记录 TimeoutError 并向上抛出，阻止上层 application 关闭依赖（如 session_store / engine）。
+                drain_error = TimeoutError(
+                    f"[{self.name}] Drain timeout reached with {len(pending)} active handlers still running"
+                )
+
+        # 3. 关闭所有已建立的客户端连接
+        if self._active_connections:
+            writers = list(self._active_connections.keys())
+            tasks = [t for t in self._active_connections.values() if t is not None]
+            for w in writers:
+                w.close()
+            for t in tasks:
+                t.cancel()
+
+            # 等待所有连接任务退出与关闭
+            wait_tasks = [w.wait_closed() for w in writers] + tasks
+            if wait_tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*wait_tasks, return_exceptions=True),
+                        timeout=max(1.0, timeout),
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning("[%s] Error/timeout while closing active client connections: %s", self.name, e)
+
+        # 4. 等待 server 监听套接字真正关闭
+        if self.server:
+            try:
+                await asyncio.wait_for(self.server.wait_closed(), timeout=1.0)
+            except Exception:
+                pass
             self.server = None
+
+        self._active_connections.clear()
+        if drain_error is None:
+            self._active_handlers.clear()
+
+        # 5. 清理 socket 文件
         if self.socket_path.exists():
             try:
                 self.socket_path.unlink()
             except OSError:
                 pass
         logger.info("[%s] UDS Server stopped and socket removed", self.name)
+
+        if drain_error is not None:
+            raise drain_error
 
 
 class DualUDSServer:
@@ -323,6 +399,7 @@ class DualUDSServer:
             handler=self.business_handler,
             socket_mode=self.config.server.socket_mode,
             max_request_bytes=self.config.server.max_request_bytes,
+            drain_timeout=getattr(self.config.server, "drain_timeout_seconds", 5.0),
         )
 
         self.admin_server = UDSServer(
@@ -331,6 +408,7 @@ class DualUDSServer:
             handler=self.admin_handler,
             socket_mode=self.config.server.socket_mode,
             max_request_bytes=self.config.server.max_request_bytes,
+            drain_timeout=getattr(self.config.server, "drain_timeout_seconds", 5.0),
         )
 
     async def _default_business_handler(self, method: str, params: Any) -> Any:
@@ -348,10 +426,15 @@ class DualUDSServer:
         await self.admin_server.start()
         logger.info("DualUDSServer started successfully.")
 
-    async def stop(self) -> None:
-        await asyncio.gather(
-            self.business_server.stop(),
-            self.admin_server.stop(),
+    async def stop(self, drain_timeout: Optional[float] = None) -> None:
+        results = await asyncio.gather(
+            self.business_server.stop(drain_timeout=drain_timeout),
+            self.admin_server.stop(drain_timeout=drain_timeout),
             return_exceptions=True,
         )
-        logger.info("DualUDSServer stopped successfully.")
+        logger.info("DualUDSServer stopped.")
+        exceptions = [r for r in results if isinstance(r, Exception)]
+        if exceptions:
+            for exc in exceptions[1:]:
+                logger.error("[%s] Additional error during DualUDSServer stop: %s", self.__class__.__name__, exc, exc_info=exc)
+            raise exceptions[0]
