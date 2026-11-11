@@ -232,7 +232,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_ingest_session",
-        "description": "Ingest complete raw conversation dialogue messages into local WAL SQLite storage for lossless audit and provenance tracking.",
+        "description": "Ingest conversation messages into SQLite. Supply stable message_id values for retry; a session_id is bound to its originating agent and project. Reusing it with a different agent or project is rejected. This tool must be invoked by the client; MCP does not automatically capture conversations.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -338,5 +338,14 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
             raise ValueError("Parameter 'session_id' is required.")
         if "messages" not in args or not isinstance(args["messages"], list):
             raise ValueError("Parameter 'messages' must be a list.")
+        for message in args["messages"]:
+            if not isinstance(message, dict):
+                raise ValueError("Each message must be an object.")
+            if not isinstance(message.get("message_id"), str) or not message["message_id"].strip():
+                raise ValueError("Each message requires a stable message_id for safe retries.")
+            if message.get("role") not in ("user", "assistant", "system"):
+                raise ValueError("Each message requires a valid role.")
+            if not isinstance(message.get("content"), str):
+                raise ValueError("Each message requires string content.")
     else:
         raise ValueError(f"Unknown tool name: {name}")

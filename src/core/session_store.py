@@ -922,7 +922,7 @@ class SessionStore:
             try:
                 # 1. 检查/创建 session 记录
                 cursor.execute(
-                    "SELECT session_id, started_at, ended_at, message_count FROM sessions WHERE session_id = ?",
+                    "SELECT session_id, agent_id, project_id, started_at, ended_at, message_count FROM sessions WHERE session_id = ?",
                     (session_id,),
                 )
                 sess_row = cursor.fetchone()
@@ -944,6 +944,10 @@ class SessionStore:
                         (session_id, agent_id, project_id, earliest_ts, latest_ts),
                     )
                 else:
+                    if sess_row["agent_id"] != agent_id:
+                        raise ValueError("Session ID already belongs to a different agent; use a unique session ID")
+                    if project_id and sess_row["project_id"] and project_id != sess_row["project_id"]:
+                        raise ValueError("Session ID already belongs to a different project; use a unique session ID")
                     # 如果会话已存在，若提供了更新的 project_id 或 agent_id 可同步，也可以拓展 ended_at
                     current_ended_at = sess_row["ended_at"] or 0
                     new_ended_at = max(current_ended_at, latest_ts)

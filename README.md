@@ -162,6 +162,8 @@ AMR 提供开箱即用的跨环境桥接脚本 `scripts/mcp-bridge.sh`（自动�
 8. `memory_record`：旧版兼容写入接口；
 9. `memory_update_status`：旧版兼容状态变更接口。
 
+`memory_ingest_session` 需要客户端主动调用；仅配置 MCP 不会自动触发会话开始或结束事件。每条消息应提供稳定的 `message_id`，重试时保持相同 ID；一个 `session_id` 绑定最初的 Agent 和项目，其他 Agent 或项目须使用不同的会话 ID。归档会话与生成长期记忆是独立步骤；会话入库不代表已自动提炼为可搜索记忆。
+
 ---
 
 ## 运维管理 (Admin CLI)

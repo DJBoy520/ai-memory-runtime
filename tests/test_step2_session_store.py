@@ -58,6 +58,15 @@ def test_ingest_duplicate_ignored(temp_store):
     assert res["ignored"] == 1
     assert res["revision_updated"] == 0
 
+def test_session_identity_collision_does_not_modify_existing_session(temp_store):
+    first = [{"message_id": "m1", "role": "user", "content": "original", "timestamp": 1000}]
+    temp_store.ingest_messages("shared-id", "agent-a", "project-a", first)
+    for agent, project in [("agent-b", "project-a"), ("agent-a", "project-b")]:
+        with pytest.raises(ValueError, match="different"):
+            temp_store.ingest_messages("shared-id", agent, project, [{"message_id": "m1", "role": "user", "content": "overwrite"}])
+    assert temp_store.get_session("shared-id")["project_id"] == "project-a"
+    assert temp_store.get_messages("shared-id")[0]["content"] == "original"
+
 def test_ingest_revision_updated(temp_store):
     messages_v1 = [
         {"message_id": "msg_001", "role": "user", "content": "Use Qdrant", "sequence": 1, "timestamp": 1000}

@@ -197,6 +197,14 @@ def test_tool_args_memory_update_status_invalid(invalid_args):
 def test_tool_args_session_ingest_valid(sess_id, msgs):
     validate_tool_args("memory_ingest_session", {"session_id": sess_id, "messages": msgs})
 
+@pytest.mark.parametrize("message", [None, {}, {"role": "user", "content": "hi"},
+    {"message_id": " ", "role": "user", "content": "hi"},
+    {"message_id": "m", "role": "tool", "content": "hi"},
+    {"message_id": "m", "role": "user", "content": None}])
+def test_tool_args_session_ingest_rejects_invalid_messages(message):
+    with pytest.raises(ValueError):
+        validate_tool_args("memory_ingest_session", {"session_id": "s", "messages": [message]})
+
 def test_tool_args_unknown_tool():
     with pytest.raises(ValueError, match="Unknown tool"):
         validate_tool_args("non_existent_tool", {})
