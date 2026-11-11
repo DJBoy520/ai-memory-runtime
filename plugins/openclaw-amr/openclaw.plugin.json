@@ -31,6 +31,15 @@
         "maxTotalChars",
         "projectId"
       ]
+    },
+    {
+      "id": "amr-persistence",
+      "title": "AMR Offline Persistence & Retry",
+      "order": 30,
+      "properties": [
+        "persistenceDir",
+        "autoReplayOnStartup"
+      ]
     }
   ],
   "configSchema": {
@@ -86,6 +95,15 @@
       "projectId": {
         "type": "string",
         "description": "Optional default project ID to scope memory recall and ingestion"
+      },
+      "persistenceDir": {
+        "type": "string",
+        "description": "Directory for persistent offline session outbox and retries"
+      },
+      "autoReplayOnStartup": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically retry offline pending/failed sessions on process startup"
       }
     }
   }
