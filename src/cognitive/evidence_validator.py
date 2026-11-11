@@ -59,34 +59,34 @@ class EvidenceValidator:
     def token_jaccard_similarity(cls, span: str, text: str) -> float:
         """
         第三层：Token 级 Jaccard 相似度计算
-        计算 span 的 token 集合在 text 中匹配子区间的最大 Jaccard 相似度，
-        或者直接求 span 与 text 匹配片段的交并比。
-        若 span 较短而 text 是大长文本，计算 span tokens 与 text 包含 span 词汇的最佳匹配窗口 Jaccard。
+        计算 span 的 token 集合在 text 中最佳局部匹配窗口的 Jaccard 相似度。
+        遵循数学定义：Jaccard = |Intersection| / |Union|。
+        严格杜绝用 subset recall 替代 Jaccard，避免长文本中离散词汇被误判为有效证据。
         """
         span_tokens = set(cls.tokenize(span))
         if not span_tokens:
             return 1.0
-        
+
         text_tokens = cls.tokenize(text)
         if not text_tokens:
             return 0.0
 
-        # 如果 span 长度小于等于 text 长度，滑动窗口评估最大 Jaccard
         len_span = len(span_tokens)
-        window_size = max(len_span, 1)
         best_jaccard = 0.0
-
-        # 为了避免超大文本滑动窗口性能损耗，在 text_tokens 中只在包含首个/尾个 token 附近滑动
-        # 步长为 1，窗口大小在 [len_span - 2, len_span + 5] 浮动
-        step = 1
         n = len(text_tokens)
-        
-        # 窗口大小列表
-        min_win = max(1, len_span - 2)
-        max_win = min(n, len_span + max(5, int(len_span * 0.2)))
 
-        for w in range(min_win, max_win + 1):
-            for i in range(0, n - w + 1, step):
+        # 候选起始位置：仅在出现 span token 的位置展开滑动窗口，性能与数学精度两全
+        candidate_starts = [i for i, tok in enumerate(text_tokens) if tok in span_tokens]
+        if not candidate_starts:
+            return 0.0
+
+        min_win = max(1, len_span - 3)
+        max_win = min(n, max(len_span + 10, int(len_span * 1.5)))
+
+        for i in candidate_starts:
+            for w in range(min_win, max_win + 1):
+                if i + w > n:
+                    break
                 window_set = set(text_tokens[i : i + w])
                 intersection = span_tokens.intersection(window_set)
                 union = span_tokens.union(window_set)
@@ -98,14 +98,14 @@ class EvidenceValidator:
                 if best_jaccard >= 0.95:
                     return best_jaccard
 
-        # 整体兜底比对（当 text 本身就是一句话时）
+        # 全文真 Jaccard 对比（针对短文本或一句话场景）
         all_text_set = set(text_tokens)
-        intersection = span_tokens.intersection(all_text_set)
-        # 如果 span 里的 token 绝大部分都在 text 中出现，且数量接近
-        if intersection:
-            score = len(intersection) / len(span_tokens)
-            if score > best_jaccard:
-                best_jaccard = score
+        whole_inter = span_tokens.intersection(all_text_set)
+        whole_union = span_tokens.union(all_text_set)
+        if whole_union:
+            whole_score = len(whole_inter) / len(whole_union)
+            if whole_score > best_jaccard:
+                best_jaccard = whole_score
 
         return best_jaccard
 
@@ -157,11 +157,19 @@ class EvidenceValidator:
         if not extracted_spans:
             return False, "INVALID_EVIDENCE: extracted_spans is empty"
 
+        # 检查 evidence_source_ids 中的消息 ID 是否真实存在于当前会话消息中
+        if evidence_source_ids:
+            for eid in evidence_source_ids:
+                if eid not in raw_messages:
+                    return False, f"INVALID_EVIDENCE: Source message '{eid}' not found in raw_messages"
+
         # 2. 逐一验证 extracted_spans
         for item in extracted_spans:
             if isinstance(item, dict):
                 msg_id = item.get("message_id")
                 span = item.get("span", "")
+                if msg_id and msg_id not in raw_messages:
+                    return False, f"INVALID_EVIDENCE: Span referenced message_id '{msg_id}' not found in raw_messages"
             elif isinstance(item, str):
                 msg_id = None
                 span = item
@@ -173,7 +181,7 @@ class EvidenceValidator:
 
             # 确定比对的目标原始文本集合
             target_contents = []
-            if msg_id and msg_id in raw_messages:
+            if msg_id:
                 target_contents.append(raw_messages[msg_id])
             elif evidence_source_ids:
                 for eid in evidence_source_ids:
