@@ -176,8 +176,8 @@ class EvidenceValidator:
             else:
                 return False, f"INVALID_EVIDENCE: Invalid span format: {item}"
 
-            if not span or not span.strip():
-                continue
+            if not isinstance(span, str) or not span.strip():
+                return False, "INVALID_EVIDENCE: Evidence span must be non-empty text"
 
             # 确定比对的目标原始文本集合
             target_contents = []

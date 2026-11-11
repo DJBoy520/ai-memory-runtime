@@ -8,6 +8,7 @@ import pytest
 from config.settings import AppConfig
 from src.client import AmrSessionClient
 from src.cognitive.scheduler import CognitiveScheduler
+from src.cognitive.evidence_validator import EvidenceValidator
 from src.core.session_store import SessionStore
 from src.interfaces.ipc.server import UDSServer
 from src.interfaces.mcp.bridge import MCPBridge
@@ -101,6 +102,13 @@ def test_spool_rejects_response_with_wrong_rpc_id():
     response = json.dumps({"jsonrpc": "2.0", "id": "other", "result": {"status": "success", "session_id": "s"}}).encode()
     with pytest.raises(TransientDeliveryError, match="response"):
         UdsTransport()._parse_response(response, "expected")
+
+
+def test_empty_evidence_is_rejected():
+    proposal = {"evidence_source_ids": ["m"], "extracted_spans": [{"message_id": "m", "span": " "}]}
+    valid, reason = EvidenceValidator().validate_proposal(proposal, {"m": "real evidence"})
+    assert not valid
+    assert "INVALID_EVIDENCE" in reason
 
 
 def test_spool_preserves_concurrent_process_batches(tmp_path):
