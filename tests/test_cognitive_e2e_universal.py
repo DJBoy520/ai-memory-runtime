@@ -173,7 +173,7 @@ async def test_mcp_session_ingest_to_scheduler_distillation_e2e(temp_store):
         batch_id=batch_id,
     )
 
-    assert pipeline_res["status"] == "SUCCESS"
+    assert pipeline_res["status"] == "VALIDATION_PARTIAL"
     assert pipeline_res["project_id"] == project_id
     assert pipeline_res["total_candidates"] == 2
     assert pipeline_res["valid_candidates"] == 1
@@ -373,7 +373,7 @@ async def test_evidence_validator_strictly_rejects_hallucinations_and_tampered_s
         mock_llm_result=tampered_llm_result,
     )
 
-    assert res["status"] == "SUCCESS"
+    assert res["status"] == "VALIDATION_PARTIAL"
     assert res["total_candidates"] == 4
     assert res["valid_candidates"] == 1
     assert res["invalid_candidates"] == 3

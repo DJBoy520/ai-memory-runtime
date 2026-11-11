@@ -319,7 +319,7 @@ async def test_cognitive_scheduler_pipeline_dry_run_isolation(temp_db):
     )
 
     # 4. 验证提纯流水线门禁成果
-    assert res["status"] == "SUCCESS"
+    assert res["status"] == "VALIDATION_PARTIAL"
     assert res["total_candidates"] == 2
     assert res["valid_candidates"] == 1
     assert res["invalid_candidates"] == 1

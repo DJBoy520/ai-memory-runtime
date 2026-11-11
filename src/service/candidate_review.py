@@ -16,8 +16,8 @@ def _source(cursor, row, project_id):
         raise ValueError("Invalid candidate provenance")
     if not isinstance(session_ids, list) or len(session_ids) != 1 or not isinstance(session_ids[0], str):
         raise ValueError("Candidate must reference one session")
-    if not isinstance(evidence, list) or not evidence or not all(isinstance(x, str) and x for x in evidence):
-        raise ValueError("Candidate requires source message IDs")
+    if not isinstance(evidence, list) or not all(isinstance(x, str) and x for x in evidence):
+        raise ValueError("Candidate requires valid source message IDs")
     session_id = session_ids[0]
     cursor.execute("SELECT agent_id, project_id FROM sessions WHERE session_id = ?", (session_id,))
     current = cursor.fetchone()
@@ -36,6 +36,23 @@ def _source(cursor, row, project_id):
             if mid in messages and messages[mid] != item["content"]:
                 raise ValueError("Conflicting message provenance")
             messages[mid] = item["content"]
+    if not evidence:
+        # Infer sources only if each span is attributable without ambiguity.
+        if not isinstance(spans, list) or not spans:
+            raise ValueError("Candidate requires attributable evidence")
+        inferred = []
+        for item in spans:
+            if isinstance(item, dict) and isinstance(item.get("message_id"), str) and item["message_id"].strip():
+                inferred.append(item["message_id"])
+            else:
+                span = item if isinstance(item, str) else item.get("span") if isinstance(item, dict) else None
+                if not isinstance(span, str) or not span.strip():
+                    raise ValueError("Candidate requires attributable evidence")
+                matches = [mid for mid, content in messages.items() if span.strip() in content]
+                if len(matches) != 1:
+                    raise ValueError("Candidate evidence source is ambiguous")
+                inferred.append(matches[0])
+        evidence = list(dict.fromkeys(inferred))
     valid, reason = EvidenceValidator().validate_proposal({"evidence_source_ids": evidence, "extracted_spans": spans}, messages)
     if not valid:
         raise ValueError("Candidate evidence no longer validates")

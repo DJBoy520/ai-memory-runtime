@@ -357,6 +357,15 @@ class CognitiveScheduler:
         invalid_candidates = []
 
         for cand in candidates:
+            if not isinstance(cand, dict):
+                logger.info("Proposal rejected: invalid structure")
+                invalid_candidates.append({"rejection_reason": "INVALID_PROPOSAL"})
+                continue
+            content = cand.get("content")
+            if not isinstance(content, str) or not 5 <= len(content.strip()) <= 16000:
+                cand["rejection_reason"] = "INVALID_CONTENT"
+                invalid_candidates.append(cand)
+                continue
             ev_ok, ev_reason = self.evidence_validator.validate_proposal(cand, raw_msg_map)
             if ev_ok:
                 valid_candidates.append(cand)
@@ -445,7 +454,8 @@ class CognitiveScheduler:
             "session_id": session_id,
             "project_id": project_id,
             "agent_id": agent_id,
-            "status": "SUCCESS",
+            "status": "VALIDATION_PARTIAL" if invalid_candidates else "SUCCESS",
+            "error": "Some proposals failed validation" if invalid_candidates else None,
             "total_candidates": len(candidates),
             "valid_candidates": len(valid_candidates),
             "invalid_candidates": len(invalid_candidates),

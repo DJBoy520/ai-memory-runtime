@@ -194,6 +194,9 @@ def test_candidate_approval_is_atomic_and_concurrent(tmp_path, monkeypatch):
         assert results[0]["memory_id"] == results[1]["memory_id"]
         assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM memory_projection_outbox").fetchone()[0] == 1
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("span-only", "b", json.dumps({"session_ids": ["s"]}), "EXTRACT", "COGNITIVE_DISTILL", "Evidence for this approved fact", "[]", json.dumps([{"message_id": "m", "span": "Evidence for this approved fact"}]), "PROPOSED", 1))
+        conn.commit()
+        assert approve_candidate(store, "span-only", "p", "reviewer")["status"] == "APPLIED"
     finally:
         store.close()
 
@@ -203,6 +206,21 @@ def test_empty_evidence_is_rejected():
     valid, reason = EvidenceValidator().validate_proposal(proposal, {"m": "real evidence"})
     assert not valid
     assert "INVALID_EVIDENCE" in reason
+
+
+@pytest.mark.asyncio
+async def test_empty_candidate_content_is_not_persisted(tmp_path):
+    cfg = AppConfig()
+    cfg.storage.sqlite_path = str(tmp_path / "empty-candidate.db")
+    store = SessionStore(cfg)
+    try:
+        store.ingest_messages("s", "a", "p", [{"message_id": "m", "role": "user", "content": "real evidence"}])
+        proposal = {"candidates": [{"operation": "EXTRACT", "content": "", "evidence_source_ids": ["m"], "extracted_spans": [{"message_id": "m", "span": "real evidence"}]}], "message_disposition": [{"message_id": "m", "disposition": "EXTRACTED"}]}
+        result = await CognitiveScheduler(session_store=store).run_pipeline_for_session("s", mock_llm_result=proposal)
+        assert result["written_candidates"] == 0
+        assert store.get_connection().execute("SELECT count(*) FROM curation_candidates").fetchone()[0] == 0
+    finally:
+        store.close()
 
 
 def test_spool_preserves_concurrent_process_batches(tmp_path):

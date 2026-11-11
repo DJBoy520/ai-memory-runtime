@@ -137,6 +137,8 @@ class PromptManager:
 ---
 
 请分析输入窗口中的增量会话 raw_messages，提取真正值得长期记住的事实，输出严格的 JSON 格式（符合 JSON Schema）。
+【JSON Schema】
+{json.dumps(DISTILLATION_JSON_SCHEMA, ensure_ascii=False)}
 必须做到：
 1. 每一条 candidate 中的 extracted_spans 必须在 raw_messages 原文中真实存在（一字不改），否则整条将被判定为幻觉抛弃！
 2. 每一个输入的原始 message_id 必须在 message_disposition 中被声明为 EXTRACTED、DISCARDED 或 UNPROCESSED 之一（守恒不漏）。
