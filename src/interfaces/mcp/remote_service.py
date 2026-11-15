@@ -13,9 +13,9 @@ import json
 import os
 import stat
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from .remote_auth import TokenAuthenticator
+from .remote_auth import MIN_TOKEN_LENGTH, TokenAuthenticator
 
 __all__ = ["TokenAuthenticator", "RemoteServiceConfig", "load_config"]
 
@@ -96,20 +96,6 @@ def _read_json_object(path: str, field: str) -> Dict[str, Any]:
     return data
 
 
-def _valid_token(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    if value != value.strip():
-        return False
-    return not any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
-
-
-def _valid_agent_id(value: Any) -> bool:
-    if not isinstance(value, str) or not value or value != value.strip():
-        return False
-    return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
-
-
 def _validate_bind_host(value: Any) -> str:
     """Validate an explicit listen host (IPv4, IPv6, or host name).
 
@@ -148,42 +134,6 @@ def _validate_allowed_origins(value: Any) -> List[str]:
             raise _fail("'allowed_origins' must contain non-empty strings")
         origins.append(origin)
     return origins
-
-
-def _validate_credentials(raw: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Validate the ``token -> {agent_id, tools}`` credential table."""
-    if not raw:
-        raise _fail("credentials file must contain at least one token entry")
-
-    validated: Dict[str, Dict[str, Any]] = {}
-    for token, entry in raw.items():
-        if not _valid_token(token):
-            # Never echo the token itself.
-            raise _fail("credentials file contains an invalid token")
-        if not isinstance(entry, dict):
-            raise _fail("each credentials entry must be a JSON object")
-        if "agent_id" not in entry or "tools" not in entry:
-            raise _fail("each credentials entry requires 'agent_id' and 'tools'")
-
-        agent_id = entry["agent_id"]
-        if not _valid_agent_id(agent_id):
-            raise _fail("each credentials entry requires a valid 'agent_id'")
-
-        tools = entry["tools"]
-        if not isinstance(tools, list) or not tools:
-            raise _fail("each credentials entry requires a non-empty 'tools' list")
-        normalized_tools: List[str] = []
-        for tool in tools:
-            if not _valid_agent_id(tool):
-                raise _fail("each credentials entry requires non-empty tool names")
-            normalized_tools.append(tool)
-
-        validated[token] = {
-            "agent_id": agent_id,
-            "tools": normalized_tools,
-        }
-
-    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +250,16 @@ def load_config(path: Any) -> RemoteServiceConfig:
         raise _fail("'credentials_file' must have permissions 0600 or 0400")
 
     raw_credentials = _read_json_object(credentials_file, "credentials_file")
+    if not raw_credentials:
+        raise _fail("credentials file must contain at least one token entry")
+    for token in raw_credentials:
+        # 只做长度策略；令牌字符集/身份/工具列表由 TokenAuthenticator 统一校验，
+        # 避免在这里出现第二套认证实现。
+        if not isinstance(token, str) or len(token) < MIN_TOKEN_LENGTH:
+            raise _fail(
+                "credentials file contains a token shorter than "
+                f"{MIN_TOKEN_LENGTH} characters"
+            )
     authenticator = TokenAuthenticator(raw_credentials)
 
     allowed_hosts_raw = data["allowed_hosts"]

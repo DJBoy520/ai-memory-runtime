@@ -20,7 +20,10 @@
 - 请求令牌只用于中间件鉴权，鉴权后 ``Authorization`` 头被中间件移除；
   本模块不保存令牌、不记录令牌，也不把令牌写入错误响应；
 - 工具调用失败时只返回固定的 MCP 错误文本，不记录也不透露原始异常，
-  避免后端内部信息（标识、路径、凭据片段等）通过错误响应外泄。
+  避免后端内部信息（标识、路径、凭据片段等）通过错误响应外泄；2.x 例外：
+  daemon 的稳定 JSON-RPC 错误码会以 ``structuredContent.amr_error`` 暴露
+  ``code``/``message_class``/``retryable`` 与少量白名单字段，供本地适配器
+  还原错误语义，原始异常文本仍不暴露。
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from src.interfaces.mcp.http_auth import IDENTITY_SCOPE_KEY, BearerAuthMiddlewar
 from src.interfaces.mcp.remote_auth import TokenAuthenticator, TokenIdentity
 from src.interfaces.mcp.remote_backend import TOOL_RPC_METHODS
 from src.interfaces.mcp.remote_gateway import Backend, Gateway
+from src.interfaces.mcp.remote_rpc import DaemonRpcError
 from src.interfaces.mcp.tools import TOOL_DEFINITIONS
 
 __all__ = ["build_app"]
@@ -49,6 +53,22 @@ __all__ = ["build_app"]
 _DEFAULT_PATH = "/mcp"
 _SERVER_NAME = "ai-memory-runtime-remote-mcp"
 _SERVER_VERSION = "1.0.0"
+
+# 2.x 结构化错误信封：daemon 的稳定错误码 -> 公开分类/可重试性/允许的 data
+# 字段。只白名单标量字段；原始异常文本、路径、SQL、令牌一律不进入响应。
+_AMR_ERROR_MAP: dict[int, tuple[str, bool, tuple[str, ...]]] = {
+    -32001: ("AGENT_UNAUTHORIZED", False, ()),
+    -32002: ("VERSION_CONFLICT", False, ("memory_id", "current_version", "expected_version")),
+    -32003: ("MODEL_LOADING", True, ("model_state", "retry_after_ms")),
+    -32004: ("QUEUE_FULL", True, ("active_requests", "max_queue_size")),
+    -32005: ("NOT_FOUND", False, ("memory_id",)),
+    -32006: ("IDEMPOTENCY_CONFLICT", False, ("op", "existing_memory_id")),
+    -32601: ("METHOD_NOT_FOUND", False, ()),
+    -32602: ("INVALID_ARGUMENT", False, ("field",)),
+    -32603: ("INTERNAL", False, ()),
+}
+
+_AMR_ERROR_FALLBACK = ("INTERNAL", False, ())
 
 # 默认仅允许本机回环主机。``:*`` 只放宽端口，不放宽主机名；这样可以
 # 让本地测试/开发使用任意监听端口，同时继续拒绝未知域名。
@@ -241,6 +261,53 @@ def _error_result(message: str) -> CallToolResult:
     return _tool_result(message, is_error=True)
 
 
+def _amr_error_result(error: DaemonRpcError) -> CallToolResult:
+    """把 daemon 稳定错误码转换为 MCP 结构化错误信封（2.x）。
+
+    只暴露稳定 ``code``、``message_class``、``retryable`` 以及每种错误码
+    白名单内的标量字段；原始异常文本、路径、SQL 与令牌不进入响应。适配器
+    依赖这些字段还原 1.x JSON-RPC 错误码，标准客户端可忽略 ``structuredContent``。
+    """
+    raw_code = getattr(error, "code", None)
+    if isinstance(raw_code, bool) or not isinstance(raw_code, int):
+        code = -32603
+    else:
+        code = raw_code
+
+    message_class, retryable, allowed_keys = _AMR_ERROR_MAP.get(
+        code, _AMR_ERROR_FALLBACK
+    )
+
+    payload: dict[str, Any] = {
+        "code": code,
+        "message_class": message_class,
+        "retryable": retryable,
+    }
+    safe_data: dict[str, Any] = {}
+    if allowed_keys and isinstance(getattr(error, "data", None), dict):
+        for key in allowed_keys:
+            value = error.data.get(key)
+            # bool 是 int 的子类：显式排除，避免 True/False 混入版本号等
+            # 整型字段；只放行可安全 JSON 化的 str/int 标量。
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (str, int)):
+                safe_data[key] = value
+    if safe_data:
+        payload["data"] = safe_data
+
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Error: {message_class.replace('_', ' ').lower()}",
+            )
+        ],
+        structuredContent={"amr_error": payload},
+        isError=True,
+    )
+
+
 IdentityReader = Callable[[Server[Any, Any]], TokenIdentity]
 
 
@@ -277,6 +344,9 @@ def _build_server(
         except ValueError:
             # 参数校验失败同样只返回固定文本，不透露原始异常内容。
             return _error_result("Error: invalid tool arguments")
+        except DaemonRpcError as exc:
+            # 2.x：保留 daemon 稳定错误码给本地适配器；只暴露白名单字段。
+            return _amr_error_result(exc)
         except Exception:
             # 后端异常可能包含内部标识、路径或凭据片段：保持 MCP 工具
             # 错误结构（isError + 文本内容），但绝不记录或返回异常原文。

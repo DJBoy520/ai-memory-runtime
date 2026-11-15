@@ -14,11 +14,13 @@
 """
 
 from dataclasses import dataclass
+from hashlib import sha256
 from hmac import compare_digest
 from typing import Any, Dict, Mapping, Tuple
 
 __all__ = [
     "MIN_TOKEN_ENTROPY_BITS",
+    "MIN_TOKEN_LENGTH",
     "RECOMMENDED_TOKEN_LENGTH",
     "TokenAuthenticator",
     "TokenIdentity",
@@ -28,6 +30,11 @@ __all__ = [
 # base64url 编码长度（约 256 位熵）；长度本身不能证明熵，故不在此处强制长度。
 MIN_TOKEN_ENTROPY_BITS = 256
 RECOMMENDED_TOKEN_LENGTH = 43
+
+# 2.x 服务端配置的最低令牌长度。128 位（32 个十六进制字符）是下限；生产
+# 仍应使用 secrets.token_urlsafe(32)（43 字符）。长度不能证明熵，这里只阻止
+# 明显过短的弱凭证进入远程服务配置。
+MIN_TOKEN_LENGTH = 32
 
 
 @dataclass(frozen=True)
@@ -98,9 +105,10 @@ class TokenAuthenticator:
             agent_id = _require_clean_ascii_string(entry.get("agent_id"), "agent_id")
             tools = _normalize_tools(entry.get("tools"))
 
-            identities[token_text.encode("ascii")] = TokenIdentity(
-                agent_id=agent_id, tools=tools
-            )
+            # 预哈希后再比较：compare_digest 对不同长度的输入会快速返回，
+            # 直接比较原始字节会泄露配置令牌的长度。SHA-256 摘要长度固定。
+            digest = sha256(token_text.encode("ascii")).digest()
+            identities[digest] = TokenIdentity(agent_id=agent_id, tools=tools)
 
         self._identities = identities
 
@@ -109,13 +117,13 @@ class TokenAuthenticator:
         if not isinstance(token, str) or not token:
             return None
         try:
-            candidate = token.encode("ascii")
+            candidate = sha256(token.encode("ascii")).digest()
         except UnicodeError:
             return None
 
         matched = None
         # 遍历全部配置项，避免通过提前返回泄露令牌是否匹配的时序信息。
-        for configured_token, identity in self._identities.items():
-            if compare_digest(candidate, configured_token):
+        for configured_digest, identity in self._identities.items():
+            if compare_digest(candidate, configured_digest):
                 matched = identity
         return matched

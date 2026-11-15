@@ -6,15 +6,17 @@ import os
 import pytest
 
 from src.interfaces.mcp import remote_auth
-from src.interfaces.mcp.remote_auth import TokenIdentity
+from src.interfaces.mcp.remote_auth import MIN_TOKEN_LENGTH, TokenIdentity
 from src.interfaces.mcp.remote_service import (
     TokenAuthenticator,
     load_config,
 )
 
 
+TOKEN = "test-only-token-0123456789abcdef0123456789abcdef"
+
 CREDENTIALS_CONTENT = {
-    "test-secret": {
+    TOKEN: {
         "agent_id": "claude_code",
         "tools": ["memory_search"],
     }
@@ -77,7 +79,7 @@ def test_valid_credentials_return_real_token_identity(tmp_path):
     config = load_config(str(config_path))
 
     assert isinstance(config.authenticator, remote_auth.TokenAuthenticator)
-    identity = config.authenticator.authenticate("test-secret")
+    identity = config.authenticator.authenticate(TOKEN)
 
     assert type(identity) is TokenIdentity
     assert identity.agent_id == "claude_code"
@@ -90,11 +92,11 @@ def test_valid_credentials_return_real_token_identity(tmp_path):
 def test_valid_credentials_keep_per_token_tool_permissions(tmp_path):
     """每个令牌的工具权限必须独立，不得互相串用。"""
     content = {
-        "token-claude": {
+        TOKEN + "-claude": {
             "agent_id": "claude_code",
             "tools": ["memory_search", "memory_get"],
         },
-        "token-hermes": {
+        TOKEN + "-hermes": {
             "agent_id": "hermes",
             "tools": ["memory_create"],
         },
@@ -102,8 +104,8 @@ def test_valid_credentials_keep_per_token_tool_permissions(tmp_path):
     config_path = _valid_config_path(tmp_path, content=content)
 
     config = load_config(str(config_path))
-    claude = config.authenticator.authenticate("token-claude")
-    hermes = config.authenticator.authenticate("token-hermes")
+    claude = config.authenticator.authenticate(TOKEN + "-claude")
+    hermes = config.authenticator.authenticate(TOKEN + "-hermes")
 
     assert type(claude) is TokenIdentity
     assert type(hermes) is TokenIdentity
@@ -161,7 +163,7 @@ def test_credentials_file_owner_only_permissions_are_accepted(tmp_path, mode):
 
     config = load_config(str(config_path))
 
-    identity = config.authenticator.authenticate("test-secret")
+    identity = config.authenticator.authenticate(TOKEN)
     assert type(identity) is TokenIdentity
     assert identity.allows_tool("memory_search") is True
 
@@ -314,7 +316,40 @@ def test_credentials_file_must_be_a_valid_json_object(tmp_path, body):
 )
 def test_invalid_credentials_entry_raises_value_error(tmp_path, entry):
     """每条凭证必须包含有效 agent_id 与非空 tools 列表。"""
-    config_path = _valid_config_path(tmp_path, content={"test-secret": entry})
+    config_path = _valid_config_path(tmp_path, content={TOKEN: entry})
+
+    with pytest.raises(ValueError):
+        load_config(str(config_path))
+
+
+def test_short_token_is_rejected(tmp_path):
+    """明显过短的令牌不得进入远程服务配置。"""
+    short = "a" * (MIN_TOKEN_LENGTH - 1)
+    config_path = _valid_config_path(
+        tmp_path,
+        content={short: {"agent_id": "claude_code", "tools": ["memory_search"]}},
+    )
+
+    with pytest.raises(ValueError):
+        load_config(str(config_path))
+
+
+def test_token_at_minimum_length_is_accepted(tmp_path):
+    token = "a" * MIN_TOKEN_LENGTH
+    config_path = _valid_config_path(
+        tmp_path,
+        content={token: {"agent_id": "claude_code", "tools": ["memory_search"]}},
+    )
+
+    loaded = load_config(str(config_path))
+    identity = loaded.authenticator.authenticate(token)
+
+    assert type(identity) is TokenIdentity
+    assert identity.agent_id == "claude_code"
+
+
+def test_empty_credentials_object_is_rejected(tmp_path):
+    config_path = _valid_config_path(tmp_path, content={})
 
     with pytest.raises(ValueError):
         load_config(str(config_path))
@@ -486,7 +521,7 @@ def test_pathlike_config_path_is_accepted(tmp_path):
 
     loaded = load_config(config_path)
 
-    identity = loaded.authenticator.authenticate("test-secret")
+    identity = loaded.authenticator.authenticate(TOKEN)
     assert type(identity) is TokenIdentity
 
 
@@ -526,4 +561,4 @@ def test_token_value_is_not_exposed_in_config(tmp_path):
     loaded = load_config(str(_valid_config_path(tmp_path)))
 
     rendered = repr(loaded) + str(loaded)
-    assert "test-secret" not in rendered
+    assert TOKEN not in rendered
