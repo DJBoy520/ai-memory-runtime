@@ -116,6 +116,18 @@ PY
 可直接复制的模板在 [deploy/clients](../deploy/clients/README.md)。以下命令与
 模板都假设已在客户端信任私有 CA，且令牌只放在环境变量/受限文件中。
 
+**隔离实测（2026-11-16，未触碰生产配置）**：
+
+- Claude Code 2.1.322：隔离 `HOME`，`claude mcp list` 显示
+  `https://localhost:<port>/mcp (HTTP) - ✔ Connected`；私有 CA 用
+  `NODE_EXTRA_CA_CERTS`。
+- Codex 0.167.0：隔离 `CODEX_HOME`，`codex mcp add --url ... --bearer-token-env-var`
+  写入成功，`codex mcp list` 显示 enabled/Bearer token。
+- OpenCode 1.19.5：隔离 `XDG_CONFIG_HOME`，`opencode mcp list` 显示
+  `✓ amr connected`；私有 CA 用 `NODE_EXTRA_CA_CERTS`。
+- ZCode / DSH MCP：`bridge2` 分块/端到端契约测试通过；尚未用真实 ZCode/DSH
+  进程连接真实适配器（需要先部署适配器 socket）。
+
 ### 5.1 Claude Code（HTTP MCP + header）
 
 ```bash
