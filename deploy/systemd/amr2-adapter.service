@@ -1,0 +1,25 @@
+# User unit template for the Ubuntu-side AMR 2.x adapter.
+# Install: mkdir -p ~/.config/systemd/user && cp this file there,
+#          adjust paths, then: systemctl --user daemon-reload && enable --now amr2-adapter
+[Unit]
+Description=AMR 2.x local UDS adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONPATH=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStartPre=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python -m src.interfaces.adapter.main --check --config %h/.config/amr/amr2-adapter.json
+ExecStart=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python -m src.interfaces.adapter.main --config %h/.config/amr/amr2-adapter.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t %h/.local/share/amr-spool
+
+[Install]
+WantedBy=default.target

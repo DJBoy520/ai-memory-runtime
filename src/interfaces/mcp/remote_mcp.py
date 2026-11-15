@@ -5,8 +5,9 @@
 本模块不提供 ``uvicorn``/``hypercorn`` 启动入口。
 
 安全不变量：
-- 整个 Starlette 应用由 :class:`BearerAuthMiddleware` 包裹，默认保护所有
-  HTTP 路径；缺失、重复、非法或未知 Bearer 凭据在进入 MCP 前即被拒绝；
+- MCP 端点由 :class:`BearerAuthMiddleware` 保护；缺失、重复、非法或未知
+  Bearer 凭据在进入 MCP 前即被拒绝；``/healthz`` 是唯一无认证的存活探针，
+  只返回固定状态，不触达后端；
 - 每个 MCP 请求都从 ``server.request_context.request.scope`` 的
   :data:`IDENTITY_SCOPE_KEY` 读取认证中间件写入的不可变
   :class:`TokenIdentity`，不复用、不缓存，也不从客户端参数推断身份；
@@ -38,6 +39,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool
 from starlette.applications import Starlette
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
@@ -424,11 +426,22 @@ def build_app(
         async with session_manager.run():
             yield
 
+    async def _healthz(_request: Any) -> JSONResponse:
+        # 只暴露存活状态；不包含版本、路径、依赖或凭证信息，也不触达后端。
+        return JSONResponse({"status": "ok"})
+
     app = Starlette(
-        routes=[Route(path, endpoint=_StreamableHTTPASGIApp(session_manager))],
+        routes=[
+            Route(path, endpoint=_StreamableHTTPASGIApp(session_manager)),
+            Route("/healthz", endpoint=_healthz, methods=["GET"]),
+        ],
         lifespan=lifespan,
     )
-    # 默认 protected_paths=None：所有 HTTP 路径（包括未来新增路由和不存在
-    # 的路径）在进入应用前都必须通过 Bearer 认证。lifespan 直接透传。
-    app.add_middleware(BearerAuthMiddleware, authenticator=authenticator)
+    # 只保护 MCP 端点；/healthz 明确作为无认证存活探针。其余未来路由默认
+    # 不在此路径集合内，新增路由时必须显式决定是否加入保护列表。
+    app.add_middleware(
+        BearerAuthMiddleware,
+        authenticator=authenticator,
+        protected_paths=[path],
+    )
     return app

@@ -1,0 +1,30 @@
+# System unit template for the AMR 2.x HTTPS MCP service.
+# Install on the host/container that runs AMR; adjust User, paths and
+# credentials/certificate locations. The service must run as the same user
+# that owns the AMR business socket (or a user with access to it).
+[Unit]
+Description=AMR 2.x authenticated HTTPS MCP service
+After=network-online.target amr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=amr
+Group=amr
+WorkingDirectory=/opt/amr
+Environment=PYTHONPATH=/opt/amr
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStartPre=/opt/amr/.venv/bin/python -m src.interfaces.mcp.remote_main --check --config /etc/amr/amr2-remote.json
+ExecStart=/opt/amr/.venv/bin/python -m src.interfaces.mcp.remote_main --config /etc/amr/amr2-remote.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/amr
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

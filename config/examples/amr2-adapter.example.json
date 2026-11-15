@@ -1,0 +1,14 @@
+{
+  "remote_url": "https://amr.internal:8443/mcp",
+  "ca_file": "/etc/amr/tls/ca.crt",
+  "credentials_file": "/etc/amr/remote-credentials.json",
+  "connect_timeout": 5.0,
+  "read_timeout": 120.0,
+  "bindings": [
+    { "socket_path": "/run/user/1000/amr2-openclaw.sock", "agent_id": "openclaw" },
+    { "socket_path": "/run/user/1000/amr2-hermes.sock", "agent_id": "hermes" },
+    { "socket_path": "/run/user/1000/amr2-opencode.sock", "agent_id": "opencode" },
+    { "socket_path": "/run/user/1000/amr2-dsh.sock", "agent_id": "dsh" },
+    { "socket_path": "/run/user/1000/amr2-zcode.sock", "agent_id": "zcode" }
+  ]
+}

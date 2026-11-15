@@ -1,0 +1,11 @@
+{
+  "business_socket": "/run/amr/qdrant-bge.sock",
+  "admin_socket": "/run/amr/qdrant-bge-admin.sock",
+  "credentials_file": "/etc/amr/remote-credentials.json",
+  "cert_file": "/etc/amr/tls/server.crt",
+  "key_file": "/etc/amr/tls/server.key",
+  "allowed_hosts": ["amr.internal", "amr.internal:8443"],
+  "allowed_origins": ["https://amr.internal"],
+  "bind_host": "0.0.0.0",
+  "bind_port": 8443
+}
