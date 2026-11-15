@@ -201,6 +201,12 @@ export class SessionPersistenceManager {
     this.ingestDeadlineMs = typeof options.ingestDeadlineMs === "number" ? options.ingestDeadlineMs : 1500;
     this.autoReplayOnStartup = Boolean(options.autoReplayOnStartup);
     this.maxRetries = typeof options.maxRetries === "number" ? options.maxRetries : Infinity;
+    this.maxRecords = Number.isInteger(options.maxRecords) && options.maxRecords > 0
+      ? options.maxRecords
+      : 1000;
+    this.maxBytes = Number.isInteger(options.maxBytes) && options.maxBytes > 0
+      ? options.maxBytes
+      : 8 * 1024 * 1024;
     this.logger = options.logger || defaultLogger;
 
     this._sessionMutex = new KeyedMutex();
@@ -219,6 +225,36 @@ export class SessionPersistenceManager {
 
   getStorageDir() {
     return this.storageDir;
+  }
+
+  /**
+   * Throws when the spool would exceed its record/byte cap. We fail closed
+   * instead of silently dropping queued data or reporting a successful enqueue.
+   */
+  _assertCapacity() {
+    let names = [];
+    try {
+      names = fs.readdirSync(this.storageDir);
+    } catch (_) {
+      return;
+    }
+    const jsonFiles = names.filter((name) => name.endsWith(".json") && !name.startsWith("."));
+    if (jsonFiles.length >= this.maxRecords) {
+      throw new Error(
+        `AMR_PERSIST_CAPACITY_EXCEEDED: ${jsonFiles.length} records (max ${this.maxRecords})`
+      );
+    }
+    let bytes = 0;
+    for (const name of jsonFiles) {
+      try {
+        bytes += fs.statSync(path.join(this.storageDir, name)).size;
+      } catch (_) {}
+    }
+    if (bytes >= this.maxBytes) {
+      throw new Error(
+        `AMR_PERSIST_CAPACITY_EXCEEDED: ${bytes} bytes (max ${this.maxBytes})`
+      );
+    }
   }
 
   /**
@@ -275,6 +311,9 @@ export class SessionPersistenceManager {
     return this._sessionMutex.runExclusive(sessionId, async () => {
       this._ensureStorageDir();
       const filePath = this.getRecordPath(sessionId);
+      if (!fs.existsSync(filePath)) {
+        this._assertCapacity();
+      }
       let existing = null;
       if (fs.existsSync(filePath)) {
         try {

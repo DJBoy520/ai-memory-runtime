@@ -113,6 +113,9 @@ PY
 
 ## 5. 客户端接入
 
+可直接复制的模板在 [deploy/clients](../deploy/clients/README.md)。以下命令与
+模板都假设已在客户端信任私有 CA，且令牌只放在环境变量/受限文件中。
+
 ### 5.1 Claude Code（HTTP MCP + header）
 
 ```bash

@@ -599,3 +599,31 @@ test("Corrupt session record is backed up instead of silently overwritten", asyn
     fs.rmSync(isolatedDir, { recursive: true, force: true });
   }
 });
+
+
+test("Capacity guard fails explicitly instead of dropping queued records", async () => {
+  const isolatedDir = createIsolatedTempDir("capacity_");
+  const manager = new SessionPersistenceManager({
+    storageDir: isolatedDir,
+    maxRecords: 1,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    await manager.persistSession("cap-1", {
+      session_id: "cap-1",
+      messages: [{ message_id: "m1", role: "user", content: "one", sequence: 1, timestamp: 1 }],
+    });
+    await assert.rejects(
+      () =>
+        manager.persistSession("cap-2", {
+          session_id: "cap-2",
+          messages: [{ message_id: "m2", role: "user", content: "two", sequence: 1, timestamp: 2 }],
+        }),
+      /AMR_PERSIST_CAPACITY_EXCEEDED/
+    );
+    // The first record is retained; nothing was silently dropped.
+    assert.ok(await manager.getRecord("cap-1"));
+  } finally {
+    fs.rmSync(isolatedDir, { recursive: true, force: true });
+  }
+});

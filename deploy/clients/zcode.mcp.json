@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "servers": {
+      "amr": {
+        "command": "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python",
+        "args": ["-m", "src.interfaces.mcp.bridge2", "--agent", "zcode"],
+        "env": {
+          "PYTHONPATH": "/home/dj/WorkSpaces/ai-memory-runtime"
+        }
+      }
+    }
+  }
+}

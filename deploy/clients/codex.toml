@@ -1,0 +1,4 @@
+# ~/.codex/config.toml (excerpt). Export AMR_TOKEN before starting Codex.
+[mcp_servers.amr]
+url = "https://amr.internal:8443/mcp"
+bearer_token_env_var = "AMR_TOKEN"

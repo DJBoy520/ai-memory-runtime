@@ -242,7 +242,18 @@ export const plugin = {
           try {
             persistedRecord = await persistence.persistSession(sessionId, ingestPayload, "pending");
           } catch (persistErr) {
-            logger.warn(`Failed to persist session ${sessionId} offline: ${persistErr?.message || persistErr}`);
+            const message = String(persistErr?.message || persistErr);
+            logger.warn(`Failed to persist session ${sessionId} offline: ${message}`);
+            if (message.includes("AMR_PERSIST_CAPACITY_EXCEEDED")) {
+              // 容量不足必须显式失败，不能把未持久化的归档当作已排队。
+              return {
+                ok: false,
+                sessionId,
+                error: message,
+                persisted: false,
+                capacityExceeded: true,
+              };
+            }
           }
 
           // A record that already failed permanently in this process is kept
