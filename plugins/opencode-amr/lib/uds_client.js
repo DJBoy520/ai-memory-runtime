@@ -1,46 +1,115 @@
 /**
  * lib/uds_client.js
- * Pure Node.js Standard Library UDS Client for AI Memory Runtime (AMR).
+ * Pure Node.js Standard Library UDS Client for AI Memory Runtime (AMR) 2.x
+ * (OpenCode adapter flavour).
  *
  * Red Line Compliance:
- * 1. Zero-VRAM: purely standard library (`node:net`, `node:buffer`, `node:os`).
+ * 1. Zero-VRAM: purely standard library (`node:net`, `node:buffer`).
  * 2. Protocol: 4-byte Big-Endian uint32 length prefix + UTF-8 JSON-RPC 2.0 payload.
  * 3. State Machine: Handles chunks, fragmentation, partial frames, and multiple concatenated frames (sticky packets).
  * 4. Safety: Rejects malformed frames (length 0 or > 4MB: 4 * 1024 * 1024).
  * 5. Hard Deadline: Aborts socket via socket.destroy(new Error("AMR_DEADLINE_EXCEEDED")) to ensure zero ghost callbacks.
- * 6. Fire-and-forget: Supports notify() for session ingestion with 0ms host wait.
+ * 6. Identity: the 2.x adapter binds the agent identity to the socket; callers must not send
+ *    `source_agent`/`agent_id`.
  * 7. Fail-open: Never crashes the host process.
  */
 
 import net from "node:net";
-import os from "node:os";
 import { logger } from "./logger.js";
 
 const MAX_FRAME_SIZE = 4 * 1024 * 1024; // 4MB frame safety ceiling
+const DEFAULT_SOCKET_BASENAME = "amr2-opencode.sock";
 
 /**
- * Resolve UDS path with priority:
- * 1. Explicit config path
- * 2. process.env.AMR_SOCKET_PATH
- * 3. process.env.XDG_RUNTIME_DIR/qdrant-bge.sock
- * 4. /run/user/<uid>/qdrant-bge.sock
- * 5. /tmp/qdrant-bge.sock
+ * AMR 2.x JSON-RPC error codes (DOC-AMR-09 section 3).
+ * 1.x daemon method names and frames are unchanged.
+ */
+export const AMR_ERROR_CODES = Object.freeze({
+  AGENT_UNAUTHORIZED: -32001,
+  VERSION_CONFLICT: -32002,
+  MODEL_LOADING: -32003,
+  QUEUE_FULL: -32004,
+  NOT_FOUND: -32005,
+  IDEMPOTENCY_CONFLICT: -32006,
+  ADAPTER_UNAVAILABLE: -32010,
+  ADAPTER_PROTOCOL_ERROR: -32011,
+  ADAPTER_REMOTE_AUTH_FAILED: -32012,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_ARGUMENT: -32602,
+  INTERNAL: -32603,
+});
+
+/** Backwards/forwards friendly alias. */
+export const ERROR_CODES = AMR_ERROR_CODES;
+
+const TRANSIENT_NETWORK_CODES = new Set([
+  "ETIMEDOUT",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EPIPE",
+  // Missing/unreachable socket is the local-adapter equivalent of "offline".
+  "ENOENT",
+  "ENOTFOUND",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
+/**
+ * True when an error is worth retrying later (adapter unavailable / timeout /
+ * connection failure). Permanent 2.x business errors return false.
+ *
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isTransientError(err) {
+  if (!err) return false;
+  const code = err.code;
+  if (
+    code === AMR_ERROR_CODES.ADAPTER_UNAVAILABLE ||
+    code === AMR_ERROR_CODES.MODEL_LOADING ||
+    code === AMR_ERROR_CODES.QUEUE_FULL
+  ) {
+    return true;
+  }
+  if (typeof code === "string" && TRANSIENT_NETWORK_CODES.has(code)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve UDS path for the 2.x local adapter.
+ *
+ * Priority (DOC-AMR-09 section 2):
+ * 1. `AMR2_SOCKET_PATH` environment override
+ * 2. Explicit `socketPath` config
+ * 3. `AMR_SOCKET_PATH` migration fallback (only while AMR2 is unset)
+ * 4. `$XDG_RUNTIME_DIR/amr2-opencode.sock`
+ * 5. `/run/user/<uid>/amr2-opencode.sock`
+ * 6. `/tmp/amr2-opencode.sock`
+ *
+ * The legacy `qdrant-bge.sock` path is intentionally no longer a default.
  */
 export function resolveSocketPath(configuredPath) {
+  const amr2Env = process.env.AMR2_SOCKET_PATH;
+  if (amr2Env && amr2Env.trim().length > 0) {
+    return amr2Env.trim();
+  }
   if (configuredPath && typeof configuredPath === "string" && configuredPath.trim().length > 0) {
     return configuredPath.trim();
   }
-  if (process.env.AMR_SOCKET_PATH && process.env.AMR_SOCKET_PATH.trim().length > 0) {
-    return process.env.AMR_SOCKET_PATH.trim();
+  const legacyEnv = process.env.AMR_SOCKET_PATH;
+  if (legacyEnv && legacyEnv.trim().length > 0) {
+    return legacyEnv.trim();
   }
   const xdg = process.env.XDG_RUNTIME_DIR;
   if (xdg && xdg.trim().length > 0) {
-    return `${xdg.trim()}/qdrant-bge.sock`;
+    return `${xdg.trim()}/${DEFAULT_SOCKET_BASENAME}`;
   }
-  if (typeof process.getuid === "function") {
-    return `/run/user/${process.getuid()}/qdrant-bge.sock`;
+  if (process.platform === "linux" && typeof process.getuid === "function") {
+    return `/run/user/${process.getuid()}/${DEFAULT_SOCKET_BASENAME}`;
   }
-  return "/tmp/qdrant-bge.sock";
+  return `/tmp/${DEFAULT_SOCKET_BASENAME}`;
 }
 
 /**
@@ -51,6 +120,11 @@ export function resolveSocketPath(configuredPath) {
 export function encodeFrame(obj) {
   const jsonStr = JSON.stringify(obj);
   const payloadBuf = Buffer.from(jsonStr, "utf8");
+  if (payloadBuf.length === 0 || payloadBuf.length > MAX_FRAME_SIZE) {
+    throw new Error(
+      `AMR_FRAME_SIZE_INVALID: payload length ${payloadBuf.length} exceeds bounds (1..${MAX_FRAME_SIZE})`
+    );
+  }
   const headerBuf = Buffer.allocUnsafe(4);
   headerBuf.writeUInt32BE(payloadBuf.length, 0);
   return Buffer.concat([headerBuf, payloadBuf]);
@@ -153,6 +227,9 @@ export class AmrUdsClient {
         }
         if (socket) {
           socket.removeAllListeners();
+          // destroy() 之后仍可能有异步 error；保留一个空监听器，避免
+          // Node 把它升级成未捕获异常并杀掉宿主进程。
+          socket.on("error", () => {});
           if (!socket.destroyed) {
             socket.destroy();
           }
@@ -249,15 +326,39 @@ export class AmrUdsClient {
 
       socket.on("end", () => {
         if (!settled) {
-          finishReject(new Error("AMR_CONNECTION_CLOSED: socket closed prematurely before response"));
+          const closedErr = new Error("AMR_CONNECTION_CLOSED: socket closed prematurely before response");
+          closedErr.code = "ECONNRESET";
+          finishReject(closedErr);
+        }
+      });
+
+      socket.on("close", () => {
+        if (!settled) {
+          const closedErr = new Error("AMR_CONNECTION_CLOSED: socket closed prematurely before response");
+          closedErr.code = "ECONNRESET";
+          finishReject(closedErr);
         }
       });
     });
   }
 
   /**
+   * 2.x control-method health check: `amr.ping` -> `{"status":"ok"}`.
+   * Never touches the backend and fails open at the call site.
+   *
+   * @param {number} [deadlineMs]
+   * @returns {Promise<{status?: string}>}
+   */
+  ping(deadlineMs) {
+    return this.request("amr.ping", {}, deadlineMs);
+  }
+
+  /**
    * Execute Fire-and-forget notification (No response expected, no ID in JSON-RPC).
-   * Perfect for session.ingest.
+   *
+   * NOTE: 2.x session ingestion must use request() with an id so a server
+   * acknowledgement can be distinguished from packet loss (DOC-AMR-09 §4).
+   * notify() is retained only for 1.x-compatible, non-critical calls.
    *
    * @param {string} method
    * @param {object} params
@@ -289,6 +390,7 @@ export class AmrUdsClient {
       timer = setTimeout(() => {
         cleanup();
       }, 1000);
+      timer.unref?.();
 
       socket.on("connect", () => {
         try {
@@ -311,6 +413,8 @@ export class AmrUdsClient {
         logger.debug(`[uds_client] notify socket error: ${err.message}`);
         cleanup();
       });
+
+      socket.once("close", cleanup);
     });
   }
 }

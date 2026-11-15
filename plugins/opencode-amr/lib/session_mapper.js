@@ -2,10 +2,14 @@
  * lib/session_mapper.js
  * Session and Message mapper conforming to AMR session_store.py contract.
  *
+ * AMR 2.x note: the local adapter owns the agent identity (bound to the
+ * socket). The payload must NOT contain `agent_id` or `source_agent`; the
+ * server overrides identity from the authenticated adapter. `agentId` is
+ * accepted for 1.x source compatibility but is deliberately ignored.
+ *
  * Contract:
  * {
  *   "session_id": "string",
- *   "agent_id": "openclaw",
  *   "project_id": "string" | null,
  *   "messages": [
  *     {
@@ -29,17 +33,17 @@ import crypto from "node:crypto";
 export function normalizeRole(role) {
   if (typeof role !== "string") return "user";
   const lower = role.toLowerCase();
-  if (lower.includes("assistant") || lower.includes("bot") || lower.includes("model")) {
+  if (lower.includes("assistant") || lower.includes("bot") || lower.includes("model") || lower === "ai") {
     return "assistant";
   }
-  if (lower.includes("system")) {
+  if (lower.includes("system") || lower === "sys") {
     return "system";
   }
   return "user";
 }
 
 /**
- * Extracts plain text content from various OpenClaw / LLM message formats.
+ * Extracts plain text content from various OpenCode / LLM message formats.
  * @param {any} raw
  * @returns {string}
  */
@@ -59,21 +63,32 @@ export function extractContent(raw) {
       .filter(Boolean)
       .join("\n");
   }
+  if (Array.isArray(raw.parts)) {
+    // OpenCode message parts [{ type: "text", text: "..." }]
+    return raw.parts
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part.text === "string") return part.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
   return String(raw);
 }
 
 /**
- * Maps raw messages and session metadata to AMR session.ingest payload.
+ * Maps raw messages and session metadata to an AMR 2.x session.ingest payload.
  *
  * @param {object} params
  * @param {string} params.sessionId
  * @param {string} [params.projectId]
  * @param {Array<any>} params.messages
- * @param {string} [params.agentId="openclaw"]
+ * @param {string} [params.agentId] Ignored in 2.x (identity is adapter-bound).
  * @returns {object} Formatted session ingest payload conforming to session_store.py
  */
 export function mapSessionToIngest(params) {
-  const { sessionId, projectId, messages, agentId = "openclaw" } = params || {};
+  const { sessionId, projectId, messages } = params || {};
 
   if (!sessionId || typeof sessionId !== "string") {
     throw new Error("AMR_MAPPER_INVALID_SESSION_ID: sessionId is required");
@@ -93,11 +108,18 @@ export function mapSessionToIngest(params) {
     }
 
     const role = normalizeRole(rawMsg.role || rawMsg.senderKind);
+    // Deterministic fallback id keeps spool keys stable across repeated
+    // snapshots when the host message has no explicit id.
+    const fallbackHash = crypto
+      .createHash("sha256")
+      .update(`${sessionId}\u0000${seq}\u0000${role}\u0000${content}`)
+      .digest("hex")
+      .slice(0, 24);
     const msgId =
       rawMsg.message_id ||
       rawMsg.messageId ||
       rawMsg.id ||
-      `msg_${sessionId}_${seq}_${crypto.randomBytes(4).toString("hex")}`;
+      `${sessionId}_${seq}_${fallbackHash}`;
 
     let timestamp = nowSec;
     if (typeof rawMsg.timestamp === "number") {
@@ -117,7 +139,6 @@ export function mapSessionToIngest(params) {
 
   return {
     session_id: String(sessionId),
-    agent_id: agentId,
     project_id: projectId ? String(projectId) : null,
     messages: mappedMessages,
   };

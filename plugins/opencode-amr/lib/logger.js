@@ -1,6 +1,6 @@
 /**
  * lib/logger.js
- * Lightweight rate-limited logger for openclaw-amr.
+ * Lightweight rate-limited logger for opencode-amr.
  * Fail-safe wrapper with prefix, level filtering, and optional host logger delegation.
  */
 
@@ -14,13 +14,13 @@ const LOG_LEVELS = {
 export class AmrLogger {
   /**
    * @param {object} [options]
-   * @param {string} [options.prefix='[openclaw-amr]']
+   * @param {string} [options.prefix='[opencode-amr]']
    * @param {string} [options.level='info']
    * @param {object} [options.hostLogger=null]
    * @param {number} [options.throttleWindowMs=5000]
    */
   constructor(options = {}) {
-    this.prefix = options.prefix || "[openclaw-amr]";
+    this.prefix = options.prefix || "[opencode-amr]";
     this.levelStr = options.level || (process.env.AMR_LOG_LEVEL || "info").toLowerCase();
     this.level = LOG_LEVELS[this.levelStr] || LOG_LEVELS.info;
     this.hostLogger = options.hostLogger || null;
