@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # Ensure project root is in sys.path before importing config
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -178,7 +178,14 @@ class MCPBridge:
                 }
             }
 
-        if method == "notifications/initialized":
+        if method == "ping":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {},
+            }
+
+        if method and method.startswith("notifications/"):
             return None
 
         if method == "tools/list":

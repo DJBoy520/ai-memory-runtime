@@ -4,12 +4,32 @@ Must execute at top-level before any test module is imported.
 """
 
 import atexit
+import importlib.util
 import os
 import re
 import shutil
 import socket
 import tempfile
 from pathlib import Path
+
+# 0. 远程测试依赖门禁（collection 阶段）
+# AMR_REQUIRE_REMOTE=1 表示本次运行必须真正收集/执行远程 MCP 测试。当前
+# 解释器缺少 mcp SDK 时必须显式失败，而不是让 tests/test_remote_*.py 里的
+# importorskip("mcp") 静默 skip。未设置该变量时本门禁完全不生效。
+if (
+    os.environ.get("AMR_REQUIRE_REMOTE") == "1"
+    and importlib.util.find_spec("mcp") is None
+):
+    raise RuntimeError(
+        "AMR_REQUIRE_REMOTE=1 但当前 Python 解释器未安装 mcp SDK；"
+        "远程 MCP 测试将无法运行（importorskip 会静默跳过）。"
+        "请使用隔离 venv 并安装 requirements-remote.txt，例如：\n"
+        "  uv venv --python 3.12 /tmp/amr-remote-venv\n"
+        "  uv pip install --python /tmp/amr-remote-venv/bin/python -r requirements-remote.txt\n"
+        "然后运行：\n"
+        "  AMR_REQUIRE_REMOTE=1 /tmp/amr-remote-venv/bin/python -m pytest "
+        "tests/test_remote_*.py tests/test_http_auth.py -q"
+    )
 
 # 1. 进程级临时目录与运行目录初始化
 TEST_ROOT = tempfile.mkdtemp(prefix="amr-test-")

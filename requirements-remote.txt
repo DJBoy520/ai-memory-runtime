@@ -1,0 +1,20 @@
+# 远程 MCP（tests/test_remote_*.py）的独立可选依赖，不属于生产运行依赖。
+# 生产 venv（.venv）默认不安装 mcp；请勿把这些包装进生产 venv。
+#
+# mcp 必须锁定在 <2：
+#   * mcp 2.0 是破坏性 API，移除了 mcp.client.streamable_http.streamablehttp_client；
+#   * StreamableHTTPSessionManager 的构造签名也发生了变化。
+# 仓库内远程 MCP 代码按 1.x API 编写，升级到 2.x 会导致导入/装配失败。
+#
+# 安装与使用见 docs/superpowers/notes/2026-11-15-remote-test-env.md。
+
+# 运行时依赖
+mcp==1.30.0
+uvicorn>=0.54
+
+# 测试依赖
+pytest>=8
+pytest-asyncio>=0.23
+httpx>=0.28
+cryptography>=42
+pyyaml>=6
