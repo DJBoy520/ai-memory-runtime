@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-amr",
-  "version": "0.1.0",
-  "description": "AMR Zero-Friction Memory Plugin for DeepSeek Harness (DSH)",
+  "version": "2.0.0",
+  "description": "AMR 2.x adapter client (local UDS) plugin for DeepSeek Harness (DSH)",
   "main": "index.js",
   "type": "module",
   "scripts": {

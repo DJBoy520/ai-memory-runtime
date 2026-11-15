@@ -76,7 +76,8 @@ test("mapSessionToIngest converts session turns accurately", () => {
   });
 
   assert.equal(payload.session_id, "dsh-test-session");
-  assert.equal(payload.agent_id, "dsh");
+  assert.equal(payload.agent_id, undefined);
+  assert.equal(payload.source_agent, undefined);
   assert.equal(payload.messages.length, 2);
   assert.equal(payload.messages[0].role, "user");
   assert.equal(payload.messages[0].content, "Hello AI");

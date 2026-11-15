@@ -241,41 +241,79 @@ test("PART 2: Client Configuration & Path Resolution (25 tests)", async (t) => {
   await t.test("P2-035: resolveSocketPath trims whitespace from explicit path", () => {
     assert.equal(resolveSocketPath("   /trimmed.sock   "), "/trimmed.sock");
   });
-  await t.test("P2-036: resolveSocketPath falls back to AMR_SOCKET_PATH env", () => {
-    const orig = process.env.AMR_SOCKET_PATH;
-    process.env.AMR_SOCKET_PATH = "/env/amr.sock";
-    try { assert.equal(resolveSocketPath(null), "/env/amr.sock"); }
-    finally { if (orig !== undefined) process.env.AMR_SOCKET_PATH = orig; else delete process.env.AMR_SOCKET_PATH; }
-  });
-  await t.test("P2-037: resolveSocketPath falls back to XDG_RUNTIME_DIR/qdrant-bge.sock", () => {
+  await t.test("P2-036: resolveSocketPath uses AMR2_SOCKET_PATH override", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
     const origA = process.env.AMR_SOCKET_PATH;
-    const origX = process.env.XDG_RUNTIME_DIR;
-    delete process.env.AMR_SOCKET_PATH;
-    process.env.XDG_RUNTIME_DIR = "/run/user/500";
-    try { assert.equal(resolveSocketPath(null), "/run/user/500/qdrant-bge.sock"); }
+    process.env.AMR2_SOCKET_PATH = "/env/amr2.sock";
+    process.env.AMR_SOCKET_PATH = "/env/legacy.sock";
+    try { assert.equal(resolveSocketPath(null), "/env/amr2.sock"); }
     finally {
-      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA;
-      if (origX !== undefined) process.env.XDG_RUNTIME_DIR = origX;
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA; else delete process.env.AMR_SOCKET_PATH;
     }
   });
-  await t.test("P2-038: resolveSocketPath falls back to /run/user/<uid>/qdrant-bge.sock", () => {
+  await t.test("P2-036b: resolveSocketPath supports AMR_SOCKET_PATH as migration fallback only", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
+    const origA = process.env.AMR_SOCKET_PATH;
+    delete process.env.AMR2_SOCKET_PATH;
+    process.env.AMR_SOCKET_PATH = "/env/amr.sock";
+    try { assert.equal(resolveSocketPath(null), "/env/amr.sock"); }
+    finally {
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA; else delete process.env.AMR_SOCKET_PATH;
+    }
+  });
+  await t.test("P2-037: resolveSocketPath falls back to XDG_RUNTIME_DIR/amr2-dsh.sock", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
     const origA = process.env.AMR_SOCKET_PATH;
     const origX = process.env.XDG_RUNTIME_DIR;
+    delete process.env.AMR2_SOCKET_PATH;
+    delete process.env.AMR_SOCKET_PATH;
+    process.env.XDG_RUNTIME_DIR = "/run/user/500";
+    try { assert.equal(resolveSocketPath(null), "/run/user/500/amr2-dsh.sock"); }
+    finally {
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA; else delete process.env.AMR_SOCKET_PATH;
+      if (origX !== undefined) process.env.XDG_RUNTIME_DIR = origX; else delete process.env.XDG_RUNTIME_DIR;
+    }
+  });
+  await t.test("P2-038: resolveSocketPath falls back to /run/user/<uid>/amr2-dsh.sock", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
+    const origA = process.env.AMR_SOCKET_PATH;
+    const origX = process.env.XDG_RUNTIME_DIR;
+    delete process.env.AMR2_SOCKET_PATH;
     delete process.env.AMR_SOCKET_PATH;
     delete process.env.XDG_RUNTIME_DIR;
     try {
       const uid = process.getuid();
-      assert.equal(resolveSocketPath(null), `/run/user/${uid}/qdrant-bge.sock`);
+      assert.equal(resolveSocketPath(null), `/run/user/${uid}/amr2-dsh.sock`);
     } finally {
-      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA;
-      if (origX !== undefined) process.env.XDG_RUNTIME_DIR = origX;
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (origA !== undefined) process.env.AMR_SOCKET_PATH = origA; else delete process.env.AMR_SOCKET_PATH;
+      if (origX !== undefined) process.env.XDG_RUNTIME_DIR = origX; else delete process.env.XDG_RUNTIME_DIR;
     }
   });
   await t.test("P2-039: resolveSocketPath ignores empty whitespace string and proceeds to env fallbacks", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
     const orig = process.env.AMR_SOCKET_PATH;
+    delete process.env.AMR2_SOCKET_PATH;
     process.env.AMR_SOCKET_PATH = "/env/valid.sock";
     try { assert.equal(resolveSocketPath("   "), "/env/valid.sock"); }
-    finally { if (orig !== undefined) process.env.AMR_SOCKET_PATH = orig; else delete process.env.AMR_SOCKET_PATH; }
+    finally {
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (orig !== undefined) process.env.AMR_SOCKET_PATH = orig; else delete process.env.AMR_SOCKET_PATH;
+    }
+  });
+  await t.test("P2-039b: explicit socketPath beats legacy AMR_SOCKET_PATH when AMR2 is unset", () => {
+    const orig2 = process.env.AMR2_SOCKET_PATH;
+    const orig = process.env.AMR_SOCKET_PATH;
+    delete process.env.AMR2_SOCKET_PATH;
+    process.env.AMR_SOCKET_PATH = "/env/legacy.sock";
+    try { assert.equal(resolveSocketPath("/config/explicit.sock"), "/config/explicit.sock"); }
+    finally {
+      if (orig2 !== undefined) process.env.AMR2_SOCKET_PATH = orig2; else delete process.env.AMR2_SOCKET_PATH;
+      if (orig !== undefined) process.env.AMR_SOCKET_PATH = orig; else delete process.env.AMR_SOCKET_PATH;
+    }
   });
   await t.test("P2-040: Client _requestId starts at 1 and increments per request", () => {
     assert.equal(new AmrUdsClient()._requestId, 1);
@@ -632,7 +670,8 @@ test("PART 6: Session Ingestion Mapping & Validation (30 tests)", async (t) => {
   await t.test("P6-151: mapSessionToIngest includes required contract keys", () => {
     const mapped = mapSessionToIngest({ sessionId: "s_101", agentId: "dsh", projectId: "crypto", messages: [{ role: "user", content: "hello" }] });
     assert.equal(mapped.session_id, "s_101");
-    assert.equal(mapped.agent_id, "dsh");
+    assert.equal(mapped.agent_id, undefined);
+    assert.equal(mapped.source_agent, undefined);
     assert.equal(mapped.project_id, "crypto");
     assert.equal(mapped.messages.length, 1);
   });

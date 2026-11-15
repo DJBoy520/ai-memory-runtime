@@ -2,10 +2,14 @@
  * lib/session_mapper.js
  * Session and Message mapper conforming to AMR session_store.py contract.
  *
+ * AMR 2.x note: the local adapter owns the agent identity (bound to the
+ * socket). The payload must NOT contain `agent_id` or `source_agent`; the
+ * server overrides identity from the authenticated adapter. `agentId` is
+ * accepted for 1.x source compatibility but is deliberately ignored.
+ *
  * Contract:
  * {
  *   "session_id": "string",
- *   "agent_id": "dsh",
  *   "project_id": "string" | null,
  *   "messages": [
  *     {
@@ -80,11 +84,11 @@ export function extractContent(raw) {
  * @param {string} params.sessionId
  * @param {string} [params.projectId]
  * @param {Array<any>} params.messages
- * @param {string} [params.agentId="openclaw"]
+ * @param {string} [params.agentId] Ignored in 2.x (identity is adapter-bound).
  * @returns {object} Formatted session ingest payload conforming to session_store.py
  */
 export function mapSessionToIngest(params) {
-  const { sessionId, projectId, messages, agentId = "dsh" } = params || {};
+  const { sessionId, projectId, messages } = params || {};
 
   if (!sessionId || typeof sessionId !== "string") {
     throw new Error("AMR_MAPPER_INVALID_SESSION_ID: sessionId is required");
@@ -104,11 +108,18 @@ export function mapSessionToIngest(params) {
     }
 
     const role = normalizeRole(rawMsg.role || rawMsg.senderKind);
+    // Deterministic fallback id keeps spool keys stable across repeated
+    // snapshots/turns when the host message has no explicit id.
+    const fallbackHash = crypto
+      .createHash("sha256")
+      .update(`${sessionId}\u0000${seq}\u0000${role}\u0000${content}`)
+      .digest("hex")
+      .slice(0, 12);
     const msgId =
       rawMsg.message_id ||
       rawMsg.messageId ||
       rawMsg.id ||
-      `${sessionId}_${seq}_${crypto.randomBytes(4).toString("hex")}`;
+      `${sessionId}_${seq}_${fallbackHash}`;
 
     let timestamp = nowSec;
     if (typeof rawMsg.timestamp === "number") {
@@ -128,7 +139,6 @@ export function mapSessionToIngest(params) {
 
   return {
     session_id: String(sessionId),
-    agent_id: agentId,
     project_id: projectId ? String(projectId) : null,
     messages: mappedMessages,
   };
