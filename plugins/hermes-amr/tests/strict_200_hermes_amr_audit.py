@@ -2,7 +2,19 @@
 Comprehensive 200 Quality Audit Suite for Hermes AMR Plugin.
 Strict Input-Output Equality Assertions across 8 Dimensions.
 No SQLite access - 100% pure standard library & Mock UDS Socket.
+
+LEGACY 1.x ONLY: this suite asserts the 1.x daemon socket/agent_id contract.
+The 2.x plugin uses the amr2 adapter and is covered by test_amr_plugin.py.
+It is skipped under pytest to avoid false 2.x failures; run it on the
+release/1.x branch for 1.x evidence.
 """
+
+import pytest
+
+pytest.skip(
+    "legacy 1.x-only audit; 2.x Hermes is covered by test_amr_plugin.py",
+    allow_module_level=True,
+)
 
 import concurrent.futures
 import json

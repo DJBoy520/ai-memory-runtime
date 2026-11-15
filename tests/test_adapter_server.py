@@ -33,6 +33,7 @@ from src.interfaces.ipc.protocol import (
     read_frame,
     write_frame,
 )
+from src.interfaces.mcp.bridge2 import AdapterBridge
 from src.interfaces.mcp.remote_auth import TokenAuthenticator
 from src.interfaces.mcp.remote_server import RemoteMcpService
 from src.interfaces.mcp.remote_service import RemoteServiceConfig
@@ -737,6 +738,58 @@ def test_second_adapter_cannot_steal_an_active_socket(tmp_path):
             assert response["result"] == SEARCH_RESULT
         finally:
             await second.stop()
+            await harness.stop()
+
+    asyncio.run(run())
+
+
+def test_bridge2_round_trip_through_adapter_to_daemon(tmp_path):
+    async def run():
+        harness = await Harness(tmp_path).start()
+        try:
+            bridge = AdapterBridge(harness.openclaw_socket)
+            response = await bridge.handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "memory_search",
+                        "arguments": {
+                            "query": "bridge2 e2e",
+                            "agent_id": "forged",
+                            "source_agent": "forged",
+                        },
+                    },
+                }
+            )
+            assert response["result"]["isError"] is False
+            assert json.loads(response["result"]["content"][0]["text"]) == SEARCH_RESULT
+            request = harness.daemon.requests[-1]
+            assert request["method"] == "memory.search"
+            assert request["params"]["agent_id"] == AGENT_A
+            assert request["params"]["source_agent"] == AGENT_A
+            assert request["params"]["agent_id"] != "forged"
+
+            error = await bridge.handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "memory_update",
+                        "arguments": {
+                            "memory_id": "mem-1",
+                            "content": "new content",
+                            "expected_version": 4,
+                            "change_reason": "x",
+                        },
+                    },
+                }
+            )
+            assert error["result"]["isError"] is True
+            assert "[-32002]" in error["result"]["content"][0]["text"]
+        finally:
             await harness.stop()
 
     asyncio.run(run())
