@@ -92,19 +92,37 @@ daemon 方法名、参数、成功响应与 1.x 一致（见 `DOC-AMR-06`）。�
 - 插件版本从 `2.0.0` 起，包名不变。
 - 升级时先启动 2.x 适配器与新 socket，再切换插件配置；保留 1.x socket 作为回退。
 
+### 5.3 仅支持 stdio MCP 的客户端（ZCode、DSH MCP 等）
+
+使用 2.x stdio shim `src/interfaces/mcp/bridge2.py`：
+
+```json
+{
+  "command": "<repo>/.venv/bin/python",
+  "args": ["-m", "src.interfaces.mcp.bridge2", "--agent", "zcode"],
+  "env": { "PYTHONPATH": "<repo>" }
+}
+```
+
+- shim 默认连接 `$XDG_RUNTIME_DIR/amr2-<agent>.sock`，可用
+  `AMR2_SOCKET_PATH` 或 `--socket` 覆盖。
+- 不读取生产 `config.yaml`，不注入 `agent_id`/`source_agent`，不暴露
+  `memory_spool_*`；身份由适配器绑定。
+- 超时默认 120s（`AMR2_BRIDGE_TIMEOUT_SECONDS` 可调）。
+
 ## 6. 各 agent 迁移矩阵
 
-| Agent | 2.x 方式 | 待办 |
+| Agent | 2.x 方式 | 状态 |
 | --- | --- | --- |
-| Claude Code | A（若当前版本支持 HTTP MCP）否则 B + stdio shim | 验证客户端能力 |
-| Codex | A 或 B；来源改为 `codex` | 修 1.x 误设 `claude_code` |
-| ZCode | A 或 B + stdio shim | 验证 |
-| OpenCode | B + 2.x 插件 | 改 request 归档 |
-| OpenClaw | B + 2.x 插件 | 复用现有 spool，确认 2.x 错误码 |
-| Hermes | B + 2.x 插件 | 改 request 归档 + spool |
-| DSH | B + 2.x 插件 | 改 request 归档 + spool |
-| Doubao | B（SSH 转发 socket）或 A | 改技能配置 |
-| Windows/其他 | A 或 SSH → B | 验证证书与主机名 |
+| Claude Code | A（HTTP MCP + header）；私有 CA 用 `NODE_EXTRA_CA_CERTS` | 待配置验证 |
+| Codex | A（`--url` + bearer token env）；来源改为 `codex` | 待配置验证 |
+| ZCode | B + `bridge2` stdio shim | shim 已实现 |
+| OpenCode | 原生插件 2.x（adapter UDS） | 已完成 15 tests |
+| OpenClaw | 原生插件 2.x（adapter UDS + 现有 spool） | 已完成 162 tests |
+| Hermes | 原生插件 2.x（adapter UDS + JSONL spool） | 已完成 23 tests |
+| DSH | 原生插件 2.x + `bridge2`（工具调用） | 插件 262 tests；shim 已实现 |
+| Doubao | B（SSH 转发 socket）或 A | 待迁移 |
+| Windows/其他 | A 或 SSH → B | 待验证 |
 
 ## 7. 测试要求
 

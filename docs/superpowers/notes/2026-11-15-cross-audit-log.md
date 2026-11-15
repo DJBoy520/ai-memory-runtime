@@ -86,11 +86,19 @@
 | 13 | `notify` 定时器未 unref / 无 close 清理 | **accepted** | unref + close 监听 |
 | 14 | macOS 误用 `/run/user` | **accepted** | 仅 Linux 使用该回退 |
 
-## 待审计
+## Round 6 — OpenCode / OpenClaw / Hermes 插件 2.x
 
-- OpenCode / OpenClaw / Hermes 插件 2.x 改造（逐插件复审 + 测试）
-- 标准 MCP 客户端（Claude Code/Codex/ZCode）2.x 配置与 stdio shim
-- 部署物与迁移文档
+| 插件 | 发现与处理 |
+| --- | --- |
+| OpenCode | 超长 query 截断、重复 synthetic 注入检查已修复；`event` 异步异常已有外层 catch（误报）；spool 永久记录保留是设计（误报）；replay 与直发极端竞态保留低风险（服务端按 message_id 去重） |
+| OpenClaw | 结构化 prompt 被误判 noise 已修复；`KeyedMutex` 锁泄漏已修复；损坏记录先备份再重建；`markSuccess/markFailed/markPermanent` 增加 sessionId 类型校验；同 session 并发已有 keyed mutex（误报）；未知错误默认 permanent 是保守策略（避免无限重试，接受） |
+| Hermes | `connect_timeout` 未使用、error/id 校验顺序、`/tmp` 回退、prefetch future 竞态、client 使用未解析 socket 已修复；`AmrProtocolError` 已继承 `AmrRpcError`（误报）；`DEFAULT_SOCKET_PATH` 仅兼容导出（误报）；`call()` fail-open 是 1.x 兼容契约（接受） |
+| bridge2 | `AMR2_AGENT` 路径字符清洗、连接超时、stdio 异常边界、非 Linux 回退已修复；非 dict 请求已有校验（误报）；Windows stdio 非目标平台 |
+
+## Round 7 — 收尾
+
+- 三个插件与 bridge2 的测试：OpenCode 15、OpenClaw 162、Hermes 23、Python 远程/适配器/bridge2 486。
+- 待办：标准 MCP 客户端（Claude Code/Codex/ZCode/Doubao）配置与验证、部署物、迁移演练、最终全量回归。
 
 ## 审计工具
 
