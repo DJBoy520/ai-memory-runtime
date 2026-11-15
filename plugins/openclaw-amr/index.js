@@ -1,17 +1,19 @@
 /**
  * index.js
- * OpenClaw Native AI Memory Runtime (AMR) Plugin.
+ * OpenClaw Native AI Memory Runtime (AMR) 2.x Adapter Plugin.
  *
  * Capabilities:
  * 1. Zero-Friction Prefetch: Intercepts before_prompt_build, queries AMR UDS with hard deadline,
  *    and injects sanitized XML memory block into system context.
  * 2. Reliable Session Ingest: Hooks agent_end to persist session conversations into AMR's SQLite
  *    sessions.db via confirmed UDS session.ingest request with configurable deadline timeout.
+ *    The adapter socket binds the agent identity; no agent_id/source_agent is sent.
  * 3. Fail-Open Architecture: Catches all errors at boundary, zero crashes, zero VRAM overhead.
- *    Clear error recording without unhandled host disruptions. No persistent offline retries promised.
+ *    Startup amr.ping is fire-and-forget. Transient failures stay in the offline spool;
+ *    permanent 2.x failures are retained for manual handling and never retried forever.
  */
 
-import { AmrUdsClient } from "./lib/uds_client.js";
+import { AmrUdsClient, isTransientError, isPermanentError } from "./lib/uds_client.js";
 import { buildMemoryContext } from "./lib/context_builder.js";
 import { mapSessionToIngest } from "./lib/session_mapper.js";
 import { SessionPersistenceManager } from "./lib/session_persistence.js";
@@ -24,9 +26,29 @@ export { SessionPersistenceManager };
  * @param {string} prompt
  * @returns {boolean}
  */
+function extractPromptText(prompt) {
+  if (typeof prompt === "string") return prompt;
+  if (!prompt || typeof prompt !== "object") return "";
+  if (typeof prompt.text === "string") return prompt.text;
+  if (Array.isArray(prompt.parts)) {
+    return prompt.parts
+      .filter((part) => part && part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  if (Array.isArray(prompt)) {
+    return prompt
+      .filter((part) => part && part.type === "text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  return "";
+}
+
 export function isHeartbeatOrNoise(prompt) {
-  if (!prompt || typeof prompt !== "string") return true;
-  const trimmed = prompt.trim();
+  const text = extractPromptText(prompt);
+  if (!text) return true;
+  const trimmed = text.trim();
   if (trimmed.length === 0) return true;
   if (/^HEARTBEAT/i.test(trimmed)) return true;
   if (/^PING/i.test(trimmed)) return true;
@@ -41,8 +63,8 @@ export function isHeartbeatOrNoise(prompt) {
 export const plugin = {
   id: "openclaw-amr",
   name: "AMR Memory",
-  description: "Native AI Memory Runtime (AMR) plugin for OpenClaw with Zero-VRAM and Fail-Open guarantees",
-  version: "1.0.0",
+  description: "Native AI Memory Runtime (AMR) 2.x adapter for OpenClaw with Zero-VRAM and Fail-Open guarantees",
+  version: "2.0.0",
 
   register(api) {
     if (!api) {
@@ -98,12 +120,30 @@ export const plugin = {
             logger.info(`Startup replay completed: ${replayRes.succeeded}/${replayRes.replayed} sessions sent to AMR`);
           }
         } catch (err) {
-          logger.debug(`Startup replay skipped or failed: ${err.message}`);
+          logger.debug(`Startup replay skipped or failed: ${err?.message || err}`);
         }
       });
     }
 
-    logger.info(`Initialized openclaw-amr plugin. Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms, IngestDeadline: ${ingestDeadlineMs}ms, PersistenceDir: ${persistence.getStorageDir()}`);
+    // 2.x control-method health check (DOC-AMR-09 section 2). Fire-and-forget:
+    // a missing/broken adapter must never block registration or a host hook.
+    setImmediate(() => {
+      try {
+        udsClient.ping(deadlineMs).then((res) => {
+          if (res && res.status === "ok") {
+            logger.debug("amr.ping ok");
+          } else {
+            logger.debug(`amr.ping returned unexpected response: ${JSON.stringify(res)}`);
+          }
+        }).catch((err) => {
+          logger.debug(`amr.ping unavailable (fail-open): ${err?.message || err}`);
+        });
+      } catch (err) {
+        logger.debug(`amr.ping dispatch failed (fail-open): ${err?.message || err}`);
+      }
+    });
+
+    logger.info(`Initialized openclaw-amr plugin (AMR 2.x). Socket: ${udsClient.getSocketPath()}, Deadline: ${deadlineMs}ms, IngestDeadline: ${ingestDeadlineMs}ms, PersistenceDir: ${persistence.getStorageDir()}`);
 
     // =========================================================================
     // Hook 1: Input Prefetch & Injection (before_prompt_build)
@@ -136,7 +176,7 @@ export const plugin = {
             searchResult = await udsClient.request("memory.search", searchParams, deadlineMs);
           } catch (udsErr) {
             // Fail-open: log debug/warning, do NOT throw or fail user prompt
-            logger.debug(`AMR prefetch skipped or timed out (${Date.now() - startTime}ms): ${udsErr.message}`);
+            logger.debug(`AMR prefetch skipped or timed out (${Date.now() - startTime}ms): ${udsErr?.message || udsErr}`);
             return;
           }
 
@@ -162,7 +202,7 @@ export const plugin = {
           };
         } catch (fatalErr) {
           // Fail-open guarantee: absolutely never disrupt user interaction
-          logger.throttledError("before_prompt_build_err", `Error in before_prompt_build hook: ${fatalErr.message}`);
+          logger.throttledError("before_prompt_build_err", `Error in before_prompt_build hook: ${fatalErr?.message || fatalErr}`);
         }
       });
 
@@ -185,11 +225,12 @@ export const plugin = {
           }
 
           const projectId = ctx?.activeProjectKeys?.[0] || configuredProjectId || null;
+          // AMR 2.x: identity is bound by the adapter socket, so the ingest
+          // payload must not carry agent_id/source_agent.
           const ingestPayload = mapSessionToIngest({
             sessionId,
             projectId,
             messages,
-            agentId: "openclaw",
           });
 
           if (!ingestPayload.messages || ingestPayload.messages.length === 0) {
@@ -201,7 +242,23 @@ export const plugin = {
           try {
             persistedRecord = await persistence.persistSession(sessionId, ingestPayload, "pending");
           } catch (persistErr) {
-            logger.warn(`Failed to persist session ${sessionId} offline: ${persistErr.message}`);
+            logger.warn(`Failed to persist session ${sessionId} offline: ${persistErr?.message || persistErr}`);
+          }
+
+          // A record that already failed permanently in this process is kept
+          // for manual handling but must not be retried on every turn.
+          if (persistedRecord?.permanent) {
+            logger.warn(
+              `Session ${sessionId} previously failed permanently; retained for manual handling and not retried`
+            );
+            return {
+              ok: false,
+              sessionId,
+              error: persistedRecord.lastError || "Permanent failure retained for manual handling",
+              persisted: true,
+              permanent: true,
+              skipped: true,
+            };
           }
 
           try {
@@ -214,7 +271,7 @@ export const plugin = {
               try {
                 await persistence.markSuccess(sessionId, ingestResult);
               } catch (markErr) {
-                logger.warn(`Failed to mark session ${sessionId} success: ${markErr.message}`);
+                logger.warn(`Failed to mark session ${sessionId} success: ${markErr?.message || markErr}`);
               }
             }
 
@@ -231,12 +288,26 @@ export const plugin = {
             const logMsg = `Failed to save session ${sessionId || "unknown"} to AMR (${elapsedMs}ms): ${errDetail}`;
             logger.error(logMsg);
 
-            // Failure retention: retain record on disk with incremented retry count and error tracking
+            const transient = isTransientError(sendErr);
+            const permanent = isPermanentError(sendErr);
+
+            // Transient failures stay queued for replay; permanent 2.x errors
+            // (-32001/-32002/-32005/-32011/-32012, ...) are retained on disk
+            // for manual handling but never retried automatically.
             if (persistedRecord) {
               try {
-                await persistence.markFailed(sessionId, sendErr);
+                if (transient) {
+                  await persistence.markFailed(sessionId, sendErr);
+                } else {
+                  const retained = await persistence.markPermanent(sessionId, sendErr);
+                  if (retained) {
+                    logger.warn(
+                      `Session ${sessionId} permanently failed (code: ${sendErr?.code ?? "unknown"}); retained for manual handling and will not be retried`
+                    );
+                  }
+                }
               } catch (markErr) {
-                logger.warn(`Failed to update failed status for session ${sessionId}: ${markErr.message}`);
+                logger.warn(`Failed to update failed status for session ${sessionId}: ${markErr?.message || markErr}`);
               }
             }
 
@@ -245,11 +316,13 @@ export const plugin = {
               sessionId,
               error: errDetail,
               persisted: !!persistedRecord,
+              transient,
+              permanent,
             };
           }
         } catch (err) {
           const elapsedMs = Date.now() - startTime;
-          const errDetail = err?.code ? `[code: ${err.code}] ${err.message}` : err?.message || String(err);
+          const errDetail = err?.code ? `[code: ${err.code}] ${err?.message || err}` : err?.message || String(err);
           const logMsg = `Failed to process agent_end for session ${sessionId || "unknown"} (${elapsedMs}ms): ${errDetail}`;
           logger.error(logMsg);
           return {

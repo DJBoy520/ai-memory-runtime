@@ -22,7 +22,12 @@ import os from "node:os";
 import net from "node:net";
 import { plugin } from "../index.js";
 import { AmrUdsClient, encodeFrame, FrameDecoder } from "../lib/uds_client.js";
-import { SessionPersistenceManager, resolveStorageDir, getSafeFileName } from "../lib/session_persistence.js";
+import {
+  KeyedMutex,
+  SessionPersistenceManager,
+  resolveStorageDir,
+  getSafeFileName,
+} from "../lib/session_persistence.js";
 import { mapSessionToIngest } from "../lib/session_mapper.js";
 
 /**
@@ -40,12 +45,23 @@ function createMockUdsServer(socketPath, onFrame) {
     try { fs.unlinkSync(socketPath); } catch (_) {}
   }
   const server = net.createServer((socket) => {
+    // A test may close/unlink its socket while the plugin's non-blocking ping
+    // is still in flight; never let a late RST become an uncaught test error.
+    socket.on("error", () => {});
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       try {
         const frames = decoder.feed(chunk);
         for (const frame of frames) {
           const req = JSON.parse(frame.toString("utf8"));
+          // Answer the plugin's non-blocking startup amr.ping here so spool
+          // assertions only see business requests.
+          if (req.method === "amr.ping") {
+            if (req.id !== undefined && req.id !== null) {
+              socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { status: "ok" } }));
+            }
+            continue;
+          }
           onFrame(req, socket);
         }
       } catch (err) {
@@ -547,4 +563,38 @@ test("Zero Production Touch: resolves only isolated temp socket and isolated dir
   // Verify default client does not connect to live socket during instantiation
   const client = new AmrUdsClient({ socketPath: "/tmp/non_existent_mock.sock" });
   assert.equal(client.getSocketPath(), "/tmp/non_existent_mock.sock");
+});
+
+
+test("KeyedMutex releases finished session locks instead of leaking them", async () => {
+  const mutex = new KeyedMutex();
+  for (let i = 0; i < 5; i++) {
+    await mutex.runExclusive(`sess-${i}`, async () => i);
+  }
+  assert.equal(mutex._mutexes.size, 0);
+});
+
+test("Corrupt session record is backed up instead of silently overwritten", async () => {
+  const isolatedDir = createIsolatedTempDir("corrupt_record_");
+  const manager = new SessionPersistenceManager({ storageDir: isolatedDir });
+  try {
+    const sessionId = "sess_corrupt_01";
+    const recordPath = manager.getRecordPath(sessionId);
+    fs.mkdirSync(isolatedDir, { recursive: true });
+    fs.writeFileSync(recordPath, "{not-json", "utf8");
+
+    const record = await manager.persistSession(sessionId, {
+      session_id: sessionId,
+      messages: [
+        { message_id: "m1", role: "user", content: "recovered", sequence: 1, timestamp: 1 },
+      ],
+    });
+
+    assert.ok(record);
+    assert.equal(record.sessionId, sessionId);
+    const backups = fs.readdirSync(isolatedDir).filter((name) => name.includes(".corrupt-"));
+    assert.equal(backups.length, 1);
+  } finally {
+    fs.rmSync(isolatedDir, { recursive: true, force: true });
+  }
 });

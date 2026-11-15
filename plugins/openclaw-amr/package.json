@@ -1,7 +1,7 @@
 {
   "name": "openclaw-amr",
-  "version": "1.0.0",
-  "description": "Native AI Memory Runtime (AMR) plugin for OpenClaw with Zero-VRAM and Fail-Open guarantees",
+  "version": "2.0.0",
+  "description": "Native AI Memory Runtime (AMR) 2.x adapter for OpenClaw with Zero-VRAM and Fail-Open guarantees",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "openclaw",
     "plugin",
     "amr",
+    "amr-2x",
     "memory",
     "zero-vram"
   ],

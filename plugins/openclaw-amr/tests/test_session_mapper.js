@@ -42,7 +42,8 @@ test("mapSessionToIngest aligns with session_store.py contract and increments se
   const payload = mapSessionToIngest(input);
 
   assert.equal(payload.session_id, "sess_openclaw_1001");
-  assert.equal(payload.agent_id, "openclaw");
+  assert.equal(Object.hasOwn(payload, "agent_id"), false);
+  assert.equal(Object.hasOwn(payload, "source_agent"), false);
   assert.equal(payload.project_id, "project_red");
   assert.equal(payload.messages.length, 3);
 
@@ -64,4 +65,32 @@ test("mapSessionToIngest throws on missing sessionId", () => {
   assert.throws(() => {
     mapSessionToIngest({ messages: [] });
   }, /AMR_MAPPER_INVALID_SESSION_ID/);
+});
+
+test("mapSessionToIngest accepts but ignores agentId (2.x identity is adapter-bound)", () => {
+  const payload = mapSessionToIngest({
+    sessionId: "sess_identity",
+    messages: [{ role: "user", content: "hello" }],
+    agentId: "openclaw",
+  });
+  assert.equal(Object.hasOwn(payload, "agent_id"), false);
+  assert.equal(Object.hasOwn(payload, "source_agent"), false);
+});
+
+test("missing message ids use a stable content hash, not Date.now/random", () => {
+  const input = {
+    sessionId: "sess_hash",
+    messages: [
+      { role: "user", content: "same text" },
+      { role: "user", content: "same text" },
+    ],
+  };
+  const first = mapSessionToIngest(input);
+  const second = mapSessionToIngest(input);
+  assert.deepEqual(
+    first.messages.map((m) => m.message_id),
+    second.messages.map((m) => m.message_id)
+  );
+  assert.notEqual(first.messages[0].message_id, first.messages[1].message_id);
+  assert.match(first.messages[0].message_id, /^msg_sess_hash_1_[0-9a-f]{8}$/);
 });

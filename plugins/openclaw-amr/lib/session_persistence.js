@@ -19,6 +19,8 @@ import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
 import { logger as defaultLogger } from "./logger.js";
+import { isPermanentError } from "./uds_client.js";
+import { stripIdentityFields } from "./session_mapper.js";
 
 /**
  * Standard Async FIFO Mutex for sequential execution.
@@ -26,6 +28,8 @@ import { logger as defaultLogger } from "./logger.js";
 export class Mutex {
   constructor() {
     this._queue = Promise.resolve();
+    this._active = 0;
+    this._waiters = 0;
   }
 
   async runExclusive(fn) {
@@ -35,12 +39,21 @@ export class Mutex {
     });
     const current = this._queue;
     this._queue = current.then(() => next);
+    this._waiters += 1;
     await current;
+    this._waiters -= 1;
+    this._active += 1;
     try {
       return await fn();
     } finally {
+      this._active -= 1;
       release();
     }
+  }
+
+  /** True when no task is running and none is waiting. */
+  get idle() {
+    return this._active === 0 && this._waiters === 0;
   }
 }
 
@@ -61,7 +74,9 @@ export class KeyedMutex {
     try {
       return await mutex.runExclusive(fn);
     } finally {
-      if (this._mutexes.get(key) === mutex && mutex._queue === Promise.resolve()) {
+      // 旧实现比较 `mutex._queue === Promise.resolve()` 恒为 false，
+      // 导致每个 session 的锁永久驻留 Map；改用真实空闲状态。
+      if (this._mutexes.get(key) === mutex && mutex.idle) {
         this._mutexes.delete(key);
       }
     }
@@ -93,7 +108,8 @@ export function resolveStorageDir(configuredDir) {
   if (home) {
     return path.join(home, ".local", "share", "openclaw-amr", "sessions");
   }
-  return path.join(os.tmpdir(), "openclaw-amr-sessions");
+  const uid = typeof process.getuid === "function" ? process.getuid() : "nouser";
+  return path.join(os.tmpdir(), `openclaw-amr-sessions-${uid}`);
 }
 
 /**
@@ -108,6 +124,29 @@ export function getSafeFileName(sessionId) {
   const cleanPrefix = raw.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48);
   const hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
   return `${cleanPrefix || "session"}_${hash}.json`;
+}
+
+/**
+ * Computes a stable fingerprint of an ingest payload for permanent-failure
+ * tracking. Timestamps are deliberately excluded so a re-delivered event with
+ * the same message ids/content is recognised as the same record.
+ *
+ * @param {object} payload
+ * @returns {string}
+ */
+export function computePayloadFingerprint(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  const stable = {
+    session_id: payload?.session_id ?? null,
+    project_id: payload?.project_id ?? null,
+    messages: messages.map((m) => ({
+      message_id: m?.message_id ?? null,
+      role: m?.role ?? null,
+      content: m?.content ?? null,
+      sequence: m?.sequence ?? null,
+    })),
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(stable)).digest("hex");
 }
 
 /**
@@ -167,6 +206,10 @@ export class SessionPersistenceManager {
     this._sessionMutex = new KeyedMutex();
     this._replayLock = new Mutex();
     this._isClosed = false;
+    // Payload fingerprints that failed permanently during this process
+    // lifetime. On-disk `permanent` records are still skipped by replay; this
+    // set additionally suppresses repeat agent_end attempts within the process.
+    this._permanentPayloadHashes = new Set();
 
     this._ensureStorageDir();
   }
@@ -224,20 +267,52 @@ export class SessionPersistenceManager {
         try {
           const raw = fs.readFileSync(filePath, "utf8");
           existing = JSON.parse(raw);
-        } catch (_) {}
+        } catch (parseErr) {
+          // 不能把损坏记录静默当成“不存在”再覆盖，否则会丢失
+          // retryCount/permanent 等审计状态。先备份，再重建。
+          const backup = `${filePath}.corrupt-${Date.now()}`;
+          try {
+            fs.renameSync(filePath, backup);
+            this.logger.warn(
+              `Corrupt session record for ${sessionId} moved to ${backup}: ${parseErr?.message || parseErr}`
+            );
+          } catch (backupErr) {
+            this.logger.warn(
+              `Corrupt session record for ${sessionId} could not be backed up: ${backupErr?.message || backupErr}`
+            );
+          }
+          existing = null;
+        }
       }
 
       const now = Date.now();
+      const payloadHash = computePayloadFingerprint(payload);
+      const samePayload = existing?.payloadHash
+        ? existing.payloadHash === payloadHash
+        : computePayloadFingerprint(existing?.payload) === payloadHash;
+      // Preserve a permanent marker only inside the process that observed it.
+      // A fresh process gets one fresh attempt after a restart, while startup
+      // replay still skips the on-disk permanent record until this write.
+      const preservePermanent =
+        existing?.permanent === true &&
+        samePayload &&
+        this._permanentPayloadHashes.has(payloadHash);
+
       const record = {
         version: 1,
         sessionId: String(sessionId),
-        status,
+        // Preserve the failed status when a permanent marker is carried
+        // forward, so a skipped repeat attempt cannot look "pending".
+        status: preservePermanent ? (existing?.status || "failed") : status,
         createdAt: existing?.createdAt || now,
         updatedAt: now,
         retryCount: existing?.retryCount || 0,
         lastAttemptAt: existing?.lastAttemptAt || null,
         lastError: existing?.lastError || null,
         lastResult: existing?.lastResult || null,
+        permanent: preservePermanent,
+        errorCode: preservePermanent ? existing?.errorCode ?? null : null,
+        payloadHash,
         payload,
       };
 
@@ -254,7 +329,7 @@ export class SessionPersistenceManager {
    * @returns {Promise<object|null>}
    */
   async markSuccess(sessionId, result = null) {
-    if (!sessionId) return null;
+    if (!sessionId || typeof sessionId !== "string") return null;
     return this._sessionMutex.runExclusive(sessionId, async () => {
       const filePath = this.getRecordPath(sessionId);
       if (!fs.existsSync(filePath)) return null;
@@ -268,12 +343,17 @@ export class SessionPersistenceManager {
 
       const now = Date.now();
       record.status = "success";
+      record.permanent = false;
+      record.errorCode = null;
       record.updatedAt = now;
       record.lastAttemptAt = now;
       record.lastError = null;
       record.lastResult = result || { ok: true };
 
       writeRecordAtomic(filePath, record);
+      this._permanentPayloadHashes.delete(
+        record.payloadHash || computePayloadFingerprint(record.payload)
+      );
       return record;
     });
   }
@@ -287,7 +367,7 @@ export class SessionPersistenceManager {
    * @returns {Promise<object|null>}
    */
   async markFailed(sessionId, error) {
-    if (!sessionId) return null;
+    if (!sessionId || typeof sessionId !== "string") return null;
     return this._sessionMutex.runExclusive(sessionId, async () => {
       const filePath = this.getRecordPath(sessionId);
       if (!fs.existsSync(filePath)) return null;
@@ -306,6 +386,51 @@ export class SessionPersistenceManager {
       record.retryCount = (record.retryCount || 0) + 1;
       const errDetail = error?.code ? `[code: ${error.code}] ${error.message}` : (error?.message || String(error));
       record.lastError = errDetail;
+      record.permanent = false;
+      record.errorCode = error?.code ?? null;
+      this._permanentPayloadHashes.delete(
+        record.payloadHash || computePayloadFingerprint(record.payload)
+      );
+
+      writeRecordAtomic(filePath, record);
+      return record;
+    });
+  }
+
+  /**
+   * Marks a record as permanently failed. The record is retained on disk for
+   * manual handling/audit but is never replayed automatically.
+   *
+   * @param {string} sessionId
+   * @param {Error|string} error
+   * @returns {Promise<object|null>}
+   */
+  async markPermanent(sessionId, error) {
+    if (!sessionId || typeof sessionId !== "string") return null;
+    return this._sessionMutex.runExclusive(sessionId, async () => {
+      const filePath = this.getRecordPath(sessionId);
+      if (!fs.existsSync(filePath)) return null;
+
+      let record = null;
+      try {
+        record = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      } catch (_) {
+        return null;
+      }
+
+      const now = Date.now();
+      record.status = "failed";
+      record.permanent = true;
+      record.updatedAt = now;
+      record.lastAttemptAt = now;
+      record.retryCount = (record.retryCount || 0) + 1;
+      record.errorCode = error?.code ?? null;
+      record.lastError = error?.code
+        ? `[code: ${error.code}] ${error.message}`
+        : (error?.message || String(error));
+      this._permanentPayloadHashes.add(
+        record.payloadHash || computePayloadFingerprint(record.payload)
+      );
 
       writeRecordAtomic(filePath, record);
       return record;
@@ -379,6 +504,7 @@ export class SessionPersistenceManager {
   async replaySession(sessionId, options = {}) {
     const {
       force = false,
+      forcePermanent = false,
       deadlineMs = this.ingestDeadlineMs,
       udsClient = this.udsClient,
     } = options;
@@ -404,6 +530,20 @@ export class SessionPersistenceManager {
         return { ok: false, sessionId, error: "Empty or invalid session payload" };
       }
 
+      // Permanent 2.x failures are retained for manual handling but are never
+      // replayed automatically (DOC-AMR-09 section 3). This prevents an
+      // auth/protocol error from becoming an infinite retry loop.
+      if (record.permanent === true && !forcePermanent) {
+        return {
+          ok: false,
+          sessionId,
+          skipped: true,
+          permanent: true,
+          status: record.status,
+          error: record.lastError || "Permanent failure retained for manual handling",
+        };
+      }
+
       // If already succeeded and force is false, skip re-sending
       if (record.status === "success" && !force) {
         return { ok: true, sessionId, skipped: true, status: "success" };
@@ -413,14 +553,22 @@ export class SessionPersistenceManager {
       record.lastAttemptAt = now;
 
       try {
-        this.logger.debug(`Replaying session ${sessionId} (${record.payload.messages.length} messages, timeout: ${deadlineMs}ms)`);
-        const ingestResult = await udsClient.request("session.ingest", record.payload, deadlineMs);
+        // Legacy 1.x spool records may still contain identity fields. Never
+        // forward them to a 2.x adapter.
+        const outboundPayload = stripIdentityFields(record.payload);
+        this.logger.debug(`Replaying session ${sessionId} (${outboundPayload.messages.length} messages, timeout: ${deadlineMs}ms)`);
+        const ingestResult = await udsClient.request("session.ingest", outboundPayload, deadlineMs);
         record.status = "success";
+        record.permanent = false;
+        record.errorCode = null;
         record.updatedAt = Date.now();
         record.lastError = null;
         record.lastResult = ingestResult;
 
         writeRecordAtomic(filePath, record);
+        this._permanentPayloadHashes.delete(
+          record.payloadHash || computePayloadFingerprint(record.payload)
+        );
         this.logger.info(`Replay succeeded for session ${sessionId}`);
         return {
           ok: true,
@@ -435,14 +583,30 @@ export class SessionPersistenceManager {
         record.retryCount = (record.retryCount || 0) + 1;
         const errDetail = err?.code ? `[code: ${err.code}] ${err.message}` : (err?.message || String(err));
         record.lastError = errDetail;
+        record.errorCode = err?.code ?? null;
+
+        const permanent = isPermanentError(err);
+        if (permanent) {
+          record.permanent = true;
+          this._permanentPayloadHashes.add(
+            record.payloadHash || computePayloadFingerprint(record.payload)
+          );
+        }
 
         // Retain failed record on disk
         writeRecordAtomic(filePath, record);
-        this.logger.warn(`Replay failed for session ${sessionId} (retryCount: ${record.retryCount}): ${errDetail}`);
+        if (permanent) {
+          this.logger.warn(
+            `Replay permanently failed for session ${sessionId} (code: ${record.errorCode ?? "unknown"}); retained for manual handling and will not be retried: ${errDetail}`
+          );
+        } else {
+          this.logger.warn(`Replay failed for session ${sessionId} (retryCount: ${record.retryCount}): ${errDetail}`);
+        }
         return {
           ok: false,
           sessionId,
           replayed: true,
+          permanent,
           error: errDetail,
           status: "failed",
           retryCount: record.retryCount,
@@ -472,7 +636,7 @@ export class SessionPersistenceManager {
     return this._replayLock.runExclusive(async () => {
       this._ensureStorageDir();
       if (!fs.existsSync(this.storageDir)) {
-        return { total: 0, replayed: 0, succeeded: 0, failed: 0, items: [] };
+        return { total: 0, replayed: 0, succeeded: 0, failed: 0, skippedPermanent: 0, items: [] };
       }
 
       let fileNames = [];
@@ -480,7 +644,7 @@ export class SessionPersistenceManager {
         fileNames = fs.readdirSync(this.storageDir);
       } catch (err) {
         this.logger.error(`Failed to read storage directory: ${err.message}`);
-        return { total: 0, replayed: 0, succeeded: 0, failed: 0, items: [] };
+        return { total: 0, replayed: 0, succeeded: 0, failed: 0, skippedPermanent: 0, items: [] };
       }
 
       const jsonFiles = fileNames.filter(
@@ -488,6 +652,7 @@ export class SessionPersistenceManager {
       );
 
       const items = [];
+      let skippedPermanent = 0;
       for (const fileName of jsonFiles) {
         const filePath = path.join(this.storageDir, fileName);
         let record = null;
@@ -499,6 +664,24 @@ export class SessionPersistenceManager {
 
         if (!record || !record.sessionId) continue;
         if (filter && typeof filter === "function" && !filter(record)) continue;
+
+        // Permanent failures stay on disk for manual handling but are never
+        // retried automatically, no matter how many startups occur.
+        if (record.permanent === true) {
+          this._permanentPayloadHashes.add(
+            record.payloadHash || computePayloadFingerprint(record.payload)
+          );
+          skippedPermanent++;
+          items.push({
+            ok: false,
+            sessionId: record.sessionId,
+            skipped: true,
+            permanent: true,
+            status: record.status,
+            error: record.lastError || "Permanent failure retained for manual handling",
+          });
+          continue;
+        }
 
         // By default, skip records that already succeeded
         if (!includeSuccess && record.status === "success") {
@@ -513,14 +696,16 @@ export class SessionPersistenceManager {
         items.push(replayRes);
       }
 
+      const replayed = items.filter((r) => !r.skipped).length;
       const succeeded = items.filter((r) => r.ok && !r.skipped).length;
-      const failed = items.filter((r) => !r.ok).length;
+      const failed = items.filter((r) => !r.ok && !r.skipped).length;
 
       return {
         total: jsonFiles.length,
-        replayed: items.length,
+        replayed,
         succeeded,
         failed,
+        skippedPermanent,
         items,
       };
     });
@@ -538,5 +723,6 @@ export class SessionPersistenceManager {
 
   close() {
     this._isClosed = true;
+    this._permanentPayloadHashes.clear();
   }
 }

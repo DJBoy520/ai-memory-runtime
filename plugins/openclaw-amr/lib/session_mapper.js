@@ -2,10 +2,9 @@
  * lib/session_mapper.js
  * Session and Message mapper conforming to AMR session_store.py contract.
  *
- * Contract:
+ * Contract (AMR 2.x, DOC-AMR-09):
  * {
  *   "session_id": "string",
- *   "agent_id": "openclaw",
  *   "project_id": "string" | null,
  *   "messages": [
  *     {
@@ -17,6 +16,10 @@
  *     }
  *   ]
  * }
+ *
+ * The adapter binds the agent identity to the socket; the payload deliberately
+ * carries no `agent_id` / `source_agent` field. Passing `agentId` is accepted
+ * for backwards compatibility but ignored.
  */
 
 import crypto from "node:crypto";
@@ -69,11 +72,12 @@ export function extractContent(raw) {
  * @param {string} params.sessionId
  * @param {string} [params.projectId]
  * @param {Array<any>} params.messages
- * @param {string} [params.agentId="openclaw"]
+ * @param {string} [params.agentId] Accepted for 1.x compatibility but ignored
  * @returns {object} Formatted session ingest payload conforming to session_store.py
  */
 export function mapSessionToIngest(params) {
-  const { sessionId, projectId, messages, agentId = "openclaw" } = params || {};
+  // `agentId` is intentionally not read: 2.x identity is adapter-bound.
+  const { sessionId, projectId, messages } = params || {};
 
   if (!sessionId || typeof sessionId !== "string") {
     throw new Error("AMR_MAPPER_INVALID_SESSION_ID: sessionId is required");
@@ -95,9 +99,9 @@ export function mapSessionToIngest(params) {
     const role = normalizeRole(rawMsg.role || rawMsg.senderKind);
     let msgId = rawMsg.message_id || rawMsg.messageId || rawMsg.id;
     if (!msgId) {
-      // Deterministic message ID incorporating sessionId, monotonic sequence, role, and content digest.
-      // Sequence guarantees distinct IDs even when content is identical (preventing message loss),
-      // while determinism ensures idempotent replay without duplicate inserts.
+      // Deterministic content hash (never Date.now()/random): incorporating
+      // sessionId, monotonic sequence, role and content keeps replay idempotent
+      // while the sequence still distinguishes repeated identical messages.
       const digest = crypto
         .createHash("sha256")
         .update(`${sessionId}:${seq}:${role}:${content}`)
@@ -124,8 +128,21 @@ export function mapSessionToIngest(params) {
 
   return {
     session_id: String(sessionId),
-    agent_id: agentId,
     project_id: projectId ? String(projectId) : null,
     messages: mappedMessages,
   };
+}
+
+/**
+ * Removes legacy/forged identity fields before an ingest payload is sent to a
+ * 2.x adapter. The adapter strips them server-side too, but plugins must not
+ * send them in the first place (DOC-AMR-09 section 2).
+ *
+ * @param {object} payload
+ * @returns {object}
+ */
+export function stripIdentityFields(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const { agent_id, source_agent, ...rest } = payload;
+  return rest;
 }

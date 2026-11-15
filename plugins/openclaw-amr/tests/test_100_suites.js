@@ -22,12 +22,24 @@ function createMockUdsServer(socketPath, handler) {
     try { fs.unlinkSync(socketPath); } catch (_) {}
   }
   const server = net.createServer((socket) => {
+    // A test may close/unlink its socket while the plugin's non-blocking ping
+    // is still in flight; never let a late RST become an uncaught test error.
+    socket.on("error", () => {});
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       try {
         const frames = decoder.feed(chunk);
         for (const frame of frames) {
           const req = JSON.parse(frame.toString("utf8"));
+          // The plugin performs a non-blocking startup amr.ping. Existing test
+          // handlers only care about business methods, so answer the health
+          // check here and do not forward it.
+          if (req.method === "amr.ping") {
+            if (req.id !== undefined && req.id !== null) {
+              socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { status: "ok" } }));
+            }
+            continue;
+          }
           handler(req, socket);
         }
       } catch (err) {
@@ -51,6 +63,7 @@ test("TC-001: 插件清单 openclaw.plugin.json 规范性校验", () => {
   assert.equal(manifest.id, "openclaw-amr");
   assert.ok(manifest.categories.includes("memory"));
   assert.equal(manifest.activation.onStartup, true);
+  assert.equal(manifest.version, "2.0.0");
 });
 
 test("TC-002: 默认配置参数加载与回退验证", () => {
@@ -66,49 +79,100 @@ test("TC-002: 默认配置参数加载与回退验证", () => {
 });
 
 test("TC-003: 自定义 UDS 路径显式加载", () => {
-  const customPath = "/tmp/custom-amr.sock";
-  const resolved = resolveSocketPath(customPath);
-  assert.equal(resolved, customPath);
-});
-
-test("TC-004: 环境变量 AMR_SOCKET_PATH 推断验证", () => {
-  const oldEnv = process.env.AMR_SOCKET_PATH;
-  process.env.AMR_SOCKET_PATH = "/tmp/env-amr.sock";
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
+  delete process.env.AMR2_SOCKET_PATH;
   try {
-    const resolved = resolveSocketPath();
-    assert.equal(resolved, "/tmp/env-amr.sock");
+    const customPath = "/tmp/custom-amr.sock";
+    const resolved = resolveSocketPath(customPath);
+    assert.equal(resolved, customPath);
   } finally {
-    process.env.AMR_SOCKET_PATH = oldEnv || "";
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
   }
 });
 
-test("TC-005: XDG_RUNTIME_DIR 缺省推断验证", () => {
-  const oldEnv = process.env.AMR_SOCKET_PATH;
+test("TC-004: 旧环境变量 AMR_SOCKET_PATH 迁移回退验证", () => {
+  const oldLegacy = process.env.AMR_SOCKET_PATH;
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
+  process.env.AMR_SOCKET_PATH = "/tmp/env-amr.sock";
+  delete process.env.AMR2_SOCKET_PATH;
+  try {
+    assert.equal(resolveSocketPath(), "/tmp/env-amr.sock");
+  } finally {
+    if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
+    else process.env.AMR_SOCKET_PATH = oldLegacy;
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
+  }
+});
+
+test("TC-004b: AMR2_SOCKET_PATH 优先于显式路径与旧变量", () => {
+  const oldLegacy = process.env.AMR_SOCKET_PATH;
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
+  process.env.AMR_SOCKET_PATH = "/tmp/legacy-amr.sock";
+  process.env.AMR2_SOCKET_PATH = "/tmp/amr2-priority.sock";
+  try {
+    assert.equal(resolveSocketPath("/tmp/explicit-amr.sock"), "/tmp/amr2-priority.sock");
+  } finally {
+    if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
+    else process.env.AMR_SOCKET_PATH = oldLegacy;
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
+  }
+});
+
+test("TC-004c: 显式 socketPath 优先于旧 AMR_SOCKET_PATH", () => {
+  const oldLegacy = process.env.AMR_SOCKET_PATH;
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
+  process.env.AMR_SOCKET_PATH = "/tmp/legacy-amr.sock";
+  delete process.env.AMR2_SOCKET_PATH;
+  try {
+    assert.equal(resolveSocketPath("/tmp/explicit-amr.sock"), "/tmp/explicit-amr.sock");
+  } finally {
+    if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
+    else process.env.AMR_SOCKET_PATH = oldLegacy;
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
+  }
+});
+
+test("TC-005: XDG_RUNTIME_DIR 缺省推断为 amr2-openclaw.sock", () => {
+  const oldLegacy = process.env.AMR_SOCKET_PATH;
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
   const oldXdg = process.env.XDG_RUNTIME_DIR;
   delete process.env.AMR_SOCKET_PATH;
+  delete process.env.AMR2_SOCKET_PATH;
   process.env.XDG_RUNTIME_DIR = "/run/user/1000";
   try {
-    const resolved = resolveSocketPath();
-    assert.equal(resolved, "/run/user/1000/qdrant-bge.sock");
+    assert.equal(resolveSocketPath(), "/run/user/1000/amr2-openclaw.sock");
   } finally {
-    process.env.AMR_SOCKET_PATH = oldEnv || "";
-    process.env.XDG_RUNTIME_DIR = oldXdg || "";
+    if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
+    else process.env.AMR_SOCKET_PATH = oldLegacy;
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
+    if (oldXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = oldXdg;
   }
 });
 
 test("TC-006: /tmp 托底推断验证", () => {
-  const oldEnv = process.env.AMR_SOCKET_PATH;
+  const oldLegacy = process.env.AMR_SOCKET_PATH;
+  const oldAmr2 = process.env.AMR2_SOCKET_PATH;
   const oldXdg = process.env.XDG_RUNTIME_DIR;
   const oldGetUid = process.getuid;
   delete process.env.AMR_SOCKET_PATH;
+  delete process.env.AMR2_SOCKET_PATH;
   delete process.env.XDG_RUNTIME_DIR;
   delete process.getuid;
   try {
-    const resolved = resolveSocketPath();
-    assert.equal(resolved, "/tmp/qdrant-bge.sock");
+    assert.equal(resolveSocketPath(), "/tmp/amr2-openclaw.sock");
   } finally {
-    process.env.AMR_SOCKET_PATH = oldEnv || "";
-    process.env.XDG_RUNTIME_DIR = oldXdg || "";
+    if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
+    else process.env.AMR_SOCKET_PATH = oldLegacy;
+    if (oldAmr2 === undefined) delete process.env.AMR2_SOCKET_PATH;
+    else process.env.AMR2_SOCKET_PATH = oldAmr2;
+    if (oldXdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = oldXdg;
     process.getuid = oldGetUid;
   }
 });
@@ -819,9 +883,15 @@ test("TC-066: ctx.sessionKey 替代映射", async () => {
   }
 });
 
-test("TC-067: agentId 规范输出为 openclaw", () => {
-  const payload = mapSessionToIngest({ sessionId: "s1", messages: [{ content: "hi" }] });
-  assert.equal(payload.agent_id, "openclaw");
+test("TC-067: 2.x 输出不含 agent_id，agentId 入参被忽略", () => {
+  const payload = mapSessionToIngest({
+    sessionId: "s1",
+    messages: [{ content: "hi" }],
+    agentId: "openclaw",
+  });
+  assert.equal(Object.hasOwn(payload, "agent_id"), false);
+  assert.equal(Object.hasOwn(payload, "source_agent"), false);
+  assert.equal(payload.agent_id, undefined);
 });
 
 test("TC-068: 单调递增序号验证 (Sequence 1, 2, 3...)", () => {
@@ -941,7 +1011,8 @@ test("TC-080: Ingest 结构与 AMR session_store.py 契约对齐", () => {
     messages: [{ role: "user", content: "hi" }]
   });
   assert.equal(typeof payload.session_id, "string");
-  assert.equal(payload.agent_id, "openclaw");
+  assert.equal(Object.hasOwn(payload, "agent_id"), false);
+  assert.equal(Object.hasOwn(payload, "source_agent"), false);
   assert.equal(payload.project_id, "proj-1");
   assert.ok(Array.isArray(payload.messages));
   const m = payload.messages[0];
@@ -1263,5 +1334,5 @@ test("TC-099: 模型遵从性验证（无 Prompt 破坏）", () => {
 test("TC-100: 插件全生命周期闭环流水线测试通过", () => {
   assert.ok(plugin);
   assert.equal(plugin.id, "openclaw-amr");
-  assert.equal(plugin.version, "1.0.0");
+  assert.equal(plugin.version, "2.0.0");
 });

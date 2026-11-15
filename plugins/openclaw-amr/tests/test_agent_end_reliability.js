@@ -27,12 +27,23 @@ function createMockServer(socketPath, onFrame) {
     try { fs.unlinkSync(socketPath); } catch (_) {}
   }
   const server = net.createServer((socket) => {
+    // A test may close/unlink its socket while the plugin's non-blocking ping
+    // is still in flight; never let a late RST become an uncaught test error.
+    socket.on("error", () => {});
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       try {
         const frames = decoder.feed(chunk);
         for (const frame of frames) {
           const req = JSON.parse(frame.toString("utf8"));
+          // Answer the plugin's non-blocking startup amr.ping here so this
+          // suite keeps asserting only on session.ingest traffic.
+          if (req.method === "amr.ping") {
+            if (req.id !== undefined && req.id !== null) {
+              socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { status: "ok" } }));
+            }
+            continue;
+          }
           onFrame(req, socket);
         }
       } catch (err) {
@@ -116,7 +127,8 @@ test("agent_end: sends confirmed request with numeric ID and resolves on server 
     assert.equal(typeof serverReceived.id, "number", "Must contain a valid JSON-RPC request ID");
     assert.equal(serverReceived.params.session_id, "session-001");
     assert.equal(serverReceived.params.project_id, "proj-alpha");
-    assert.equal(serverReceived.params.agent_id, "openclaw");
+    assert.equal(Object.hasOwn(serverReceived.params, "agent_id"), false);
+    assert.equal(Object.hasOwn(serverReceived.params, "source_agent"), false);
     assert.equal(serverReceived.params.messages.length, 2);
     assert.equal(serverReceived.params.messages[0].sequence, 1);
     assert.equal(serverReceived.params.messages[1].sequence, 2);

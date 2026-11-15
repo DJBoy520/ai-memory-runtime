@@ -15,6 +15,12 @@ test("isHeartbeatOrNoise detects noise queries", () => {
   assert.equal(isHeartbeatOrNoise("PING"), true);
   assert.equal(isHeartbeatOrNoise("ping"), true);
   assert.equal(isHeartbeatOrNoise("How does AMR work?"), false);
+  assert.equal(isHeartbeatOrNoise({ text: "How does AMR work?" }), false);
+  assert.equal(
+    isHeartbeatOrNoise({ parts: [{ type: "text", text: "How does AMR work?" }] }),
+    false
+  );
+  assert.equal(isHeartbeatOrNoise({}), true);
 });
 
 test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
@@ -23,12 +29,20 @@ test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
 
   const receivedRequests = [];
   const server = net.createServer((socket) => {
+    socket.on("error", () => {});
     const decoder = new FrameDecoder();
     socket.on("data", (chunk) => {
       const frames = decoder.feed(chunk);
       for (const f of frames) {
         const req = JSON.parse(f.toString("utf8"));
         receivedRequests.push(req);
+
+        if (req.method === "amr.ping") {
+          if (req.id !== undefined && req.id !== null) {
+            socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { status: "ok" } }));
+          }
+          continue;
+        }
 
         if (req.method === "memory.search") {
           const resp = {
@@ -127,11 +141,14 @@ test("Plugin lifecycle: full flow of prefetch and session ingest", async () => {
     assert.ok(searchCall, "memory.search should be called");
     assert.equal(searchCall.params.query, "What are the rules for plugin development?");
     assert.equal(searchCall.params.project_id, "project-amr");
+    assert.equal(Object.hasOwn(searchCall.params, "agent_id"), false);
+    assert.equal(Object.hasOwn(searchCall.params, "source_agent"), false);
 
     assert.ok(ingestCall, "session.ingest should be called via confirmed request");
     assert.ok(typeof ingestCall.id === "number", "session.ingest should contain numeric request id");
     assert.equal(ingestCall.params.session_id, "test-sess-001");
-    assert.equal(ingestCall.params.agent_id, "openclaw");
+    assert.equal(Object.hasOwn(ingestCall.params, "agent_id"), false);
+    assert.equal(Object.hasOwn(ingestCall.params, "source_agent"), false);
     assert.equal(ingestCall.params.messages.length, 2);
     assert.equal(ingestCall.params.messages[0].sequence, 1);
     assert.equal(ingestCall.params.messages[1].sequence, 2);

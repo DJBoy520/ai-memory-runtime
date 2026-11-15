@@ -9,6 +9,11 @@ import {
   FrameDecoder,
   resolveSocketPath,
   AmrUdsClient,
+  AMR_ERROR_CODES,
+  ERROR_CODES,
+  isTransientError,
+  isPermanentError,
+  MAX_FRAME_SIZE,
 } from "../lib/uds_client.js";
 
 test("Frame encoding produces 4-byte Big-Endian length prefix", () => {
@@ -164,6 +169,59 @@ test("AmrUdsClient fire-and-forget notify sends data without throwing", async ()
     assert.ok(receivedPayload);
     assert.equal(receivedPayload.method, "session.ingest");
     assert.equal(receivedPayload.params.session_id, "s123");
+  } finally {
+    server.close();
+    if (fs.existsSync(tmpSock)) fs.unlinkSync(tmpSock);
+  }
+});
+
+test("encodeFrame rejects payloads beyond the 4MB protocol ceiling", () => {
+  assert.throws(
+    () => encodeFrame({ text: "x".repeat(MAX_FRAME_SIZE + 1) }),
+    /AMR_FRAME_SIZE_INVALID/
+  );
+  assert.doesNotThrow(() => encodeFrame({ text: "ok" }));
+});
+
+test("AMR 2.x error codes and transient/permanent classification", () => {
+  assert.equal(AMR_ERROR_CODES.ADAPTER_UNAVAILABLE, -32010);
+  assert.equal(AMR_ERROR_CODES.ADAPTER_REMOTE_AUTH_FAILED, -32012);
+  assert.equal(ERROR_CODES.AGENT_UNAUTHORIZED, -32001);
+  assert.equal(ERROR_CODES.NOT_FOUND, -32005);
+  assert.equal(ERROR_CODES.ADAPTER_PROTOCOL_ERROR, -32011);
+
+  assert.equal(isTransientError({ code: AMR_ERROR_CODES.ADAPTER_UNAVAILABLE }), true);
+  assert.equal(isTransientError({ code: "ETIMEDOUT" }), true);
+  assert.equal(isTransientError({ code: "ECONNREFUSED" }), true);
+  assert.equal(isTransientError({ code: AMR_ERROR_CODES.ADAPTER_REMOTE_AUTH_FAILED }), false);
+  assert.equal(isPermanentError({ code: AMR_ERROR_CODES.ADAPTER_REMOTE_AUTH_FAILED }), true);
+  assert.equal(isPermanentError({ code: AMR_ERROR_CODES.AGENT_UNAUTHORIZED }), true);
+  assert.equal(isPermanentError({ code: AMR_ERROR_CODES.ADAPTER_UNAVAILABLE }), false);
+});
+
+test("AmrUdsClient.ping uses the amr.ping control method", async () => {
+  const tmpSock = path.join(os.tmpdir(), `test_uds_ping_${Date.now()}_${Math.random().toString(36).slice(2)}.sock`);
+  if (fs.existsSync(tmpSock)) fs.unlinkSync(tmpSock);
+
+  const requests = [];
+  const server = net.createServer((socket) => {
+    const decoder = new FrameDecoder();
+    socket.on("data", (chunk) => {
+      for (const f of decoder.feed(chunk)) {
+        const req = JSON.parse(f.toString("utf8"));
+        requests.push(req);
+        socket.write(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { status: "ok" } }));
+      }
+    });
+  });
+
+  await new Promise((r) => server.listen(tmpSock, r));
+  try {
+    const client = new AmrUdsClient({ socketPath: tmpSock, defaultDeadlineMs: 300 });
+    const res = await client.ping(300);
+    assert.deepEqual(res, { status: "ok" });
+    assert.equal(requests[0].method, "amr.ping");
+    assert.deepEqual(requests[0].params, {});
   } finally {
     server.close();
     if (fs.existsSync(tmpSock)) fs.unlinkSync(tmpSock);
