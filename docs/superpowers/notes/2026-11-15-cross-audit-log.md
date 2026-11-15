@@ -95,6 +95,23 @@
 | Hermes | `connect_timeout` 未使用、error/id 校验顺序、`/tmp` 回退、prefetch future 竞态、client 使用未解析 socket 已修复；`AmrProtocolError` 已继承 `AmrRpcError`（误报）；`DEFAULT_SOCKET_PATH` 仅兼容导出（误报）；`call()` fail-open 是 1.x 兼容契约（接受） |
 | bridge2 | `AMR2_AGENT` 路径字符清洗、连接超时、stdio 异常边界、非 Linux 回退已修复；非 dict 请求已有校验（误报）；Windows stdio 非目标平台 |
 
+## Round 8 — 测试隔离与回放竞态（高优先级）
+
+- **发现**：OpenClaw 测试中部分 `plugin.register()` 未传 `persistenceDir`，在
+  2.x 默认 spool 下写入真实用户目录 `~/.local/share/openclaw-amr/sessions`，
+  产生 24 条测试记录；同时 startup replay 会与在途 `agent_end` 直发重复发送
+  同一 session（测试计数 9 != 8）。
+- **处理**：
+  1. 新增 `plugins/openclaw-amr/tests/test_env.js`，每个测试使用独立临时
+     `AMR_SESSION_SPOOL_DIR`；
+  2. `SessionPersistenceManager` 增加 `beginDispatch/endDispatch` 与
+     `_inFlightSessions`，`replayPending`/`replaySession` 跳过在途 session；
+  3. 24 条历史测试记录未删除，已移动到
+     `/tmp/amr-test-contamination-openclaw-20261116/` 供审计，用户 spool 目录已清空；
+  4. 复跑：OpenClaw 163 tests 全绿，用户 spool 0 文件。
+- **教训**：默认持久化路径的测试必须在每个测试内注入临时目录，不能依赖
+  文件级环境变量（会跨测试累积并触发 replay）。
+
 ## Round 7 — 收尾
 
 - 三个插件与 bridge2 的测试：OpenCode 15、OpenClaw 162、Hermes 23、Python 远程/适配器/bridge2 486。

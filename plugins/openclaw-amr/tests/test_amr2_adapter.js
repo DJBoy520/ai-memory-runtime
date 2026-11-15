@@ -1,3 +1,4 @@
+import "./test_env.js";
 /**
  * AMR 2.x adapter integration tests for plugins/openclaw-amr.
  *

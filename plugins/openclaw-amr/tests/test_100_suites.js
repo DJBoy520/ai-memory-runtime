@@ -1,3 +1,4 @@
+import "./test_env.js";
 /**
  * Comprehensive 100 Test Cases Suite for OpenClaw AMR Plugin.
  * Using Node.js native test runner (node:test & node:assert).

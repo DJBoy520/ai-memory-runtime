@@ -261,6 +261,7 @@ export const plugin = {
             };
           }
 
+          persistence.beginDispatch(sessionId);
           try {
             logger.debug(`Triggering confirmed session.ingest for session ${sessionId} (${ingestPayload.messages.length} messages, timeout: ${ingestDeadlineMs}ms)`);
             const ingestResult = await udsClient.request("session.ingest", ingestPayload, ingestDeadlineMs);
@@ -319,6 +320,8 @@ export const plugin = {
               transient,
               permanent,
             };
+          } finally {
+            persistence.endDispatch(sessionId);
           }
         } catch (err) {
           const elapsedMs = Date.now() - startTime;

@@ -1,3 +1,4 @@
+import "./test_env.js";
 /**
  * tests/test_agent_end_reliability.js
  *

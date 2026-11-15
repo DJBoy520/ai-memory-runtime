@@ -1,3 +1,4 @@
+import "./test_env.js";
 /**
  * tests/test_offline_persistence.js
  *

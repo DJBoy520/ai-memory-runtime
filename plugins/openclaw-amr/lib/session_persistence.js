@@ -210,6 +210,9 @@ export class SessionPersistenceManager {
     // lifetime. On-disk `permanent` records are still skipped by replay; this
     // set additionally suppresses repeat agent_end attempts within the process.
     this._permanentPayloadHashes = new Set();
+    // Sessions with a direct archive request currently in flight. Startup
+    // replay must skip them so a record is never sent twice.
+    this._inFlightSessions = new Set();
 
     this._ensureStorageDir();
   }
@@ -244,6 +247,16 @@ export class SessionPersistenceManager {
   getRecordPath(sessionId) {
     const fileName = getSafeFileName(sessionId);
     return path.join(this.storageDir, fileName);
+  }
+
+  /** Marks a session as having a direct dispatch in flight. */
+  beginDispatch(sessionId) {
+    if (sessionId) this._inFlightSessions.add(String(sessionId));
+  }
+
+  /** Clears the in-flight marker for a session. */
+  endDispatch(sessionId) {
+    if (sessionId) this._inFlightSessions.delete(String(sessionId));
   }
 
   /**
@@ -514,6 +527,9 @@ export class SessionPersistenceManager {
     }
 
     return this._sessionMutex.runExclusive(sessionId, async () => {
+      if (!force && this._inFlightSessions.has(String(sessionId))) {
+        return { ok: false, sessionId, skipped: true, error: "Session dispatch is in flight" };
+      }
       const filePath = this.getRecordPath(sessionId);
       if (!fs.existsSync(filePath)) {
         return { ok: false, sessionId, error: "Session record not found" };
@@ -664,6 +680,7 @@ export class SessionPersistenceManager {
 
         if (!record || !record.sessionId) continue;
         if (filter && typeof filter === "function" && !filter(record)) continue;
+        if (this._inFlightSessions.has(String(record.sessionId))) continue;
 
         // Permanent failures stay on disk for manual handling but are never
         // retried automatically, no matter how many startups occur.
