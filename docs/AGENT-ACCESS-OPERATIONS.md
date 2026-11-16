@@ -1,6 +1,10 @@
-# AMR agent access operations (work in progress)
+# AMR agent access operations
 
-This describes the implementation in the agent-access worktree. It has not yet been deployed.
+Status: deployed on 2026-11-16 to the local single-host installation. The
+remote gateway and adapter now require per-agent credentials; the daemon's
+business and admin sockets require distinct internal service credentials. See
+`DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md` for the exact generation, backups
+and verification evidence.
 
 An agent has an independent bearer credential, an explicit list of allowed remote tools and, optionally, an adapter socket. The remote MCP gateway and adapter both use the generated credentials snapshot. The adapter also requires the caller to present the token for every request, including ping. `agent_id` and `source_agent` submitted by clients do not set the principal.
 

@@ -21,6 +21,8 @@ AI Memory Runtime (AMR) 设计说明与参考文档。
 
 | 文档 | 内容 |
 |:---|:---|
+| [AGENT-ACCESS-OPERATIONS](AGENT-ACCESS-OPERATIONS.md) | **Agent 独立凭证与工具授权运维**：注册表、快照、内部 socket 凭证、轮换/撤销、激活与回滚 |
+| [DEPLOYMENT-RECORD-20261116-AGENT-ACCESS](DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md) | 2026-11-16 Agent 凭证切换记录：备份、验证矩阵、已知边界与回滚 |
 | [HANDOFF-20261116-AMR2-PROD](HANDOFF-20261116-AMR2-PROD.md) | **2.x 生产切换交接（最新，先读）**：线上状态、证书、鉴权、客户端接入待办、回滚 |
 | [DEPLOYMENT-RECORD-20261116-AMR2](DEPLOYMENT-RECORD-20261116-AMR2.md) | 2.x 生产切换记录：拓扑、证书指纹、验证矩阵、备份与回滚 |
 | [HANDOFF-20261116-AMR2](HANDOFF-20261116-AMR2.md) | **2.x 会话交接**：分支/提交、已完成模块、测试命令、未完成项、风险与后续顺序 |
