@@ -230,9 +230,14 @@ class AdapterService:
         finally:
             if task is not None:
                 self._tasks.discard(task)
-            writer.close()
-            with contextlib.suppress(Exception):
+            # A peer may reset the socket after its last response. Closing is
+            # best-effort cleanup; never surface that reset as an unhandled
+            # client callback exception.
+            try:
+                writer.close()
                 await writer.wait_closed()
+            except (Exception, asyncio.CancelledError):
+                pass
 
     async def _dispatch(
         self,
