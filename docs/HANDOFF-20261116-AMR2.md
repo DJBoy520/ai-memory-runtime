@@ -284,3 +284,40 @@ a3a90d8 feat(amr2): authenticated HTTPS MCP service (M1)
 **交接人备注**：本次所有“已通过”结论都有对应测试命令与审计记录；未在目标机、
 真实客户端会话或生产切换中验证的内容已在 §7 明确标出，请不要把模板/草案当成
 已部署事实。
+
+---
+
+## 13. 追加（2026-11-16 晚）：工作区增量已提交
+
+交接时未提交的增量已复核、修复并按主题提交（未 push）：
+
+```text
+bbadd3c feat(dsh): transactional SQLite spool and versioned turn archival
+a80b2b6 fix(clients): prefer explicit socket config over socket env vars
+235f21d feat(amr2): per-message source revision watermarks in session ingest
+85c067a feat(amr2): selectable TLS crypto profile for the remote service
+```
+
+内容：TLS `crypto_profile`、`message_source_revisions` 水位、DSH SQLite spool 与
+离线导入、版本化快照归档、四个客户端 socket 优先级统一。
+
+Gemini 分块复审 17 条（Round 9，见交叉审计记录）：1 条 high（持久化屏障可能
+永久阻塞队首）已修复并补测试；3 条测试/低危修复；13 条判为误报或既定设计，
+均附证据（如 Node v24.16/24.22 实测 `errcode=5`、`dsh-session` 源码确认
+`seq === log.length`）。
+
+回归：Python 860 passed / 15 skipped；远程 venv 508 passed；DSH 306、
+OpenClaw 164、OpenCode 15、Hermes 23。
+
+### 新增的三个部署前风险
+
+1. **DSH 重启会切到 2.x 插件代码**：web/headless profile 用 `file:` 链接本仓库。
+   2.x adapter 未启动时，新插件会把版本化快照写入 spool 并按退避重放，直到
+   1000 条 / 8 MiB 上限。**重启 DSH 前先起 adapter，或临时从 bundle 移除插件。**
+2. **默认 spool 目录多实例共享**：默认 `~/.local/share/amr-spool/dsh`，web 与
+   headless profile 未显式配置 `persistenceDir`；两个进程同时运行会互相覆盖
+   JSONL。部署时必须为每个 profile 指定独立目录（推荐同时切 `spoolBackend: sqlite`）。
+3. **DOC-09 的“隔离会话验证”没有留下可复核证据**；建议在部署验收时重跑并
+   记录命令、假适配器/模型、spool 清空结果。
+
+生产状态未变：`amr.service` 仍是 1.x，无 `amr2-*` socket，8443 无服务。
