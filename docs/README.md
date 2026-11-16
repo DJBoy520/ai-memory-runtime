@@ -21,6 +21,8 @@ AI Memory Runtime (AMR) 设计说明与参考文档。
 
 | 文档 | 内容 |
 |:---|:---|
+| [HANDOFF-20261116-AMR2-PROD](HANDOFF-20261116-AMR2-PROD.md) | **2.x 生产切换交接（最新，先读）**：线上状态、证书、鉴权、客户端接入待办、回滚 |
+| [DEPLOYMENT-RECORD-20261116-AMR2](DEPLOYMENT-RECORD-20261116-AMR2.md) | 2.x 生产切换记录：拓扑、证书指纹、验证矩阵、备份与回滚 |
 | [HANDOFF-20261116-AMR2](HANDOFF-20261116-AMR2.md) | **2.x 会话交接**：分支/提交、已完成模块、测试命令、未完成项、风险与后续顺序 |
 | [DOC-AMR-08](DOC-AMR-08-VERSIONING.md) | 1.x / 2.x 版本线与 v5 历史标签的关系 |
 | [DOC-AMR-09](DOC-AMR-09-CLIENT-2X.md) | 2.x 客户端接入契约、错误码、spool 语义 |
