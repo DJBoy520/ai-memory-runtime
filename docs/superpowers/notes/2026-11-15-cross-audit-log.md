@@ -117,7 +117,38 @@
 - 三个插件与 bridge2 的测试：OpenCode 15、OpenClaw 162、Hermes 23、Python 远程/适配器/bridge2 486。
 - 待办：标准 MCP 客户端（Claude Code/Codex/ZCode/Doubao）配置与验证、部署物、迁移演练、最终全量回归。
 
+## Round 9 — DSH SQLite spool 与快照水位复审（2026-11-16）
+
+范围：未提交的 2.x 增量（`message_source_revisions` 水位、DSH SQLite spool/
+离线导入、版本化快照归档、TLS `crypto_profile`）。
+命令：`python3 /tmp/amr2_gem_audit.py`（分块喂代码与审计重点；同一脚本对截断
+分块加预算复跑）。原始 JSON 见当次 `/tmp/amr2-gemini-audit.log`，下表为逐条判定。
+
+| # | 发现 | 判定 | 处理 |
+| --- | --- | --- | --- |
+| 1 | 相同内容以更高 `source_revision` 重推仍推进水位 | **rejected（设计）** | 全量快照必须让水位单调前进，否则旧快照会覆盖；DOC-09 已写明 |
+| 2 | 批次内重复 `message_id` 会主键冲突/统计错乱 | **false-positive** | 实测同一事务读己写：`inserted=1, revision_updated=1`，无冲突 |
+| 3 | `node:sqlite` 错误无 `errcode`，`lastEnqueueRetryable` 恒 false | **false-positive** | Node v24.16.0 与 v24.22.1 实测 `errcode=5` / `errstr=database is locked` |
+| 4 | 同 identity 不同 key 同状态未判 malformed，重复投递 | **rejected（低）** | 仅旧/新 key 混写可达；判损坏会冻结 spool，服务端按 `(session_id,message_id)` 幂等 |
+| 5 | `IngestSpool.markPermanent` 未校验 generation | **false-positive** | JSONL 记录无 generation；SQLite 子类已在事务内校验 |
+| 6 | ack 后 `remove` 返回 false 时 `break` 会积压后续记录 | **rejected（设计）** | 计 transient 并按退避重排，下一轮继续；避免存储不一致时继续发送 |
+| 7 | 永久标记写入失败后仍继续本轮 | **rejected（低）** | 记录保留、下一轮重试；其余记录继续投递不丢数据 |
+| 8 | `flush` 永不返回 true 时队首永远不出队，堵塞并溢出 | **accepted（高）** | 限 3 次重试，超限告警后无屏障直发；会话已 dispose 时直接直发；补 2 个测试 |
+| 9 | fork/恢复时 `session.seq !== lastSeq + 1` 导致静默跳过 | **false-positive** | 读 `dsh-session` 源码：`seq === log.length`，`snapshotEvents` 切 `[0,seq)`，恒等 |
+| 10 | 去重键只含 turnNumber，同 turn 更新被吞 | **false-positive** | `markTurnHandled` 比较 revision，更高水位放行；已有测试覆盖 |
+| 11 | 全量历史统一打当次 `lastSeq` 抬高旧消息水位 | **rejected（设计）** | 单写者下 revision 单调；快照水位语义见 DOC-09 |
+| 12 | ECDSA 校验在 `load_cert_chain` 之后 | **accepted（低）** | 校验移到加载私钥材料之前，抽 `_require_ecdsa_certificate` |
+| 13 | `SQLiteSpool.remove` 遇 `SQLITE_BUSY` 抛原始错误 | **accepted（中）** | 捕获后记录并返回 false；ack 路径发现记录仍在时重排 replay |
+| 14 | `markPermanent` 不换 generation 有 ABA | **false-positive** | `BEGIN IMMEDIATE` 内 SELECT+UPDATE，跨进程写被串行化 |
+| 15 | `markPermanent` 未更新 `bytes` 列 | **rejected（设计）** | 故意只计入队载荷，避免配额已满时失败元数据写不进去；增量有界 |
+| 16 | 离线导入在事务外读文件，可能读到半截 | **rejected（前置条件）** | CLI 要求 `--writers-stopped`；导入后文件变化由摘要标记 fail-closed |
+| 17 | 水位测试断言过弱（未验证水位推进/顺序/反向回滚） | **accepted（测试）** | 补 `_watermark()` 断言、顺序推进用例、先更新后冲突的整批回滚用例 |
+
+修复后回归：Python 生产 venv 860 passed / 15 skipped；远程 venv 508 passed；
+DSH 306、OpenClaw 164、OpenCode 15、Hermes 23 全绿。
+
 ## 审计工具
 
-- 分块评审脚本：本地 `/tmp/amr2_gem_review.py`（读取网关配置，不写入仓库）。
+- 分块评审脚本：本地 `/tmp/amr2_gem_review.py`、`/tmp/amr2_gem_audit.py`
+  （读取网关配置，不写入仓库）。
 - 每次复审必须附：命令、Gemini 原始 JSON、判定、修复提交/测试结果。

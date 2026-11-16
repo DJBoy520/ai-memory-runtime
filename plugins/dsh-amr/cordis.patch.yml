@@ -1,3 +1,5 @@
 - insert:
     - id: amr
       name: '@deepseek-ai/dsh-amr'
+      # 宿主 config 可设置 socketPath、spoolBackend、persistenceDir、spoolMaxBytes、
+      # spoolMaxRecords、replayInitialDelayMs、replayMaxDelayMs。

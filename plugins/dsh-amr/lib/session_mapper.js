@@ -128,13 +128,17 @@ export function mapSessionToIngest(params) {
       timestamp = Math.floor(rawMsg.timestamp.getTime() / 1000);
     }
 
-    mappedMessages.push({
+    const mapped = {
       message_id: String(msgId),
       role,
       content: content.trim(),
       sequence: seq++,
       timestamp,
-    });
+    };
+    if (Number.isSafeInteger(rawMsg.source_revision) && rawMsg.source_revision >= 0) {
+      mapped.source_revision = rawMsg.source_revision;
+    }
+    mappedMessages.push(mapped);
   }
 
   return {

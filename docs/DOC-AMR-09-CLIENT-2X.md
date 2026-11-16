@@ -61,6 +61,71 @@ daemon 方法名、参数、成功响应与 1.x 一致（见 `DOC-AMR-06`）。�
   “已提交”与“丢失”。
 - spool 必须有容量/磁盘余量上限；空间不足显式失败，不静默丢弃。
 - 适配器本身无队列、无重试。
+- `source_revision` 是可选的、每个会话内可比较的非负整数快照水位，不是消息
+  排序位置或时间戳。新服务在同一数据库事务中保存每条消息的水位：较旧水位
+  不覆盖较新内容；相同水位、不同内容是冲突；较新水位的相同内容也推进水位。
+  受保护消息若收到无水位的不同内容会拒绝，避免旧客户端绕过保护。已有无水位
+  消息只能以相同内容建立初始水位；内容不一致会使整个入库事务失败，客户端
+  需保留该批记录供人工核对，不能据此声称无缝迁移。
+- DSH 有完整、连续 session 事件快照时，使用投影后的消息和快照末尾事件序号；
+  该序号只适合同一 session 的连续历史，不能用于比较不同 session、fork，或对
+  旧备份重建出的分叉历史。旧版 daemon 不执行此保护，回滚期间不得假定它有效；
+  服务记录被旧版直接更改后，新版会拒绝不一致的基线。删除/投影移除的传播不在
+  本机制内。旧队列没有可靠水位时不得按当前时间补造。
+- DSH 默认依赖 `session/event`。没有该事件的旧宿主可显式设置
+  `legacyTurnEnd: true` 启用无水位回调；它无法提供乱序保护，不应与版本化会话
+  回调混用。旧宿主的 `session/event` 若缺少可验证的投影及水位，默认跳过归档并
+  告警；可显式设置 `legacyUnversionedSnapshots: true` 兼容，但同样没有乱序保护。
+  升级前应确认宿主支持这些接口。
+- DSH 的 `spoolBackend`、`persistenceDir`、`spoolMaxBytes`、`spoolMaxRecords`、
+  `replayInitialDelayMs`、`replayMaxDelayMs` 可在 Cordis 插件配置中指定；默认
+  重放退避从 1 秒增长到 60 秒。默认 `jsonl` 后端的多实例必须使用独立目录。
+  可显式选择 `sqlite` 后端，以事务保护本地记录；当前多个投递进程共享同一队列
+  仍可能让旧版本请求晚到并覆盖新版本，**SQLite 也必须每实例使用独立目录**。
+  SQLite 要求 Node 的 `node:sqlite` 可用、目录属主私有。不要让旧版进程访问 SQLite
+  后端目录；本地 SQLite 锁不应在未经验证的网络文件系统上使用。入队失败只记录
+  错误，不发送该次归档；需恢复存储并重新触发归档。SQLite 短暂锁竞争时，插件
+  最多在进程内暂存 100 条、2 MiB 后重试；这些记录在成功入库前不具备崩溃持久性，
+  队列满时显式记录失败。
+  若 JSONL 包含损坏记录，插件保留原文件并停止对该 spool 的发送和修改；
+  应先备份原文件，人工修复后再恢复运行。
+- 版本化快照在发送前等待 `ctx.sessions.flush(session)` 返回成功的持久化屏障；
+  等待中的 turn 只保存在内存，进程崩溃会丢失。屏障最多重试 3 次：宿主没有
+  durability listener、会话已 dispose，或重试仍失败时，插件记录告警后直接归档
+  （至少一次投递，服务端仍按 `(session_id, message_id)` 幂等），避免队首永久
+  阻塞后续归档。
+
+DSH Cordis 插件配置示例（路径需替换为对应实例的路径）：
+
+```yaml
+config:
+  spoolBackend: sqlite
+  socketPath: /run/user/1000/amr2-dsh.sock
+  persistenceDir: /home/example/.local/share/amr-spool/dsh-instance-1
+  spoolMaxBytes: 8388608
+  spoolMaxRecords: 1000
+  replayInitialDelayMs: 1000
+  replayMaxDelayMs: 60000
+```
+
+SQLite 的 `spoolMaxBytes` 限制入队记录的逻辑序列化字节，并非数据库及日志文件的
+磁盘占用上限；部署时仍需监控磁盘空间。SQLite 初始化失败时记录错误，插件会
+在重放或新归档时重新尝试打开，不会回退到 JSONL。入队失败的那次归档未持久化，
+仍需在修复后重新触发。JSONL → SQLite 必须先停止所有旧版和
+新版写者并备份，再运行：
+
+```sh
+node plugins/dsh-amr/migrate-spool.js --spool-dir /absolute/path/to/spool --writers-stopped
+```
+
+命令保留原 JSONL，事务导入并绑定文件摘要；文件后来发生变化会拒绝启动。切换前
+应核对待处理和永久失败记录；禁止混用旧版 JSONL 写者。迁移命令的参数是操作者对
+停写状态的声明，不会自动检测或停止其他进程。
+
+隔离会话验证：本机 DSH 0.2.2-rc.1 使用临时 profile、本地假 OpenAI 兼容模型和
+假 UDS 适配器完成一轮；观察到 `amr.ping`、`memory.search`、召回内容进入模型
+请求，以及仅含真实用户输入和助手回答的 `session.ingest`，假适配器确认后 SQLite
+spool 为空。此验证不涉及真实模型、真实适配器、远程服务或生产数据。
 
 ## 5. 各 agent 2.x 配置
 
