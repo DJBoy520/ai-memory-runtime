@@ -52,11 +52,11 @@ class AmrSessionClient:
         agent_id: str = "default_agent",
         project_id: Optional[str] = None,
         socket_path: Optional[str] = None,
-        auth_token_file: Optional[str] = None,
         transport: Optional[BaseTransport] = None,
         config: Optional[SpoolConfig] = None,
         auto_replay: bool = True,
         raise_on_failure: bool = False,
+        auth_token_file: Optional[str] = None,
     ):
         if config is not None:
             self.config = config
@@ -340,8 +340,8 @@ class AsyncAmrSessionClient:
     """
 
     def __init__(self, spool_dir, agent_id="default_agent", project_id=None,
-                 socket_path=None, auth_token_file=None, transport=None, config=None,
-                 auto_replay=False, raise_on_failure=False):
+                 socket_path=None, transport=None, config=None,
+                 auto_replay=False, raise_on_failure=False, auth_token_file=None):
         self._client = AmrSessionClient(
             spool_dir=spool_dir, agent_id=agent_id, project_id=project_id,
             socket_path=socket_path, auth_token_file=auth_token_file,
