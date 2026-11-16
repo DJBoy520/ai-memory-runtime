@@ -70,6 +70,9 @@ another.
 - An HTTPS `memory_create` probe through the gateway succeeded; the matching
   `memory.delete` cleanup through the trusted internal channel returned
   `DELETED`.
+- Activating the superseded first generation was refused with
+  `snapshot differs from current registry` and all three services stayed
+  active, confirming stale-grant activation is blocked before stopping.
 - `scripts/amr_doctor.py` reports healthy business/admin IPC, metrics, outbox,
   Qdrant and SQLite checks when given the two token paths.
 - OpenClaw logged `Initialized openclaw-amr plugin (AMR 2.x)` with the adapter
