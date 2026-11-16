@@ -79,7 +79,7 @@ another.
   tests.
 - Python suite: `894 passed, 16 skipped` in the feature worktree before the
   final adapter cleanup; after the cleanup, the production workspace reported
-  `895 passed, 15 skipped`. OpenClaw plugin suite: `166 passed`. Hermes plugin
+  `896 passed, 15 skipped`. OpenClaw plugin suite: `166 passed`. Hermes plugin
   suite: `27 passed`.
 
 ## Known boundaries
