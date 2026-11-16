@@ -20,6 +20,7 @@ def main(argv=None):
         if name == 'add': c.add_argument('--socket')
     for name in ('disable', 'enable', 'rotate'):
         c = commands.add_parser(name); c.add_argument('agent')
+    c = commands.add_parser('set-socket'); c.add_argument('agent'); c.add_argument('--socket', required=True)
     c = commands.add_parser('render'); c.add_argument('--output', required=True); c.add_argument('--adapter-base', required=True); c.add_argument('--remote-base')
     c = commands.add_parser('import'); c.add_argument('--credentials', required=True); c.add_argument('--adapter')
     c = commands.add_parser('activate'); c.add_argument('generation')
@@ -36,6 +37,7 @@ def main(argv=None):
         elif args.command == 'disable': reg.disable(args.agent)
         elif args.command == 'enable': reg.enable(args.agent)
         elif args.command == 'rotate': reg.rotate(args.agent)
+        elif args.command == 'set-socket': reg.set_socket(args.agent, args.socket)
         elif args.command == 'import': reg.import_existing(args.credentials, args.adapter)
         elif args.command == 'activate':
             check_unit_paths(reg.root)

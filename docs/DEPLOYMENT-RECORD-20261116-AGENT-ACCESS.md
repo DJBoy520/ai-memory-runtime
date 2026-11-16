@@ -9,7 +9,7 @@ another.
 
 - Source commit: `9b66b02` (`fix(amr2): suppress peer reset during adapter
   connection cleanup`) on `release/2.x`; the feature commit is `2da295f`.
-- Active generation: `~/.config/amr/agents/generations/g20261116T221944`.
+- Active generation: `~/.config/amr/agents/generations/g20261116T223504` (the first cutover generation `g20261116T221944` was superseded only to add the dedicated `codex` adapter socket; its tokens are unchanged).
 - Active pointer: `~/.config/amr/agents/current` (symlink).
 - Backup root (mode 0700): `~/.local/share/amr/backups/agent-access-20261116T221927`.
   It contains the pre-switch gateway/adapter configs, old credential file,
@@ -41,7 +41,12 @@ another.
 6. Restarted OpenClaw and Hermes with adapter/token configuration; updated the
    Hermes provider and MCP bridge configs, installed the missing `_spool.py`
    module, and restarted Hermes again.
-7. Updated the DSH profile patches to the adapter/token bridge. The currently
+7. Migrated the OpenCode plugin and its two local MCP bridge entries to the
+   `opencode` adapter binding and token file. The plugin also defaults to the
+   per-agent token path when no explicit `tokenFile` is supplied.
+8. Added a dedicated `codex` adapter socket, rendered and activated the new
+   generation, and migrated the Codex MCP bridge to the `codex` token.
+9. Updated the DSH profile patches to the adapter/token bridge. The currently
    running DSH process was started before that change and must be restarted
    before its AMR MCP child can use the new configuration.
 
@@ -54,7 +59,9 @@ another.
   wrong token, and 200 for each of `openclaw`, `hermes`, `claude_code` and
   `codex`.
 - `/mcp` returns 401 without a bearer token. An authenticated `initialize` and
-  `tools/list` succeed; `openclaw` sees only its three granted tools.
+  `tools/list` succeed; `openclaw` sees only its three granted tools. The
+  `codex` adapter socket returns `amr.ping` with the codex token and rejects
+  other tokens.
 - The daemon business socket returns `AUTH_FAILED` without the internal token
   and rejects an agent token. The admin socket rejects the business token.
 - The adapter rejects missing, wrong, cross-agent and internal-service tokens
@@ -67,7 +74,9 @@ another.
   Qdrant and SQLite checks when given the two token paths.
 - OpenClaw logged `Initialized openclaw-amr plugin (AMR 2.x)` with the adapter
   socket and persistence directory. The Hermes provider reports
-  `available=True` with the adapter socket and Hermes token file.
+  `available=True` with the adapter socket and Hermes token file. The OpenCode
+  client default-token path returned `amr.ping` and its plugin suite passed 16
+  tests.
 - Python suite: `894 passed, 16 skipped` in the feature worktree before the
   final adapter cleanup; after the cleanup, the production workspace reported
   `895 passed, 15 skipped`. OpenClaw plugin suite: `166 passed`. Hermes plugin

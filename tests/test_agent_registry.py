@@ -194,6 +194,17 @@ def test_last_agent_can_be_revoked_without_reopening_after_restart(tmp_path):
     assert not (reg.root / 'current').exists()
 
 
+def test_socket_can_be_changed_without_rotating_credential(tmp_path):
+    reg = Registry(tmp_path / 'private'); reg.add('a', ['memory_search'])
+    token = reg.snapshot()['agents']['a']['token']
+    reg.set_socket('a', '/tmp/a.sock')
+    assert reg.snapshot()['agents']['a']['socket'] == '/tmp/a.sock'
+    assert reg.snapshot()['agents']['a']['token'] == token
+    with pytest.raises(RegistryError): reg.set_socket('a', 'relative.sock')
+    reg.add('b', ['memory_search'], '/tmp/b.sock')
+    with pytest.raises(RegistryError): reg.set_socket('a', '/tmp/b.sock')
+
+
 def test_alias_grants_are_rejected_in_favor_of_canonical_tools(tmp_path):
     reg = Registry(tmp_path / 'private')
     for name in ('memory_session_checkpoint', 'memory_get_handoff'):

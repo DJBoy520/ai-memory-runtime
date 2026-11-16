@@ -27,6 +27,7 @@ python -m src.agent_access.cli list
 python -m src.agent_access.cli status
 python -m src.agent_access.cli add example --tools memory_search,memory_ingest_session --socket /run/user/1000/amr2-example.sock
 python -m src.agent_access.cli grant example --tools memory_search
+python -m src.agent_access.cli set-socket example --socket /run/user/1000/amr2-example.sock
 python -m src.agent_access.cli rotate example
 python -m src.agent_access.cli disable example
 python -m src.agent_access.cli enable example

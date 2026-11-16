@@ -190,6 +190,12 @@ class Registry:
             self._write(data)
 
     def rotate(self, name): self._change(name, lambda a: a.update(token=secrets.token_urlsafe(32)))
+    def set_socket(self, name, socket):
+        _id(name)
+        if socket is not None:
+            if not isinstance(socket, str) or not os.path.isabs(socket) or '\x00' in socket:
+                raise RegistryError('invalid socket')
+        self._change(name, lambda a: a.update(socket=socket))
     def disable(self, name): self._change(name, lambda a: a.update(enabled=False, token=secrets.token_urlsafe(32)))
     def enable(self, name): self._change(name, lambda a: a.update(enabled=True))
     def set_tools(self, name, tools):
