@@ -7,8 +7,7 @@ another.
 
 ## Source and artifacts
 
-- Source commit: `9b66b02` (`fix(amr2): suppress peer reset during adapter
-  connection cleanup`) on `release/2.x`; the feature commit is `2da295f`.
+- Source commit: `04d423f` on `release/2.x`; the feature commit is `2da295f`.
 - Active generation: `~/.config/amr/agents/generations/g20261116T223504` (the first cutover generation `g20261116T221944` was superseded only to add the dedicated `codex` adapter socket; its tokens are unchanged).
 - Active pointer: `~/.config/amr/agents/current` (symlink).
 - Backup root (mode 0700): `~/.local/share/amr/backups/agent-access-20261116T221927`.

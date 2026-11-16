@@ -3,7 +3,7 @@
 - **交接对象**：Codex
 - **前序交接**：[HANDOFF-20261116-AMR2.md](HANDOFF-20261116-AMR2.md)（2.x 代码开发阶段，HEAD `33abbae`）
 - **本交接范围**：代码复审与修复、隔离演练、2.x 生产切换、证书签发、身份鉴权验证
-- **当前分支**：`release/2.x`，HEAD `64bf9f0`，**工作区干净**
+- **当前分支**：`release/2.x`，HEAD `04d423f`，**工作区干净**
 - **未 push**：2.x 全部提交只在本地
 - **生产状态**：**2.x + 每 agent 凭证已上线**，`amr.service` / `amr2-mcp` / `amr2-adapter` 三个单元 active
 - **客户端状态**：OpenClaw、Hermes、DSH/Claude、Codex、OpenCode 已迁移到 adapter + 独立 token；详见 [DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md](DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md)
