@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS ingest_log (
 CREATE INDEX IF NOT EXISTS idx_messages_sess ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_sess ON ingest_log(session_id, message_id);
 
+-- Optional source snapshot watermarks. Legacy, unversioned messages retain
+-- their original behavior until a matching baseline is explicitly versioned.
+CREATE TABLE IF NOT EXISTS message_source_revisions (
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    source_revision INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    PRIMARY KEY (session_id, message_id),
+    FOREIGN KEY (session_id, message_id) REFERENCES messages(session_id, message_id) ON DELETE CASCADE
+);
+
 -- ================= v2.2 核心存储架构 (SSOT + Outbox + Audit) =================
 
 -- 1. 原始会话表 (v2.2)
@@ -1012,6 +1023,11 @@ class SessionStore:
 
         # 2. 逐条处理消息
         for idx, msg in enumerate(messages):
+            if "source_revision" in msg and not (
+                isinstance(msg.get("message_id") or msg.get("id"), str)
+                and (msg.get("message_id") or msg.get("id")).strip()
+            ):
+                raise ValueError("source_revision requires a stable message_id")
             msg_id = msg.get("message_id") or msg.get("id") or f"{session_id}_{idx+1}_{now}"
             role = msg.get("role", "user")
             content = msg.get("content", "")
@@ -1020,6 +1036,13 @@ class SessionStore:
             seq = msg.get("sequence", idx + 1)
             ts = int(msg.get("timestamp", now))
             c_hash = compute_content_hash(role, content)
+            source_revision = msg.get("source_revision")
+            if "source_revision" in msg and (
+                isinstance(source_revision, bool)
+                or not isinstance(source_revision, int)
+                or not 0 <= source_revision < 2**63
+            ):
+                raise ValueError("source_revision must be a non-negative 64-bit integer")
 
             # 查询已有消息
             cursor.execute(
@@ -1027,6 +1050,28 @@ class SessionStore:
                 (session_id, msg_id),
             )
             existing = cursor.fetchone()
+
+            cursor.execute(
+                "SELECT source_revision, content_hash FROM message_source_revisions WHERE session_id = ? AND message_id = ?",
+                (session_id, msg_id),
+            )
+            watermark = cursor.fetchone()
+            if watermark is not None:
+                if existing is None or existing["content_hash"] != watermark["content_hash"]:
+                    raise ValueError("revision baseline changed outside versioned ingest")
+                if source_revision is None and existing["content_hash"] != c_hash:
+                    raise ValueError("source_revision required to update a versioned message")
+                if source_revision is not None and source_revision == watermark["source_revision"] and existing["content_hash"] != c_hash:
+                    raise ValueError("source_revision conflicts with existing content")
+                if source_revision is not None and source_revision < watermark["source_revision"]:
+                    cursor.execute(
+                        "INSERT INTO ingest_log (session_id, message_id, processed_at, status, error_msg) VALUES (?, ?, ?, 'ignored', NULL)",
+                        (session_id, msg_id, now),
+                    )
+                    ignored += 1
+                    continue
+            elif existing is not None and source_revision is not None and existing["content_hash"] != c_hash:
+                raise ValueError("source_revision cannot replace an unversioned baseline")
 
             if existing is None:
                 cursor.execute(
@@ -1071,6 +1116,15 @@ class SessionStore:
                         (session_id, msg_id, now),
                     )
                     revision_updated += 1
+
+            if source_revision is not None:
+                cursor.execute(
+                    """INSERT INTO message_source_revisions(session_id, message_id, source_revision, content_hash)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(session_id, message_id) DO UPDATE SET
+                         source_revision=excluded.source_revision, content_hash=excluded.content_hash""",
+                    (session_id, msg_id, source_revision, c_hash),
+                )
 
         # 3. 重新聚合更新 sessions 的 message_count 与 ended_at
         cursor.execute(

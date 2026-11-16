@@ -247,7 +247,8 @@ TOOL_DEFINITIONS = [
                             "role": {"type": "string", "enum": ["user", "assistant", "system"]},
                             "content": {"type": "string"},
                             "sequence": {"type": "integer"},
-                            "timestamp": {"type": "integer"}
+                            "timestamp": {"type": "integer"},
+                            "source_revision": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}
                         },
                         "required": ["message_id", "role", "content"]
                     }

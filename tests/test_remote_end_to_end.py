@@ -108,3 +108,89 @@ def test_memory_search_round_trips_through_temp_daemon(tmp_path):
         }
 
     asyncio.run(run())
+
+
+def test_ingest_source_revision_reaches_daemon(tmp_path):
+    async def run():
+        requests = []
+        socket_path = str(tmp_path / "daemon.sock")
+
+        async def daemon(reader, writer):
+            try:
+                request = await read_frame(reader)
+                requests.append(request)
+                await write_frame(writer, {"jsonrpc": "2.0", "id": request["id"], "result": {"status": "success"}})
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(daemon, path=socket_path)
+        app = build_app(
+            TokenAuthenticator({TOKEN: {"agent_id": AGENT_ID, "tools": ["memory_ingest_session"]}}),
+            RemoteBackend(RemoteRpc(socket_path)),
+        )
+
+        def factory(**kwargs):
+            return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", **kwargs)
+
+        try:
+            async with app.router.lifespan_context(app):
+                async with streamablehttp_client("http://test/mcp", headers={"Authorization": f"Bearer {TOKEN}"}, httpx_client_factory=factory) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool("memory_ingest_session", {
+                            "session_id": "s", "messages": [{"message_id": "m", "role": "user", "content": "new", "source_revision": 17}],
+                        })
+            assert not result.isError
+            assert requests[0]["params"]["messages"][0]["source_revision"] == 17
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run())
+
+
+def test_versioned_ingest_ignores_late_snapshot_through_mcp(tmp_path):
+    from config.settings import AppConfig
+    from src.core.session_store import SessionStore
+
+    async def run():
+        config = AppConfig()
+        config.storage.sqlite_path = str(tmp_path / "sessions.db")
+        store = SessionStore(config)
+        socket_path = str(tmp_path / "daemon.sock")
+
+        async def daemon(reader, writer):
+            try:
+                request = await read_frame(reader)
+                params = request["params"]
+                result = store.ingest_messages(params["session_id"], params["agent_id"], params.get("project_id"), params["messages"])
+                await write_frame(writer, {"jsonrpc": "2.0", "id": request["id"], "result": result})
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(daemon, path=socket_path)
+        app = build_app(
+            TokenAuthenticator({TOKEN: {"agent_id": AGENT_ID, "tools": ["memory_ingest_session"]}}),
+            RemoteBackend(RemoteRpc(socket_path)),
+        )
+
+        def factory(**kwargs):
+            return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", **kwargs)
+
+        try:
+            async with app.router.lifespan_context(app):
+                async with streamablehttp_client("http://test/mcp", headers={"Authorization": f"Bearer {TOKEN}"}, httpx_client_factory=factory) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        for revision, content in [(20, "new"), (10, "old")]:
+                            result = await session.call_tool("memory_ingest_session", {"session_id": "s", "messages": [{"message_id": "m", "role": "user", "content": content, "source_revision": revision}]})
+                            assert not result.isError
+            assert store.get_messages("s")[0]["content"] == "new"
+        finally:
+            server.close()
+            await server.wait_closed()
+            store.close()
+
+    asyncio.run(run())
