@@ -31,6 +31,16 @@ _REQUIRED_KEYS: Tuple[str, ...] = (
 # 可选网络参数的安全默认值：只监听回环地址，端口不与任何生产配置关联。
 _DEFAULT_BIND_HOST = "127.0.0.1"
 _DEFAULT_BIND_PORT = 8443
+CRYPTO_PROFILES = frozenset({"system", "ecdsa_aes128_gcm_sha256_tls12"})
+RESERVED_TLS13_CIPHER_SUITES = frozenset({"TLS_SM4_GCM_SM3", "TLS_SM4_CCM_SM3"})
+
+
+def validate_crypto_profile(value: Any) -> str:
+    if isinstance(value, str) and value in RESERVED_TLS13_CIPHER_SUITES:
+        raise ValueError(f"'crypto_profile' {value} is reserved and not implemented")
+    if not isinstance(value, str) or value not in CRYPTO_PROFILES:
+        raise ValueError("'crypto_profile' unsupported")
+    return value
 
 # Credentials must not be group/world readable.
 _ALLOWED_CREDENTIAL_MODES = frozenset({0o600, 0o400})
@@ -163,6 +173,7 @@ class RemoteServiceConfig(dict):
         bind_host: str = _DEFAULT_BIND_HOST,
         bind_port: int = _DEFAULT_BIND_PORT,
         allowed_origins: Optional[List[str]] = None,
+        crypto_profile: str = "system",
     ):
         super().__init__(
             business_socket=business_socket,
@@ -171,6 +182,7 @@ class RemoteServiceConfig(dict):
             cert_file=cert_file,
             key_file=key_file,
             allowed_hosts=list(allowed_hosts),
+            crypto_profile=validate_crypto_profile(crypto_profile),
             bind_host=_validate_bind_host(bind_host),
             bind_port=_validate_bind_port(bind_port),
             allowed_origins=(
@@ -303,4 +315,5 @@ def load_config(path: Any) -> RemoteServiceConfig:
         bind_host=bind_host,
         bind_port=bind_port,
         allowed_origins=allowed_origins,
+        crypto_profile=data.get("crypto_profile", "system"),
     )

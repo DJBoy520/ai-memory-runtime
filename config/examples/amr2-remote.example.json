@@ -7,5 +7,6 @@
   "allowed_hosts": ["amr.internal", "amr.internal:8443"],
   "allowed_origins": ["https://amr.internal"],
   "bind_host": "0.0.0.0",
-  "bind_port": 8443
+  "bind_port": 8443,
+  "crypto_profile": "system"
 }

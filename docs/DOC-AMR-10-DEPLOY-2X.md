@@ -173,6 +173,26 @@ opencode mcp add amr --url https://amr.internal:8443/mcp \
 }
 ```
 
+### TLS 算法配置
+
+远程服务 JSON 文件支持 `crypto_profile`：
+
+- `system`（默认）：使用 Python/OpenSSL 的 TLS 1.2 及以上默认策略；实际协商
+  的证书类型和密码套件由证书、运行时和客户端共同决定。
+- `ecdsa_aes128_gcm_sha256_tls12`：要求服务端证书为 ECDSA 公钥，限定
+  TLS 1.2 的 `ECDHE-ECDSA-AES128-GCM-SHA256` 套件。由于 Python 标准库
+  无法以同一接口限制 TLS 1.3 套件，该严格配置关闭 TLS 1.3；部署前应核对客户端
+  兼容性。选择此项后，`--check` 会校验证书类型及本机套件支持。
+
+RFC 8998 定义的 TLS 1.3 套件 `TLS_SM4_GCM_SM3` 与 `TLS_SM4_CCM_SM3`
+是预留配置值，尚未实现，选择时会明确报错；SM2 签名标识 `sm2sig_sm3` 和
+曲线组 `curveSM2` 在握手中另行协商。此预留不代表支持 TLCP 或国密 TLS。
+参考 [RFC 8998](https://www.rfc-editor.org/rfc/rfc8998.html)；该 RFC 为
+Informational，且注明相关套件不被 IETF 推荐。RFC 8998 的 TLS 1.3 使用
+`curveSM2` 上的 ECDHE，不使用 SM2 专有密钥交换协议。未知配置值同样
+使配置校验失败，不会回退到其他算法。令牌比较仍固定使用 SHA-256；会话 ID/内容哈希和数据存储格式
+不随 TLS 配置变更。本配置只控制 HTTPS 传输，不提供静态数据 AES 加密。
+
 ### 5.5 DSH（MCP 客户端）
 
 把 Cordis 中 `mcp-amr` 的启动命令从 `bridge.py` 改为

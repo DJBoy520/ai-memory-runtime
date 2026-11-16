@@ -27,7 +27,7 @@ import uvicorn
 from starlette.applications import Starlette
 
 from .remote_runtime import build_runtime
-from .remote_service import RemoteServiceConfig, load_config
+from .remote_service import RemoteServiceConfig, load_config, validate_crypto_profile
 
 __all__ = [
     "RemoteMcpService",
@@ -57,27 +57,50 @@ def _as_path(value: Any, field: str) -> str:
     return value
 
 
-def load_server_ssl_context(cert_file: Any, key_file: Any) -> ssl.SSLContext:
+def _require_ecdsa_certificate(cert_path: str) -> None:
+    """严格 TLS 配置要求在加载任何私钥材料前确认证书公钥为 ECDSA。"""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        with open(cert_path, "rb") as cert_handle:
+            cert = x509.load_pem_x509_certificate(cert_handle.read())
+    except OSError as exc:
+        raise TLSMaterialError("server certificate could not be read") from exc
+    except ValueError as exc:
+        raise TLSMaterialError("ECDSA certificate could not be decoded") from exc
+    if not isinstance(cert.public_key(), ec.EllipticCurvePublicKey):
+        raise TLSMaterialError("ECDSA certificate required by crypto_profile")
+
+
+def load_server_ssl_context(cert_file: Any, key_file: Any, *, crypto_profile: str = "system") -> ssl.SSLContext:
     """加载并校验显式提供的服务端证书与私钥。
 
     Args:
         cert_file: PEM 证书链路径。
         key_file: PEM 私钥路径。
+        crypto_profile: TLS 算法档位；严格档会在加载私钥前校验证书类型。
 
     Returns:
         仅支持 TLS 1.2+ 的服务端 ``ssl.SSLContext``。
 
     Raises:
         TLSMaterialError: 路径无效、文件缺失/不可读、证书与私钥损坏或不
-            匹配、证书尚未生效或已经过期。错误文本永远不会包含证书或
-            私钥内容。
+            匹配、证书尚未生效或已经过期、证书类型不符合 ``crypto_profile``。
+            错误文本永远不会包含证书或私钥内容。
     """
     cert_path = _as_path(cert_file, "cert_file")
     key_path = _as_path(key_file, "key_file")
+    validate_crypto_profile(crypto_profile)
+    if crypto_profile == "ecdsa_aes128_gcm_sha256_tls12":
+        _require_ecdsa_certificate(cert_path)
 
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if crypto_profile == "ecdsa_aes128_gcm_sha256_tls12":
+            context.maximum_version = ssl.TLSVersion.TLSv1_2
+            context.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256")
     except (ssl.SSLError, ValueError) as exc:
         raise TLSMaterialError("unable to create a server TLS 1.2+ context") from exc
 
@@ -142,7 +165,7 @@ class RemoteMcpService:
             )
         self._config = config
         self._ssl_context = load_server_ssl_context(
-            config.cert_file, config.key_file
+            config.cert_file, config.key_file, crypto_profile=config.crypto_profile
         )
         self._server: Optional[uvicorn.Server] = None
         self._task: Optional[asyncio.Task[None]] = None

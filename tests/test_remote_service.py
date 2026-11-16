@@ -67,6 +67,34 @@ def _valid_config_path(tmp_path, credentials_file=None, content=None):
     return _write_config(tmp_path, config)
 
 
+@pytest.mark.parametrize("profile", ["TLS_SM4_GCM_SM3", "TLS_SM4_CCM_SM3", "sm2_sm3_sm4", "unknown", None, 1])
+def test_unsupported_crypto_profile_fails_closed(tmp_path, profile):
+    path = _valid_config_path(tmp_path)
+    config = json.loads(path.read_text())
+    config["crypto_profile"] = profile
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="crypto_profile"):
+        load_config(path)
+
+
+def test_crypto_profile_is_read_from_config(tmp_path):
+    path = _valid_config_path(tmp_path)
+    config = json.loads(path.read_text())
+    config["crypto_profile"] = "ecdsa_aes128_gcm_sha256_tls12"
+    path.write_text(json.dumps(config))
+    assert load_config(path).crypto_profile == config["crypto_profile"]
+
+
+@pytest.mark.parametrize("suite", ["TLS_SM4_GCM_SM3", "TLS_SM4_CCM_SM3"])
+def test_reserved_sm_tls13_suite_reports_not_implemented(tmp_path, suite):
+    path = _valid_config_path(tmp_path)
+    config = json.loads(path.read_text())
+    config["crypto_profile"] = suite
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="reserved.*not implemented"):
+        load_config(path)
+
+
 def test_remote_service_reuses_remote_auth_token_authenticator():
     """remote_service 不得重复定义 TokenAuthenticator。"""
     assert TokenAuthenticator is remote_auth.TokenAuthenticator

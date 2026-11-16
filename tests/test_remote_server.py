@@ -20,6 +20,7 @@ import json
 import os
 import socket
 import ssl
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,7 +31,7 @@ pytest.importorskip("mcp")
 import httpx  # noqa: E402
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec, rsa  # noqa: E402
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID  # noqa: E402
 
 from src.interfaces.ipc.protocol import read_frame, write_frame  # noqa: E402
@@ -729,6 +730,43 @@ def test_load_server_ssl_context_sets_tls12_minimum(material: Material) -> None:
 
     assert isinstance(context, ssl.SSLContext)
     assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+
+
+def test_strict_ecdsa_profile_rejects_rsa_certificate(material: Material) -> None:
+    with pytest.raises(TLSMaterialError, match="ECDSA"):
+        load_server_ssl_context(material.server_cert_file, material.server_key_file,
+                                crypto_profile="ecdsa_aes128_gcm_sha256_tls12")
+
+
+def test_strict_ecdsa_profile_configures_tls_cipher(tmp_path: Path) -> None:
+    ca_key, ca_cert, ca_path = _make_ca(tmp_path, "test-ca")
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert = _make_server_cert(ca_key, ca_cert, key, common_name="localhost",
+                             san_entries=[x509.DNSName("localhost")])
+    cert_path = _write_cert(tmp_path / "ec.crt", cert)
+    key_path = _write_key(tmp_path / "ec.key", key)
+    context = load_server_ssl_context(cert_path, key_path,
+                                      crypto_profile="ecdsa_aes128_gcm_sha256_tls12")
+    assert context.minimum_version == context.maximum_version == ssl.TLSVersion.TLSv1_2
+    assert [c["name"] for c in context.get_ciphers() if c["protocol"] != "TLSv1.3"] == [
+        "ECDHE-ECDSA-AES128-GCM-SHA256"]
+    client = ssl.create_default_context(cafile=str(ca_path))
+    server_sock, client_sock = socket.socketpair()
+    result = []
+
+    def serve():
+        with context.wrap_socket(server_sock, server_side=True) as tls:
+            result.append((tls.version(), tls.cipher()[0]))
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        with client.wrap_socket(client_sock, server_hostname="localhost") as tls:
+            assert tls.version() == "TLSv1.2"
+            assert tls.cipher()[0] == "ECDHE-ECDSA-AES128-GCM-SHA256"
+    finally:
+        thread.join(timeout=5)
+    assert result == [("TLSv1.2", "ECDHE-ECDSA-AES128-GCM-SHA256")]
 
 
 def test_remote_server_error_hierarchy() -> None:
