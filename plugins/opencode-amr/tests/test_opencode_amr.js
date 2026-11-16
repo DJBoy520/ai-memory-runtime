@@ -40,7 +40,8 @@ test("2.x socket path defaults to amr2-opencode.sock with documented priority", 
   assert.equal(path.basename(defaultPath), "amr2-opencode.sock");
 
   process.env.AMR2_SOCKET_PATH = "/tmp/amr2-env-override.sock";
-  assert.equal(resolveSocketPath("/tmp/configured.sock"), "/tmp/amr2-env-override.sock");
+  assert.equal(resolveSocketPath("/tmp/configured.sock"), "/tmp/configured.sock");
+  assert.equal(resolveSocketPath(), "/tmp/amr2-env-override.sock");
   delete process.env.AMR2_SOCKET_PATH;
 
   assert.equal(resolveSocketPath("/tmp/configured.sock"), "/tmp/configured.sock");

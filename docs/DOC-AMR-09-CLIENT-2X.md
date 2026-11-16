@@ -17,8 +17,8 @@
 
 - 每个固定身份一个 socket：`$XDG_RUNTIME_DIR/amr2-<agent>.sock`，权限 `0600`。
 - 适配器配置中的 `bindings` 决定 socket 与身份；同一 socket 只对应一个身份。
-- 插件 socket 解析优先级（各插件统一）：
-  `AMR2_SOCKET_PATH` 环境变量 > 插件显式 `socketPath` > 旧 `AMR_SOCKET_PATH`
+- 插件 socket 解析优先级：
+  插件显式 `socketPath`（Hermes 也支持 `socket_path`）> `AMR2_SOCKET_PATH` > 旧 `AMR_SOCKET_PATH`
   迁移回退 > `$XDG_RUNTIME_DIR/amr2-<agent>.sock` > 平台默认。
 - 插件只配置 `socketPath`，不得再传 `source_agent`/`agent_id`；传了也会被适配器
   剥离。

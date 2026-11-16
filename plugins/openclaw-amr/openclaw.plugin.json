@@ -48,7 +48,7 @@
     "properties": {
       "socketPath": {
         "type": "string",
-        "description": "Path to the AMR 2.x adapter Unix Domain Socket. Priority: $AMR2_SOCKET_PATH > this value > $AMR_SOCKET_PATH (legacy) > $XDG_RUNTIME_DIR/amr2-openclaw.sock > /run/user/<uid>/amr2-openclaw.sock"
+        "description": "Path to the AMR 2.x adapter Unix Domain Socket. Priority: this value > $AMR2_SOCKET_PATH > $AMR_SOCKET_PATH (legacy) > $XDG_RUNTIME_DIR/amr2-openclaw.sock > /run/user/<uid>/amr2-openclaw.sock"
       },
       "deadlineMs": {
         "type": "number",

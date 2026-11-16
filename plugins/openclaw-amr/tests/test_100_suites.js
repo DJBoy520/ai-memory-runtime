@@ -107,13 +107,14 @@ test("TC-004: 旧环境变量 AMR_SOCKET_PATH 迁移回退验证", () => {
   }
 });
 
-test("TC-004b: AMR2_SOCKET_PATH 优先于显式路径与旧变量", () => {
+test("TC-004b: 显式路径优先，AMR2_SOCKET_PATH 为回退", () => {
   const oldLegacy = process.env.AMR_SOCKET_PATH;
   const oldAmr2 = process.env.AMR2_SOCKET_PATH;
   process.env.AMR_SOCKET_PATH = "/tmp/legacy-amr.sock";
   process.env.AMR2_SOCKET_PATH = "/tmp/amr2-priority.sock";
   try {
-    assert.equal(resolveSocketPath("/tmp/explicit-amr.sock"), "/tmp/amr2-priority.sock");
+    assert.equal(resolveSocketPath("/tmp/explicit-amr.sock"), "/tmp/explicit-amr.sock");
+    assert.equal(resolveSocketPath(), "/tmp/amr2-priority.sock");
   } finally {
     if (oldLegacy === undefined) delete process.env.AMR_SOCKET_PATH;
     else process.env.AMR_SOCKET_PATH = oldLegacy;

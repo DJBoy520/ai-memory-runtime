@@ -81,8 +81,8 @@ export function isTransientError(err) {
  * Resolve UDS path for the 2.x local adapter.
  *
  * Priority (DOC-AMR-09 section 2):
- * 1. `AMR2_SOCKET_PATH` environment override
- * 2. Explicit `socketPath` config
+ * 1. Explicit `socketPath` config
+ * 2. `AMR2_SOCKET_PATH` environment fallback
  * 3. `AMR_SOCKET_PATH` migration fallback (only while AMR2 is unset)
  * 4. `$XDG_RUNTIME_DIR/amr2-opencode.sock`
  * 5. `/run/user/<uid>/amr2-opencode.sock`
@@ -91,12 +91,12 @@ export function isTransientError(err) {
  * The legacy `qdrant-bge.sock` path is intentionally no longer a default.
  */
 export function resolveSocketPath(configuredPath) {
+  if (configuredPath && typeof configuredPath === "string" && configuredPath.trim().length > 0) {
+    return configuredPath.trim();
+  }
   const amr2Env = process.env.AMR2_SOCKET_PATH;
   if (amr2Env && amr2Env.trim().length > 0) {
     return amr2Env.trim();
-  }
-  if (configuredPath && typeof configuredPath === "string" && configuredPath.trim().length > 0) {
-    return configuredPath.trim();
   }
   const legacyEnv = process.env.AMR_SOCKET_PATH;
   if (legacyEnv && legacyEnv.trim().length > 0) {

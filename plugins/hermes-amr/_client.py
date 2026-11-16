@@ -82,21 +82,21 @@ def resolve_socket_path(configured_path: Optional[str] = None) -> str:
     """Resolve the 2.x adapter socket path.
 
     Priority (DOC-AMR-09 section 2):
-    1. ``AMR2_SOCKET_PATH`` environment override
-    2. Explicit ``socket_path`` passed by the caller/config
+    1. Explicit ``socket_path`` passed by the caller/config
+    2. ``AMR2_SOCKET_PATH`` environment fallback
     3. Legacy ``AMR_SOCKET_PATH`` migration fallback
     4. ``$XDG_RUNTIME_DIR/amr2-hermes.sock``
     5. Linux ``/run/user/<uid>/amr2-hermes.sock``
     6. ``/tmp/amr2-hermes.sock``
     """
-    amr2_env = os.environ.get("AMR2_SOCKET_PATH")
-    if amr2_env and amr2_env.strip():
-        return amr2_env.strip()
-
     if configured_path is not None:
         configured = str(configured_path).strip()
         if configured:
             return configured
+
+    amr2_env = os.environ.get("AMR2_SOCKET_PATH")
+    if amr2_env and amr2_env.strip():
+        return amr2_env.strip()
 
     legacy_env = os.environ.get("AMR_SOCKET_PATH")
     if legacy_env and legacy_env.strip():

@@ -248,7 +248,8 @@ def test_resolve_socket_path_priority(monkeypatch):
     assert resolve_socket_path("/explicit.sock") == "/explicit.sock"
 
     monkeypatch.setenv("AMR2_SOCKET_PATH", "/amr2/override.sock")
-    assert resolve_socket_path("/explicit.sock") == "/amr2/override.sock"
+    assert resolve_socket_path("/explicit.sock") == "/explicit.sock"
+    assert resolve_socket_path(None) == "/amr2/override.sock"
 
     monkeypatch.delenv("AMR2_SOCKET_PATH")
     monkeypatch.setenv("AMR_SOCKET_PATH", "/legacy/amr.sock")

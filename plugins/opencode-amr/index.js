@@ -129,7 +129,7 @@ export function buildIngestMessages(sessionId, rawMessages) {
  *
  * Plugin options may be supplied either on the server input object or as the
  * second argument (OpenCode plugin options):
- * - `socketPath`: explicit adapter socket path (env `AMR2_SOCKET_PATH` wins).
+ * - `socketPath`: explicit adapter socket path (preferred over `AMR2_SOCKET_PATH`).
  * - `deadlineMs`: recall/search deadline (default 80ms).
  * - `ingestDeadlineMs`: session.ingest deadline (default 1500ms).
  * - `persistenceDir`: spool directory (env `AMR_OPENCODE_SPOOL_DIR` fallback).
