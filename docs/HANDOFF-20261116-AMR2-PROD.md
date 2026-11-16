@@ -3,7 +3,7 @@
 - **交接对象**：Codex
 - **前序交接**：[HANDOFF-20261116-AMR2.md](HANDOFF-20261116-AMR2.md)（2.x 代码开发阶段，HEAD `33abbae`）
 - **本交接范围**：代码复审与修复、隔离演练、2.x 生产切换、证书签发、身份鉴权验证
-- **当前分支**：`release/2.x`，HEAD `04d423f`，**工作区干净**
+- **当前分支**：`release/2.x`，HEAD `99fa285`，**工作区干净**
 - **未 push**：2.x 全部提交只在本地
 - **生产状态**：**2.x + 每 agent 凭证已上线**，`amr.service` / `amr2-mcp` / `amr2-adapter` 三个单元 active
 - **客户端状态**：OpenClaw、Hermes、DSH/Claude、Codex、OpenCode 已迁移到 adapter + 独立 token；详见 [DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md](DEPLOYMENT-RECORD-20261116-AGENT-ACCESS.md)
@@ -12,7 +12,7 @@
 
 ## 1. 一句话结论
 
-2.x **服务端已上线并在内网可用**：HTTPS + AEP 证书 + 每 agent Bearer 凭证、七个 adapter
+2.x **服务端已上线并在内网可用**：HTTPS + AEP 证书 + 每 agent Bearer 凭证、九个 adapter
 socket、daemon 内部 socket 凭证、水位归档全部验证通过。OpenClaw、Hermes、DSH/Claude、
 Codex、OpenCode 已迁移到各自的 adapter socket 与 token 文件；共享同一 UID 的进程隔离
 仍是已知边界。
@@ -47,7 +47,7 @@ Codex、OpenCode 已迁移到各自的 adapter socket 与 token 文件；共享�
 
 - `amr2-mcp` 用独立 venv：`~/.local/share/amr/remote-venv`（`requirements-remote.txt`，`mcp==1.30.0`）。**生产 `.venv` 不含 mcp，这是刻意的**。
 - `amr2-adapter` 用生产 `.venv`（只需要 httpx）。
-- adapter socket：`/run/user/1000/amr2-{dsh,openclaw,opencode,hermes,zcode,claude_code,codex}.sock`，0600；每个 socket 只接受对应 agent 的 token。
+- adapter socket：`/run/user/1000/amr2-{dsh,openclaw,opencode,hermes,zcode,claude_code,codex,pi,gemini_cli}.sock`，0600；每个 socket 只接受对应 agent 的 token。
 - 2.x 单元从 `~/.config/amr/agents/current/{remote,adapter}.json` 读取当前快照；daemon 通过 `amr.service.d/amr-internal-auth.conf` 启用内部业务/管理凭证。
 
 ### 3.2 网络与 DNS

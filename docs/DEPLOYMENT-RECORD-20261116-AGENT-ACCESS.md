@@ -7,7 +7,7 @@ another.
 
 ## Source and artifacts
 
-- Source commit: `04d423f` on `release/2.x`; the feature commit is `2da295f`.
+- Source commit: `99fa285` on `release/2.x`; the feature commit is `2da295f`.
 - Active generation: `~/.config/amr/agents/generations/g20261116T230136` (earlier cutover generations `g20261116T221944` and `g20261116T223504` were superseded as identities were added; existing tokens are unchanged).
 - Active pointer: `~/.config/amr/agents/current` (symlink).
 - Backup root (mode 0700): `~/.local/share/amr/backups/agent-access-20261116T221927`.
