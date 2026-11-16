@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "amr": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python",
+      "args": [
+        "/home/dj/WorkSpaces/ai-memory-runtime/src/interfaces/mcp/bridge.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/dj/WorkSpaces/ai-memory-runtime",
+        "AMR_SOURCE_AGENT": "pi",
+        "AMR_SOCKET_PATH": "/run/user/1000/amr2-pi.sock",
+        "AMR2_TOKEN_FILE": "/home/dj/.config/amr/agents/current/tokens/pi.token"
+      }
+    }
+  }
+}

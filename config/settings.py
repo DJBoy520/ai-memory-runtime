@@ -26,6 +26,8 @@ class ServerConfig(BaseModel):
             "doubao",
             "zcode",
             "claude_code",
+            "pi",
+            "gemini_cli",
             "kle",
             "system",
             "default_agent",

@@ -8,7 +8,7 @@
 | 方式 | 适用 | 传输 | 身份 |
 | --- | --- | --- | --- |
 | **A. 直连 HTTPS MCP** | 支持远程 MCP 的标准客户端（Claude Code、Codex、ZCode 等，需验证） | `https://<host>:<port>/mcp` | 客户端自带 `Authorization: Bearer <token>` |
-| **B. 本地适配器** | 需要 hook 低延迟或不支持远程 MCP 的插件（OpenClaw、Hermes、OpenCode、DSH、Doubao） | 本地 UDS（4 字节长度前缀 + JSON-RPC 2.0） | 适配器按 socket 固定身份，插件不持有令牌 |
+| **B. 本地适配器** | 需要 hook 低延迟或不支持远程 MCP 的插件（OpenClaw、Hermes、OpenCode、DSH、Pi、Gemini CLI、Doubao） | 本地 UDS（4 字节长度前缀 + JSON-RPC 2.0） | 适配器按 socket 固定身份；客户端必须持有该身份的私有 token 文件 |
 
 两种方式共享服务端授权：令牌绑定 `agent_id` 与工具允许列表，服务端覆盖
 `agent_id`/`source_agent`。管理接口仍只走本机 admin UDS。
@@ -17,6 +17,8 @@
 
 - 每个固定身份一个 socket：`$XDG_RUNTIME_DIR/amr2-<agent>.sock`，权限 `0600`。
 - 适配器配置中的 `bindings` 决定 socket 与身份；同一 socket 只对应一个身份。
+- 每个请求（包括 `amr.ping`）都必须带该 socket 绑定身份对应的 `auth_token`；
+  token 从 0600/0400 私有文件读取，不写入配置、日志或命令行。
 - 插件 socket 解析优先级：
   插件显式 `socketPath`（Hermes 也支持 `socket_path`）> `AMR2_SOCKET_PATH` > 旧 `AMR_SOCKET_PATH`
   迁移回退 > `$XDG_RUNTIME_DIR/amr2-<agent>.sock` > 平台默认。
@@ -147,13 +149,15 @@ spool 为空。此验证不涉及真实模型、真实适配器、远程服务�
 ```json
 {
   "socketPath": "/run/user/1000/amr2-openclaw.sock",
+  "tokenFile": "/home/<user>/.config/amr/agents/current/tokens/openclaw.token",
   "deadlineMs": 80,
   "ingestDeadlineMs": 1500,
   "persistenceDir": "/home/<user>/.local/share/amr-spool/openclaw"
 }
 ```
 
-- 不再配置 `sourceAgent`；身份由适配器绑定。
+- 不再配置 `sourceAgent`；身份由适配器绑定。`tokenFile` 必须指向该身份的
+  私有凭证文件；缺失或轮换中的凭证按可重试错误处理。
 - 插件版本从 `2.0.0` 起，包名不变。
 - 升级时先启动 2.x 适配器与新 socket，再切换插件配置；保留 1.x socket 作为回退。
 
@@ -179,13 +183,16 @@ spool 为空。此验证不涉及真实模型、真实适配器、远程服务�
 
 | Agent | 2.x 方式 | 状态 |
 | --- | --- | --- |
-| Claude Code | A（HTTP MCP + header）；私有 CA 用 `NODE_EXTRA_CA_CERTS` | 待配置验证 |
-| Codex | A（`--url` + bearer token env）；来源改为 `codex` | 待配置验证 |
-| ZCode | B + `bridge2` stdio shim | shim 已实现 |
-| OpenCode | 原生插件 2.x（adapter UDS） | 已完成 15 tests |
-| OpenClaw | 原生插件 2.x（adapter UDS + 现有 spool） | 已完成 162 tests |
-| Hermes | 原生插件 2.x（adapter UDS + JSONL spool） | 已完成 23 tests |
-| DSH | 原生插件 2.x + `bridge2`（工具调用） | 插件 262 tests；shim 已实现 |
+| Claude Code | B（`bridge.py` + `claude_code` token）；也支持 A（HTTP MCP + header） | 已迁移 |
+| Codex | B（`bridge.py` + `codex` token） | 已迁移 |
+| Pi | B（`bridge.py` + `pi` token） | 已迁移 |
+| Gemini CLI | B（`bridge.py` + `gemini_cli` token） | 已迁移 |
+| ZCode | B + `bridge2` stdio shim + `zcode` token | 已迁移 |
+| OpenCode | 原生插件 2.x（adapter UDS + token） | 已完成 16 tests |
+| OpenClaw | 原生插件 2.x（adapter UDS + token + spool） | 已完成 166 tests |
+| Hermes | 原生插件 2.x（adapter UDS + token + JSONL spool） | 已完成 27 tests |
+| DSH | 原生插件 2.x + `bridge2`（工具调用 + token） | 已迁移 |
+| CC Switch | 管理 per-app MCP 条目 | `deploy/clients/ccswitch-amr.py` |
 | Doubao | B（SSH 转发 socket）或 A | 待迁移 |
 | Windows/其他 | A 或 SSH → B | 待验证 |
 

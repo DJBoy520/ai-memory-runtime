@@ -1,4 +1,11 @@
-# ~/.codex/config.toml (excerpt). Export AMR_TOKEN before starting Codex.
+# ~/.codex/config.toml (excerpt). The token stays in a private file; never put
+# its value in this file or in shell history.
 [mcp_servers.amr]
-url = "https://amr.internal:8443/mcp"
-bearer_token_env_var = "AMR_TOKEN"
+command = "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python"
+args = ["/home/dj/WorkSpaces/ai-memory-runtime/src/interfaces/mcp/bridge.py"]
+
+[mcp_servers.amr.env]
+PYTHONPATH = "/home/dj/WorkSpaces/ai-memory-runtime"
+AMR_SOURCE_AGENT = "codex"
+AMR_SOCKET_PATH = "/run/user/1000/amr2-codex.sock"
+AMR2_TOKEN_FILE = "/home/dj/.config/amr/agents/current/tokens/codex.token"

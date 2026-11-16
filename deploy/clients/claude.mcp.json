@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "amr": {
+      "type": "stdio",
+      "command": "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python",
+      "args": [
+        "/home/dj/WorkSpaces/ai-memory-runtime/src/interfaces/mcp/bridge.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/dj/WorkSpaces/ai-memory-runtime",
+        "AMR_SOURCE_AGENT": "claude_code",
+        "AMR_SOCKET_PATH": "/run/user/1000/amr2-claude_code.sock",
+        "AMR2_TOKEN_FILE": "/home/dj/.config/amr/agents/current/tokens/claude_code.token"
+      }
+    }
+  }
+}

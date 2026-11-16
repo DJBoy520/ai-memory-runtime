@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "amr": {
+      "command": "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python",
+      "args": [
+        "/home/dj/WorkSpaces/ai-memory-runtime/src/interfaces/mcp/bridge.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/dj/WorkSpaces/ai-memory-runtime",
+        "AMR_SOURCE_AGENT": "gemini_cli",
+        "AMR_SOCKET_PATH": "/run/user/1000/amr2-gemini_cli.sock",
+        "AMR2_TOKEN_FILE": "/home/dj/.config/amr/agents/current/tokens/gemini_cli.token"
+      },
+      "timeout": 60000
+    }
+  }
+}

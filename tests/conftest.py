@@ -59,6 +59,8 @@ server:
     - "openclaw"
     - "default_agent"
     - "claude_code"
+    - "pi"
+    - "gemini_cli"
     - "opencode"
     - "dsh"
     - "doubao"

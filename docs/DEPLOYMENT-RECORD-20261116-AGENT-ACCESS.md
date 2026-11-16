@@ -8,7 +8,7 @@ another.
 ## Source and artifacts
 
 - Source commit: `04d423f` on `release/2.x`; the feature commit is `2da295f`.
-- Active generation: `~/.config/amr/agents/generations/g20261116T223504` (the first cutover generation `g20261116T221944` was superseded only to add the dedicated `codex` adapter socket; its tokens are unchanged).
+- Active generation: `~/.config/amr/agents/generations/g20261116T230136` (earlier cutover generations `g20261116T221944` and `g20261116T223504` were superseded as identities were added; existing tokens are unchanged).
 - Active pointer: `~/.config/amr/agents/current` (symlink).
 - Backup root (mode 0700): `~/.local/share/amr/backups/agent-access-20261116T221927`.
   It contains the pre-switch gateway/adapter configs, old credential file,
@@ -20,8 +20,8 @@ another.
   `amr.service.d/amr-internal-auth.conf` drop-in. Their `ExecStart` and
   `ExecStartPre` paths read `agents/current/{remote,adapter}.json`.
 - Enabled identities in the generation: `claude_code`, `codex`, `dsh`,
-  `hermes`, `openclaw`, `opencode`, `zcode`. All retain the pre-switch tool
-  grants (`memory_search`, `memory_create`, `memory_ingest_session`).
+  `gemini_cli`, `hermes`, `openclaw`, `opencode`, `pi`, `zcode`. All retain the
+  pre-switch tool grants (`memory_search`, `memory_create`, `memory_ingest_session`).
 
 ## Cutover sequence
 
@@ -48,6 +48,13 @@ another.
 9. Updated the DSH profile patches to the adapter/token bridge and verified
    that the restarted child process carries `AMR_SOCKET_PATH` and
    `AMR2_TOKEN_FILE` for `claude_code`.
+10. Added `pi` and `gemini_cli` identities with dedicated adapter sockets,
+    rendered and activated `g20261116T230136`, and migrated Pi and Gemini
+    CLI MCP configs to the adapter plus their own token files.
+11. Updated CC Switch through `deploy/clients/ccswitch-amr.py`, creating
+    per-application rows (`amr`, `amr-codex`, `amr-gemini`, `amr-pi`,
+    `ai-memory`) so each app uses a distinct identity. CC Switch must be
+    reopened/refreshed to apply the database rows to its managed apps.
 
 ## Verification evidence
 
@@ -59,8 +66,8 @@ another.
   `codex`.
 - `/mcp` returns 401 without a bearer token. An authenticated `initialize` and
   `tools/list` succeed; `openclaw` sees only its three granted tools. The
-  `codex` adapter socket returns `amr.ping` with the codex token and rejects
-  other tokens.
+  `codex`, `pi` and `gemini_cli` adapter sockets return `amr.ping` with their
+  own tokens and reject other tokens.
 - The daemon business socket returns `AUTH_FAILED` without the internal token
   and rejects an agent token. The admin socket rejects the business token.
 - The adapter rejects missing, wrong, cross-agent and internal-service tokens
@@ -80,8 +87,8 @@ another.
   client default-token path returned `amr.ping` and its plugin suite passed 16
   tests.
 - Python suite: `894 passed, 16 skipped` in the feature worktree before the
-  final adapter cleanup; after the cleanup, the production workspace reported
-  `896 passed, 15 skipped`. OpenClaw plugin suite: `166 passed`. Hermes plugin
+  final adapter cleanup; after the cleanup and client integration tests, the
+  production workspace reported `898 passed, 15 skipped`. OpenClaw plugin suite: `166 passed`. Hermes plugin
   suite: `27 passed`.
 
 ## Known boundaries
@@ -97,6 +104,9 @@ another.
 - The DSH web process itself was not restarted; its AMR MCP child was
   restarted with the new adapter/token environment and verified. The profile
   patches are the durable source for future DSH starts.
+- CC Switch may cache its MCP rows in the running desktop process. The
+  database is updated and the installer is idempotent, but the app must be
+  reopened/refreshed before its managed app configs are rewritten.
 - OpenClaw/Hermes spool directories were empty at cutover. A transient failure
   remains on disk, but clients do not guarantee immediate replay merely because
   the service becomes available; verify the spool after any future switch.

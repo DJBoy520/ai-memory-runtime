@@ -1,4 +1,4 @@
-# DSH Cordis patch excerpt: replace the 1.x bridge.py entry with bridge2.
+# DSH Cordis patch excerpt: AMR 2.0 adapter through the native stdio shim.
 - insert:
     - id: mcp-amr
       name: '@deepseek-ai/dsh-mcp-client'
@@ -12,6 +12,8 @@
           - src.interfaces.mcp.bridge2
           - --agent
           - dsh
+          - --token-file
+          - /home/dj/.config/amr/agents/current/tokens/dsh.token
         env:
           PYTHONPATH: /home/dj/WorkSpaces/ai-memory-runtime
         transport: stdio

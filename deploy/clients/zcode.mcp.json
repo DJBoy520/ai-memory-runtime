@@ -3,7 +3,14 @@
     "servers": {
       "amr": {
         "command": "/home/dj/WorkSpaces/ai-memory-runtime/.venv/bin/python",
-        "args": ["-m", "src.interfaces.mcp.bridge2", "--agent", "zcode"],
+        "args": [
+          "-m",
+          "src.interfaces.mcp.bridge2",
+          "--agent",
+          "zcode",
+          "--token-file",
+          "/home/dj/.config/amr/agents/current/tokens/zcode.token"
+        ],
         "env": {
           "PYTHONPATH": "/home/dj/WorkSpaces/ai-memory-runtime"
         }

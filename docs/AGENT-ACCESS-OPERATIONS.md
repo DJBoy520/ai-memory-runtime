@@ -18,6 +18,13 @@ Local clients that still speak the daemon protocol can be moved to the adapter: 
 
 The legacy business socket remains a same-UID boundary: holding the internal token grants broad daemon access rather than one agent's tool grants. Do not describe it as per-agent isolation. Retire direct clients after the gateway, adapter and maintenance tools have all been moved to their own token files.
 
+## Client integrations
+
+Checked-in templates and the CC Switch installer live in `deploy/clients/`.
+Each client has its own identity and token file; the Pi/Gemini/Codex/Claude/DSH
+stdio examples use `bridge.py` or `bridge2` over the adapter socket, while
+OpenClaw/Hermes/OpenCode use the native plugins in `plugins/`.
+
 ## Inventory commands
 
 Run from the repository with its Python environment. The default private registry is `~/.config/amr/agents` (directory 0700, inventory 0600). Commands never print bearer tokens.

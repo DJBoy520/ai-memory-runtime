@@ -1,0 +1,20 @@
+{
+  "plugins": {
+    "entries": {
+      "openclaw-amr": {
+        "enabled": true,
+        "config": {
+          "socketPath": "/run/user/1000/amr2-openclaw.sock",
+          "tokenFile": "/home/dj/.config/amr/agents/current/tokens/openclaw.token",
+          "persistenceDir": "/home/dj/.local/share/openclaw-amr/sessions",
+          "autoReplayOnStartup": true,
+          "deadlineMs": 80,
+          "ingestDeadlineMs": 1500,
+          "scoreThreshold": 0.65,
+          "limit": 3,
+          "maxTotalChars": 4000
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# ~/.hermes/config.yaml (excerpt); the provider reads memory.amr.
+memory:
+  provider: amr
+  amr:
+    socket_path: /run/user/1000/amr2-hermes.sock
+    token_file: /home/dj/.config/amr/agents/current/tokens/hermes.token
+    project_id: crypto-infrastructure
+    top_k: 3
+    auto_extract: true
