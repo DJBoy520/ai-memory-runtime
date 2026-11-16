@@ -46,9 +46,9 @@ another.
    per-agent token path when no explicit `tokenFile` is supplied.
 8. Added a dedicated `codex` adapter socket, rendered and activated the new
    generation, and migrated the Codex MCP bridge to the `codex` token.
-9. Updated the DSH profile patches to the adapter/token bridge. The currently
-   running DSH process was started before that change and must be restarted
-   before its AMR MCP child can use the new configuration.
+9. Updated the DSH profile patches to the adapter/token bridge and verified
+   that the restarted child process carries `AMR_SOCKET_PATH` and
+   `AMR2_TOKEN_FILE` for `claude_code`.
 
 ## Verification evidence
 
@@ -92,10 +92,9 @@ another.
   grants. It is intended for the gateway, diagnostics and maintenance.
 - A permitted search can read the full memory corpus; tool grants are not
   project-level isolation.
-- The currently running DSH web process predates the profile patch update. Its
-  old AMR MCP child has no token and will fail against the protected daemon
-  until DSH is restarted. The profile patches are already updated for the next
-  start.
+- The DSH web process itself was not restarted; its AMR MCP child was
+  restarted with the new adapter/token environment and verified. The profile
+  patches are the durable source for future DSH starts.
 - OpenClaw/Hermes spool directories were empty at cutover. A transient failure
   remains on disk, but clients do not guarantee immediate replay merely because
   the service becomes available; verify the spool after any future switch.
