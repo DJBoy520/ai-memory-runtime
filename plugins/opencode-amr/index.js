@@ -130,6 +130,7 @@ export function buildIngestMessages(sessionId, rawMessages) {
  * Plugin options may be supplied either on the server input object or as the
  * second argument (OpenCode plugin options):
  * - `socketPath`: explicit adapter socket path (preferred over `AMR2_SOCKET_PATH`).
+ * - `tokenFile`: private per-agent credential file (also `AMR2_TOKEN_FILE`).
  * - `deadlineMs`: recall/search deadline (default 80ms).
  * - `ingestDeadlineMs`: session.ingest deadline (default 1500ms).
  * - `persistenceDir`: spool directory (env `AMR_OPENCODE_SPOOL_DIR` fallback).
@@ -154,6 +155,7 @@ export const server = async (input = {}, pluginOptions = {}) => {
 
   const udsClient = new AmrUdsClient({
     socketPath: config.socketPath,
+    tokenFile: config.tokenFile,
     defaultDeadlineMs: deadlineMs,
   });
 

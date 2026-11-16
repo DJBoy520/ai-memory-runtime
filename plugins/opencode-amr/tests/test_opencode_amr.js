@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
 
 import plugin, { id, isNoiseOrHeartbeat, buildIngestMessages } from "../index.js";
 import { buildMemoryContext, escapeXml } from "../lib/context_builder.js";
@@ -237,5 +238,31 @@ test("opencode-amr plugin server hooks execute prefetch and persist-first ingest
     assert.equal(record.payload.messages[0].message_id, "msg_1");
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("per-agent credential is sent and missing credential is retryable", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "amr-opencode-auth-"));
+  const sock = path.join(dir, "a.sock");
+  const tokenFile = path.join(dir, "token");
+  fs.writeFileSync(tokenFile, "z".repeat(43), { mode: 0o600 });
+  const server = net.createServer((socket) => {
+    const decoder = new FrameDecoder();
+    socket.on("data", (chunk) => {
+      for (const frame of decoder.feed(chunk)) {
+        const req = JSON.parse(frame.toString());
+        socket.end(encodeFrame({ jsonrpc: "2.0", id: req.id, result: { token: req.auth_token } }));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(sock, resolve));
+  try {
+    const client = new AmrUdsClient({ socketPath: sock, tokenFile, defaultDeadlineMs: 1000 });
+    assert.deepEqual(await client.request("amr.ping"), { token: "z".repeat(43) });
+    fs.unlinkSync(tokenFile);
+    await assert.rejects(client.request("amr.ping"), (err) => err.code === -32010);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
