@@ -22,6 +22,7 @@ import math
 import os
 from collections.abc import Mapping
 from typing import Any, Optional, Union
+from src.interfaces.adapter.credential import read_token
 
 from src.interfaces.ipc.protocol import (
     ConnectionClosedError,
@@ -171,6 +172,11 @@ class RemoteRpc:
             req_id = next(self._request_ids)
 
         request = make_jsonrpc_request(method, request_params, req_id=req_id)
+        token_file = os.environ.get('AMR_INTERNAL_TOKEN_FILE')
+        if os.environ.get('AMR_INTERNAL_AUTH_REQUIRED') == '1' and not token_file:
+            raise ValueError('internal authentication token file is required')
+        if token_file:
+            request['auth_token'] = read_token(token_file)
         reader, writer = await self._connect(method)
         try:
             await self._write_request(writer, request, method)

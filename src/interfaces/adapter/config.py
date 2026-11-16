@@ -201,8 +201,8 @@ def _validate_bindings(
     raw: Any,
     by_agent: Mapping[str, List[Tuple[str, Tuple[str, ...]]]],
 ) -> Tuple[AdapterBinding, ...]:
-    if not isinstance(raw, list) or not raw:
-        raise _fail("'bindings' must be a non-empty list")
+    if not isinstance(raw, list):
+        raise _fail("'bindings' must be a list")
 
     bindings: List[AdapterBinding] = []
     seen_paths: set[str] = set()

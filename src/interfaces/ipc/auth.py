@@ -1,6 +1,9 @@
 """IPC Agent 授权与身份规范化模块（RFC v4 §C3 / RFC v5.2）。"""
+import json
+import os
+import stat
 from typing import Any, Dict, Optional, Tuple
-from src.interfaces.ipc.errors import RpcAgentUnauthorized
+from src.interfaces.ipc.errors import RpcAgentUnauthorized, RpcRegistryUnavailable
 
 
 def authorize_agent(config: Any, params: Optional[Dict[str, Any]] = None) -> Tuple[str, Optional[str]]:
@@ -28,6 +31,24 @@ def authorize_agent(config: Any, params: Optional[Dict[str, Any]] = None) -> Tup
 
     allowed_list = getattr(getattr(config, "server", None), "allowed_agents", [])
     allowed_agents = {str(a).strip().lower() for a in allowed_list}
+
+    credentials_file = os.environ.get('AMR_AGENT_CREDENTIALS_FILE')
+    if credentials_file:
+        try:
+            fd = os.open(credentials_file, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+            with os.fdopen(fd, 'r', encoding='utf-8') as f:
+                info = os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in (0o400, 0o600) or info.st_size > 1024 * 1024:
+                    raise ValueError('invalid credentials')
+                credentials = json.load(f)
+            if not isinstance(credentials, dict) or not credentials:
+                raise ValueError('invalid credentials')
+            names = [entry['agent_id'] for entry in credentials.values()]
+            if any(not isinstance(n, str) or not n or n != n.strip().lower() for n in names):
+                raise ValueError('invalid identities')
+            allowed_agents = set(names) | ({'system'} if 'system' in allowed_agents else set())
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            raise RpcRegistryUnavailable('active agent registry unavailable') from None
 
     if agent_id not in allowed_agents:
         raise RpcAgentUnauthorized(

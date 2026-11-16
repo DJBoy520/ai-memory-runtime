@@ -16,6 +16,7 @@
  */
 
 import net from "node:net";
+import fs from "node:fs";
 import { logger } from "./logger.js";
 
 export const MAX_FRAME_SIZE = 4 * 1024 * 1024; // 4MB frame safety ceiling
@@ -215,12 +216,32 @@ export class AmrUdsClient {
    */
   constructor(options = {}) {
     this.configuredPath = options.socketPath;
+    this.tokenFile = options.tokenFile;
     this.defaultDeadlineMs = options.defaultDeadlineMs || 80;
     this._requestId = 1;
   }
 
   getSocketPath() {
     return resolveSocketPath(this.configuredPath);
+  }
+
+  getToken() {
+    if (!this.tokenFile) return undefined;
+    let fd;
+    try {
+      fd = fs.openSync(this.tokenFile, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+      const s = fs.fstatSync(fd);
+      if (!s.isFile() || s.uid !== process.getuid() || ![0o400, 0o600].includes(s.mode & 0o777) || s.size > 4096) throw new Error();
+      const token = fs.readFileSync(fd, "utf8").trim();
+      if (!/^[\x21-\x7e]{32,4096}$/.test(token)) throw new Error();
+      return token;
+    } catch {
+      const err = new Error("AMR credential unavailable or invalid");
+      err.code = AMR_ERROR_CODES.ADAPTER_UNAVAILABLE;
+      throw err;
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
   }
 
   /**
@@ -241,6 +262,7 @@ export class AmrUdsClient {
       let settled = false;
       let timer = null;
       let socket = null;
+      let sentToken;
       const decoder = new FrameDecoder();
 
       const cleanup = () => {
@@ -299,11 +321,13 @@ export class AmrUdsClient {
       socket.on("connect", () => {
         if (settled) return;
         try {
+          sentToken = this.getToken();
           const rpcPayload = {
             jsonrpc: "2.0",
             id,
             method,
             params,
+            auth_token: sentToken,
           };
           const frame = encodeFrame(rpcPayload);
           socket.write(frame);
@@ -332,6 +356,13 @@ export class AmrUdsClient {
                 if (typeof resp.error === "object") {
                   err.code = resp.error.code;
                   err.data = resp.error.data;
+                  if (err.code === AMR_ERROR_CODES.ADAPTER_REMOTE_AUTH_FAILED && this.tokenFile) {
+                    try {
+                      if (this.getToken() !== sentToken) err.code = AMR_ERROR_CODES.ADAPTER_UNAVAILABLE;
+                    } catch {
+                      err.code = AMR_ERROR_CODES.ADAPTER_UNAVAILABLE;
+                    }
+                  }
                 }
                 finishReject(err);
               } else {
@@ -431,6 +462,7 @@ export class AmrUdsClient {
             jsonrpc: "2.0",
             method,
             params,
+            auth_token: this.getToken(),
           };
           const frame = encodeFrame(rpcPayload);
           socket.end(frame, () => {

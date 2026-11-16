@@ -1,0 +1,24 @@
+[Unit]
+Description=AMR authenticated HTTPS MCP
+After=network-online.target amr.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONPATH=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONUNBUFFERED=1
+Environment=AMR_INTERNAL_AUTH_REQUIRED=1
+Environment=AMR_INTERNAL_TOKEN_FILE=%h/.config/amr/internal.token
+UMask=0077
+ExecStartPre=%h/.local/share/amr/remote-venv/bin/python -m src.interfaces.mcp.remote_main --check --config %h/.config/amr/agents/current/remote.json
+ExecStart=%h/.local/share/amr/remote-venv/bin/python -m src.interfaces.mcp.remote_main --config %h/.config/amr/agents/current/remote.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t
+
+[Install]
+WantedBy=default.target

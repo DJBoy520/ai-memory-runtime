@@ -24,7 +24,9 @@ class FakeAdapter:
         try:
             request = await read_frame(reader)
             self.requests.append(request)
-            if self.error is not None:
+            if request.get('method') == 'amr.tools':
+                payload = {'jsonrpc':'2.0','id':request['id'],'result':{'tools':['memory_search']}}
+            elif self.error is not None:
                 payload = {
                     "jsonrpc": "2.0",
                     "id": request["id"],
@@ -97,6 +99,7 @@ def test_tools_list_hides_local_only_tools(tmp_path):
             )
             names = {tool["name"] for tool in response["result"]["tools"]}
             assert "memory_search" in names
+            assert names == {'memory_search'}
             assert "memory_spool_status" not in names
             assert "memory_spool_retry" not in names
         finally:
@@ -212,4 +215,21 @@ def test_non_object_request_is_rejected(tmp_path):
         response = await bridge.handle_request(["not", "an", "object"])
         assert response["error"]["code"] == -32600
 
+    asyncio.run(run())
+
+
+def test_bridge_forwards_private_agent_token(tmp_path):
+    async def run():
+        credential = tmp_path / 'token'
+        credential.write_text('a' * 43, encoding='ascii')
+        credential.chmod(0o600)
+        adapter = await FakeAdapter(str(tmp_path / 'adapter.sock')).start()
+        try:
+            bridge = AdapterBridge(str(tmp_path / 'adapter.sock'), token_file=str(credential))
+            result = await bridge._call_adapter('memory.search', {'query':'test'}, 1)
+            assert result == TOKEN_RESULT
+            assert adapter.requests[-1]['auth_token'] == 'a' * 43
+            assert 'auth_token' not in adapter.requests[-1]['params']
+        finally:
+            await adapter.stop()
     asyncio.run(run())

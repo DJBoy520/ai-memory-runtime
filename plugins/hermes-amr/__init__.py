@@ -136,6 +136,7 @@ class AmrMemoryProvider(MemoryProvider):
         self._last_recall_status: Optional[RecallStatus] = None
         self._session_id: str = ""
         self._hermes_home: Optional[Path] = None
+        self._token_file: Optional[str] = None
 
         # Persist-first spool + in-flight/replay coordination.
         self._spool: Optional[IngestSpool] = None
@@ -161,8 +162,14 @@ class AmrMemoryProvider(MemoryProvider):
         configured = cfg.get("socket_path") or cfg.get("socketPath")
         if not configured:
             configured = self._socket_path
-        client = AmrUdsClient(socket_path=configured)
-        return client.is_available()
+        token_file = cfg.get('token_file') or self._token_file
+        if not token_file:
+            return False
+        client = AmrUdsClient(socket_path=configured, token_file=token_file)
+        try:
+            return client.ping(timeout=0.3).get('status') == 'ok'
+        except Exception:
+            return False
 
     def unavailable_reason(self) -> str:
         return f"AMR socket at {self._socket_path} is unavailable or not running (amr2 adapter)."
@@ -184,6 +191,7 @@ class AmrMemoryProvider(MemoryProvider):
             or self._config.get("socketPath")
         )
         self._socket_path = resolve_socket_path(configured_socket)
+        self._token_file = kwargs.get("token_file") or self._config.get("token_file")
         self._project_id = (
             kwargs.get("project_id")
             or self._config.get("project_id")
@@ -219,7 +227,7 @@ class AmrMemoryProvider(MemoryProvider):
             self._client = client_arg
         else:
             self._client = AmrUdsClient(
-                socket_path=self._socket_path, request_timeout=1.0
+                socket_path=self._socket_path, request_timeout=1.0, token_file=self._token_file
             )
 
         logger.info(
@@ -356,7 +364,7 @@ class AmrMemoryProvider(MemoryProvider):
             return
 
         if not self._client:
-            self._client = AmrUdsClient(socket_path=self._socket_path)
+            self._client = AmrUdsClient(socket_path=self._socket_path, token_file=self._token_file)
 
         def _do_search() -> Any:
             params = {
@@ -381,7 +389,7 @@ class AmrMemoryProvider(MemoryProvider):
             if is_trivial_prompt(query):
                 return ""
             if not self._client:
-                self._client = AmrUdsClient(socket_path=self._socket_path)
+                self._client = AmrUdsClient(socket_path=self._socket_path, token_file=self._token_file)
             try:
                 params = {
                     "query": query,
@@ -530,7 +538,7 @@ class AmrMemoryProvider(MemoryProvider):
         aid = f"{sid}_{now_ts}_{seq}_a"
 
         def _worker() -> None:
-            client = self._client or AmrUdsClient(socket_path=self._socket_path)
+            client = self._client or AmrUdsClient(socket_path=self._socket_path, token_file=self._token_file)
 
             # 1. session.ingest (raw transcript into sessions.db), persist-first.
             try:

@@ -1,0 +1,23 @@
+[Unit]
+Description=AMR authenticated local adapter
+After=network-online.target amr2-mcp.service
+Wants=network-online.target
+Requires=amr2-mcp.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONPATH=%h/WorkSpaces/ai-memory-runtime
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStartPre=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python -m src.interfaces.adapter.main --check --config %h/.config/amr/agents/current/adapter.json
+ExecStart=%h/WorkSpaces/ai-memory-runtime/.venv/bin/python -m src.interfaces.adapter.main --config %h/.config/amr/agents/current/adapter.json
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t %h/.local/share/amr-spool
+
+[Install]
+WantedBy=default.target

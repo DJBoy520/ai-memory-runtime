@@ -61,3 +61,40 @@ def test_mcp_still_requires_bearer_auth():
 
     response = asyncio.run(run())
     assert response.status_code == 401
+
+
+def test_readyz_requires_bearer_and_propagates_backend_failure():
+    async def run():
+        ready_calls = []
+        async def ready(identity):
+            ready_calls.append(identity.agent_id)
+            if len(ready_calls) > 1: raise OSError('internal detail')
+        app = build_app(TokenAuthenticator({TOKEN: {'agent_id':'health','tools':['memory_search']}}), _Backend(), readiness=ready)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+                missing = await client.get('/readyz')
+                ok = await client.get('/readyz',headers={'Authorization':'Bearer '+TOKEN})
+                failed = await client.get('/readyz',headers={'Authorization':'Bearer '+TOKEN})
+        assert missing.status_code == 401
+        assert ok.status_code == 200
+        assert failed.status_code == 503 and 'internal detail' not in failed.text
+        assert ready_calls == ['health','health']
+    asyncio.run(run())
+
+
+def test_runtime_readiness_rejects_unhealthy_qdrant(monkeypatch, tmp_path):
+    from src.interfaces.mcp import remote_runtime
+    class Rpc:
+        def __init__(self, _): pass
+        async def __call__(self, method, params):
+            assert method == 'system.health'
+            return {'qdrant_ok':False,'sqlite_ok':True,'model_state':'READY'}
+    monkeypatch.setattr(remote_runtime, 'RemoteRpc', Rpc)
+    async def run():
+        auth = TokenAuthenticator({TOKEN:{'agent_id':'health','tools':['memory_search']}})
+        app = remote_runtime.build_runtime(str(tmp_path/'business'),str(tmp_path/'admin'),auth)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as client:
+                result = await client.get('/readyz',headers={'Authorization':'Bearer '+TOKEN})
+                assert result.status_code == 503
+    asyncio.run(run())

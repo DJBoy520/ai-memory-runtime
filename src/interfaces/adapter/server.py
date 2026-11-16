@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import hmac
 import logging
 import os
 import socket as socket_module
@@ -251,6 +253,20 @@ class AdapterService:
         method = request.get("method")
         params = request.get("params")
 
+        # The socket identifies the intended binding, but does not authenticate
+        # a caller that shares its Unix UID. Require the binding's bearer token
+        # on every request, including ping, before dispatching any operation.
+        presented = request.get("auth_token")
+        try:
+            candidate = hashlib.sha256(presented.encode("ascii")).digest() if isinstance(presented, str) else b""
+        except UnicodeEncodeError:
+            candidate = b""
+        expected = hashlib.sha256(binding.token.encode("ascii")).digest()
+        if not hmac.compare_digest(candidate, expected):
+            if has_id:
+                return await self._write_error(writer, -32012, "AUTH_FAILED", req_id)
+            return True
+
         if not isinstance(method, str) or not method:
             if has_id and not await self._write_error(
                 writer, -32600, "INVALID_REQUEST: missing method", req_id
@@ -268,6 +284,11 @@ class AdapterService:
             if has_id and not await self._write(
                 writer, make_jsonrpc_response({"status": "ok"}, req_id)
             ):
+                return False
+            return True
+
+        if method == 'amr.tools':
+            if has_id and not await self._write(writer, make_jsonrpc_response({'tools': list(binding.tools)}, req_id)):
                 return False
             return True
 

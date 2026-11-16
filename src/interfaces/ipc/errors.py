@@ -47,6 +47,11 @@ class RpcAgentUnauthorized(RpcError):
     error_code = "AGENT_UNAUTHORIZED"
 
 
+class RpcRegistryUnavailable(RpcError):
+    code = -32010
+    error_code = "REGISTRY_UNAVAILABLE"
+
+
 class RpcVersionConflict(RpcError):
     code = -32002
     error_code = "VERSION_CONFLICT"

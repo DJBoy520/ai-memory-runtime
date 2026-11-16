@@ -65,6 +65,7 @@ _AMR_ERROR_MAP: dict[int, tuple[str, bool, tuple[str, ...]]] = {
     -32004: ("QUEUE_FULL", True, ("active_requests", "max_queue_size")),
     -32005: ("NOT_FOUND", False, ("memory_id",)),
     -32006: ("IDEMPOTENCY_CONFLICT", False, ("op", "existing_memory_id")),
+    -32010: ("REGISTRY_UNAVAILABLE", True, ()),
     -32601: ("METHOD_NOT_FOUND", False, ()),
     -32602: ("INVALID_ARGUMENT", False, ("field",)),
     -32603: ("INTERNAL", False, ()),
@@ -367,6 +368,7 @@ def build_app(
     path: str = _DEFAULT_PATH,
     allowed_hosts: Iterable[str] | None = None,
     allowed_origins: Iterable[str] | None = None,
+    readiness: Any = None,
 ) -> Starlette:
     """构造仅内部使用的远程 MCP ASGI 应用。
 
@@ -430,10 +432,21 @@ def build_app(
         # 只暴露存活状态；不包含版本、路径、依赖或凭证信息，也不触达后端。
         return JSONResponse({"status": "ok"})
 
+    async def _readyz(request: Any) -> JSONResponse:
+        identity = request.scope.get(IDENTITY_SCOPE_KEY)
+        if type(identity) is not TokenIdentity or readiness is None:
+            return JSONResponse({'status': 'unavailable'}, status_code=503)
+        try:
+            await readiness(identity)
+            return JSONResponse({'status': 'ok'})
+        except Exception:
+            return JSONResponse({'status': 'unavailable'}, status_code=503)
+
     app = Starlette(
         routes=[
             Route(path, endpoint=_StreamableHTTPASGIApp(session_manager)),
             Route("/healthz", endpoint=_healthz, methods=["GET"]),
+            Route("/readyz", endpoint=_readyz, methods=["GET"]),
         ],
         lifespan=lifespan,
     )
@@ -442,6 +455,6 @@ def build_app(
     app.add_middleware(
         BearerAuthMiddleware,
         authenticator=authenticator,
-        protected_paths=[path],
+        protected_paths=[path, '/readyz'],
     )
     return app

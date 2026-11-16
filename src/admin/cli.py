@@ -28,13 +28,15 @@ from src.interfaces.ipc.protocol import (
     read_frame,
     write_frame,
 )
+from src.interfaces.adapter.credential import read_token
 
 DEFAULT_ADMIN_SOCKET = f"/run/user/{os.getuid()}/qdrant-bge-admin.sock"
 
 
 class AdminClient:
-    def __init__(self, socket_path: str = DEFAULT_ADMIN_SOCKET):
+    def __init__(self, socket_path: str = DEFAULT_ADMIN_SOCKET, token_file: str = None):
         self.socket_path = socket_path
+        self.token_file = token_file or os.environ.get("AMR_ADMIN_TOKEN_FILE")
 
     async def _send_command(self, method: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         params = params or {}
@@ -46,6 +48,11 @@ class AdminClient:
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
             req = make_jsonrpc_request(method=method, params=params, req_id=1)
+            if self.token_file:
+                try:
+                    req["auth_token"] = read_token(self.token_file)
+                except (OSError, ValueError, TypeError) as exc:
+                    raise RuntimeError("Admin credential unavailable or invalid") from exc
             await write_frame(writer, req)
             resp = await read_frame(reader)
             if "error" in resp and resp["error"]:
@@ -95,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ADMIN_SOCKET,
         help="Path to dedicated Admin Unix Domain Socket."
     )
+    parser.add_argument(
+        "--token-file",
+        default=os.environ.get("AMR_ADMIN_TOKEN_FILE"),
+        help="Private admin credential file (defaults to $AMR_ADMIN_TOKEN_FILE)."
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status", help="Get 6-state status and GPU memory metrics.")
@@ -117,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    client = AdminClient(socket_path=args.socket)
+    client = AdminClient(socket_path=args.socket, token_file=args.token_file)
 
     async def run():
         if args.command == "status":

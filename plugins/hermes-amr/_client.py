@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import socket
+import stat
 import struct
 import sys
 import threading
@@ -216,10 +217,12 @@ class AmrUdsClient:
         socket_path: Optional[str] = None,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
+        token_file: Optional[str] = None,
     ):
         self.socket_path = resolve_socket_path(socket_path)
         self.connect_timeout = connect_timeout
         self.request_timeout = request_timeout
+        self.token_file = token_file
 
     def is_available(self) -> bool:
         """Fast check to see if the UDS socket is connectable."""
@@ -237,6 +240,20 @@ class AmrUdsClient:
         Raises on failure; callers are expected to fail open (log at debug).
         """
         return self.request("amr.ping", {}, timeout=timeout)
+
+    def _read_token(self) -> str:
+        try:
+            fd = os.open(self.token_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as f:
+                info = os.fstat(f.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in (0o400, 0o600):
+                    raise ValueError("unsafe credential file")
+                token = f.read(4097).decode("ascii").strip()
+            if len(token) < 32 or len(token) > 4096 or any(not c.isprintable() or c.isspace() for c in token):
+                raise ValueError("invalid credential")
+            return token
+        except (OSError, UnicodeError, ValueError, TypeError):
+            raise AmrUnavailableError("credential unavailable or invalid") from None
 
     def request(
         self,
@@ -263,6 +280,9 @@ class AmrUdsClient:
             "params": params or {},
             "id": req_id,
         }
+
+        if self.token_file:
+            payload["auth_token"] = self._read_token()
 
         try:
             raw_data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -344,6 +364,8 @@ class AmrUdsClient:
             message = str(error.get("message") or "AMR RPC error")
             data = error.get("data")
             if code == ADAPTER_REMOTE_AUTH_FAILED:
+                if self.token_file and self._read_token() != payload.get('auth_token'):
+                    raise AmrUnavailableError('credential changed during request')
                 raise AmrAuthError(message, data)
             raise AmrRpcError(code, message, data)
 

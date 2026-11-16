@@ -165,6 +165,8 @@ class FakeDaemon:
                     writer,
                     {"jsonrpc": "2.0", "id": request["id"], "result": {"ok": True}},
                 )
+            elif method == "system.health":
+                await write_frame(writer, {"jsonrpc":"2.0", "id": request["id"], "result":{"status":"healthy", "qdrant_ok":True, "sqlite_ok":True, "model_state":"READY"}})
             elif method == "memory.update":
                 await write_frame(
                     writer,
@@ -300,7 +302,8 @@ class Harness:
 async def _rpc(socket_path, method, params=None, req_id=1):
     reader, writer = await asyncio.open_unix_connection(socket_path)
     try:
-        request = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        token = TOKEN_B if socket_path.endswith('hermes.sock') else (TOKEN_INTRUDER if socket_path.endswith('intruder.sock') else TOKEN_A)
+        request = {"jsonrpc": "2.0", "id": req_id, "method": method, "auth_token": token}
         if params is not None:
             request["params"] = params
         await write_frame(writer, request)
@@ -314,7 +317,7 @@ async def _rpc(socket_path, method, params=None, req_id=1):
 async def _notify(socket_path, method, params):
     reader, writer = await asyncio.open_unix_connection(socket_path)
     try:
-        await write_frame(writer, {"jsonrpc": "2.0", "method": method, "params": params})
+        await write_frame(writer, {"jsonrpc": "2.0", "method": method, "params": params, "auth_token": TOKEN_A})
     finally:
         writer.close()
         with contextlib.suppress(Exception):
@@ -511,6 +514,7 @@ def test_multiple_frames_on_one_connection(tmp_path):
                             "jsonrpc": "2.0",
                             "id": req_id,
                             "method": "memory.search",
+                            "auth_token": TOKEN_A,
                             "params": {"query": f"q{req_id}"},
                         },
                     )
@@ -687,6 +691,7 @@ def test_oversized_response_returns_clean_error_instead_of_hanging(tmp_path):
                         "id": 1,
                         "method": "memory.search",
                         "params": {"query": "large"},
+                        "auth_token": TOKEN_A,
                     },
                 )
                 response = await asyncio.wait_for(read_frame(reader), timeout=5.0)
@@ -747,7 +752,12 @@ def test_bridge2_round_trip_through_adapter_to_daemon(tmp_path):
     async def run():
         harness = await Harness(tmp_path).start()
         try:
-            bridge = AdapterBridge(harness.openclaw_socket)
+            token_path = tmp_path / 'bridge-token'
+            token_path.write_text(TOKEN_A, encoding='ascii')
+            token_path.chmod(0o600)
+            bridge = AdapterBridge(harness.openclaw_socket, token_file=str(token_path))
+            listed = await bridge.handle_request({'jsonrpc':'2.0','id':9,'method':'tools/list','params':{}})
+            assert {t['name'] for t in listed['result']['tools']} == set(TOKENS[TOKEN_A]['tools'])
             response = await bridge.handle_request(
                 {
                     "jsonrpc": "2.0",
@@ -792,4 +802,142 @@ def test_bridge2_round_trip_through_adapter_to_daemon(tmp_path):
         finally:
             await harness.stop()
 
+    asyncio.run(run())
+
+
+def test_authenticated_adapter_through_gateway_to_protected_daemon(tmp_path, monkeypatch):
+    from src.interfaces.ipc.server import UDSServer
+    internal = tmp_path / 'internal.token'
+    internal.write_text('i'*43, encoding='ascii'); internal.chmod(0o600)
+    monkeypatch.setenv('AMR_INTERNAL_TOKEN_FILE', str(internal))
+    monkeypatch.setenv('AMR_INTERNAL_AUTH_REQUIRED', '1')
+    async def run():
+        harness = await Harness(tmp_path).start()
+        await harness.daemon.stop()
+        requests = []
+        async def handle(method, params):
+            requests.append((method,params)); return SEARCH_RESULT
+        daemon = UDSServer('business', str(harness.run_dir / 'daemon.sock'), handle, internal_token='i'*43)
+        await daemon.start()
+        try:
+            reader, writer = await asyncio.open_unix_connection(daemon.socket_path)
+            await write_frame(writer, {'jsonrpc':'2.0','id':1,'method':'memory.search','params':{'agent_id':'openclaw'}})
+            assert (await read_frame(reader))['error']['code'] == -32012
+            writer.close(); await writer.wait_closed()
+            assert not requests
+            response = await _rpc(harness.openclaw_socket, 'memory.search', {'query':'isolated', 'agent_id':'forged'})
+            assert response['result'] == SEARCH_RESULT
+            assert requests[-1][1]['agent_id'] == 'openclaw'
+            assert requests[-1][1]['source_agent'] == 'openclaw'
+        finally:
+            await daemon.stop()
+            await harness.stop()
+    asyncio.run(run())
+
+
+def test_wrong_agent_token_never_reaches_protected_gateway(tmp_path):
+    async def run():
+        harness = await Harness(tmp_path).start()
+        try:
+            for token in (None, TOKEN_B, 'bad'):
+                reader, writer = await asyncio.open_unix_connection(harness.openclaw_socket)
+                request = {'jsonrpc':'2.0','id':1,'method':'memory.search','params':{'query':'x'}}
+                if token is not None: request['auth_token'] = token
+                await write_frame(writer, request)
+                assert (await read_frame(reader))['error']['code'] == -32012
+                writer.close(); await writer.wait_closed()
+            assert not harness.daemon.requests
+            ok = await _rpc(harness.openclaw_socket, 'memory.search', {'query':'ok'})
+            assert ok['result'] == SEARCH_RESULT
+        finally:
+            await harness.stop()
+    asyncio.run(run())
+
+
+def test_activation_readiness_checks_https_and_authenticated_sockets(tmp_path, monkeypatch):
+    from src.agent_access.activation import wait_ready
+    from src.agent_access.registry import Registry
+    import sys
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, 'TOKEN_A', 'a' * 43)
+    monkeypatch.setattr(module, 'TOKEN_B', 'b' * 43)
+    monkeypatch.setattr(module, 'TOKENS', {
+        'a'*43: {'agent_id': AGENT_A, 'tools': ['memory_search']},
+        'b'*43: {'agent_id': AGENT_B, 'tools': ['memory_search']},
+    })
+    async def run():
+        harness = await Harness(tmp_path).start()
+        try:
+            reg = Registry(tmp_path / 'registry')
+            reg.import_existing(harness.server_credentials, tmp_path / 'adapter.json')
+            base = json.loads((tmp_path / 'adapter.json').read_text())
+            gen = reg.render(tmp_path / 'generation', base)
+            await asyncio.to_thread(wait_ready, gen, 5)
+        finally:
+            await harness.stop()
+    asyncio.run(run())
+
+
+def test_activation_readiness_fails_when_daemon_is_down(tmp_path, monkeypatch):
+    from src.agent_access.activation import wait_ready, ActivationError
+    from src.agent_access.registry import Registry
+    import sys
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, 'TOKEN_A', 'a'*43)
+    monkeypatch.setattr(module, 'TOKEN_B', 'b'*43)
+    monkeypatch.setattr(module, 'TOKENS', {
+        'a'*43: {'agent_id': AGENT_A, 'tools':['memory_search']},
+        'b'*43: {'agent_id': AGENT_B, 'tools':['memory_search']},
+    })
+    async def run():
+        harness = await Harness(tmp_path).start()
+        try:
+            reg = Registry(tmp_path/'registry')
+            reg.import_existing(harness.server_credentials, tmp_path/'adapter.json')
+            gen = reg.render(tmp_path/'generation', json.loads((tmp_path/'adapter.json').read_text()))
+            await harness.daemon.stop()
+            with pytest.raises(ActivationError):
+                await asyncio.to_thread(wait_ready, gen, 0.5)
+        finally:
+            await harness.stop()
+    asyncio.run(run())
+
+
+def test_bridge_tool_discovery_requires_credential(tmp_path):
+    async def run():
+        harness = await Harness(tmp_path).start()
+        try:
+            bridge = AdapterBridge(harness.hermes_socket)
+            result = await bridge.handle_request({'jsonrpc':'2.0','id':1,'method':'tools/list','params':{}})
+            assert result['error']['code'] == -32012
+        finally:
+            await harness.stop()
+    asyncio.run(run())
+
+
+def test_unavailable_active_registry_is_retryable_end_to_end(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from src.interfaces.ipc.auth import authorize_agent
+    from src.interfaces.ipc.server import UDSServer
+    internal = tmp_path / 'internal.token'; internal.write_text('i'*43); internal.chmod(0o600)
+    active = tmp_path / 'active.json'; active.write_text(json.dumps(TOKENS)); active.chmod(0o600)
+    monkeypatch.setenv('AMR_INTERNAL_TOKEN_FILE', str(internal))
+    monkeypatch.setenv('AMR_AGENT_CREDENTIALS_FILE', str(active))
+    monkeypatch.setenv('AMR_INTERNAL_AUTH_REQUIRED', '1')
+    cfg = SimpleNamespace(server=SimpleNamespace(allowed_agents=['system']))
+    async def run():
+        harness = await Harness(tmp_path).start(); await harness.daemon.stop()
+        async def handle(method, params):
+            authorize_agent(cfg, params)
+            return SEARCH_RESULT
+        daemon = UDSServer('business', str(harness.run_dir/'daemon.sock'), handle, internal_token='i'*43)
+        await daemon.start()
+        try:
+            ok = await _rpc(harness.openclaw_socket, 'memory.search', {'query':'ok'})
+            assert ok['result'] == SEARCH_RESULT
+            active.unlink()
+            unavailable = await _rpc(harness.openclaw_socket, 'memory.search', {'query':'pending'})
+            assert unavailable['error']['code'] == -32010
+        finally:
+            await daemon.stop(); await harness.stop()
     asyncio.run(run())

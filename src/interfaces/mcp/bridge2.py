@@ -41,6 +41,7 @@ from src.interfaces.mcp.remote_backend import (  # noqa: E402
     TOOL_RPC_METHODS,
 )
 from src.interfaces.mcp.tools import TOOL_DEFINITIONS, validate_tool_args  # noqa: E402
+from src.interfaces.adapter.credential import read_token  # noqa: E402
 
 DEFAULT_CALL_TIMEOUT_SECONDS = float(
     os.environ.get("AMR2_BRIDGE_TIMEOUT_SECONDS", "120")
@@ -93,10 +94,12 @@ class AdapterBridge:
         socket_path: Optional[str] = None,
         call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
         max_request_bytes: int = MAX_REQUEST_BYTES,
+        token_file: Optional[str] = None,
     ) -> None:
         self.socket_path = resolve_socket_path(socket_path)
         self.call_timeout = call_timeout
         self.max_request_bytes = max_request_bytes
+        self.token_file = token_file
         self._request_id = 0
 
     def _next_id(self) -> int:
@@ -114,6 +117,11 @@ class AdapterBridge:
         )
         try:
             request = make_jsonrpc_request(method, params, req_id=req_id)
+            if self.token_file:
+                try:
+                    request['auth_token'] = read_token(self.token_file)
+                except ValueError:
+                    raise AdapterRpcError(-32012, 'credential unavailable or invalid') from None
             await write_frame(writer, request, max_bytes=self.max_request_bytes)
             response = await asyncio.wait_for(
                 read_frame(reader, max_bytes=self.max_request_bytes),
@@ -180,7 +188,17 @@ class AdapterBridge:
         if isinstance(method, str) and method.startswith("notifications/"):
             return None
         if method == "tools/list":
-            return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": _remote_tools()}}
+            try:
+                result = await self._call_adapter('amr.tools', {}, self._next_id())
+                grants = result.get('tools') if isinstance(result, dict) else None
+                if not isinstance(grants, list) or any(not isinstance(t, str) for t in grants):
+                    raise AdapterRpcError(-32011, 'invalid tool grants')
+                allowed = set(grants)
+                return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": [t for t in _remote_tools() if t['name'] in allowed]}}
+            except AdapterRpcError as exc:
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": exc.code, "message": "AMR authorization unavailable"}}
+            except (ConnectionError, OSError, asyncio.TimeoutError, FrameTooLargeError, FrameDecodeError, ConnectionClosedError):
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32010, "message": "AMR adapter unavailable"}}
         if method != "tools/call":
             return {
                 "jsonrpc": "2.0",
@@ -293,11 +311,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="AMR 2.x stdio MCP shim")
     parser.add_argument("--socket", default=None, help="adapter UDS path")
     parser.add_argument("--agent", default=None, help="agent name for default socket")
+    parser.add_argument("--token-file", default=os.environ.get('AMR2_TOKEN_FILE'), help="private agent credential file")
     parser.add_argument("--timeout", type=float, default=DEFAULT_CALL_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
     if args.agent:
         os.environ["AMR2_AGENT"] = args.agent
-    bridge = AdapterBridge(socket_path=args.socket, call_timeout=args.timeout)
+    bridge = AdapterBridge(socket_path=args.socket, call_timeout=args.timeout, token_file=args.token_file)
     try:
         asyncio.run(bridge.run_stdio())
     except KeyboardInterrupt:

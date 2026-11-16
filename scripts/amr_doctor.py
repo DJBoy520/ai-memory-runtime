@@ -35,6 +35,7 @@ from src.interfaces.ipc.protocol import (
     read_frame,
     write_frame,
 )
+from src.interfaces.adapter.credential import read_token
 
 
 def _get_default_runtime_dir() -> str:
@@ -57,6 +58,9 @@ async def send_ipc_rpc(
     )
     try:
         req = make_jsonrpc_request(method=method, params=params or {}, req_id=1)
+        token_file = os.environ.get('AMR_ADMIN_TOKEN_FILE') if method.startswith(('admin.', 'status.', 'outbox.')) else os.environ.get('AMR_INTERNAL_TOKEN_FILE')
+        if token_file:
+            req['auth_token'] = read_token(token_file)
         await asyncio.wait_for(write_frame(writer, req), timeout=timeout)
         resp = await asyncio.wait_for(read_frame(reader), timeout=timeout)
         if "error" in resp and resp["error"]:

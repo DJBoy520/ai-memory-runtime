@@ -229,3 +229,8 @@ def test_oversized_config_or_credentials_are_rejected(tmp_path):
     payload_path.write_text("{" + "y" * (1024 * 1024 + 1), encoding="utf-8")
     with pytest.raises(ValueError):
         load_adapter_config(str(payload_path))
+
+
+def test_empty_bindings_allowed_for_https_only_deployment(tmp_path):
+    config = _load(tmp_path, _config_payload(tmp_path, _credentials(tmp_path), bindings=[]))
+    assert config.bindings == ()

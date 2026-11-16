@@ -98,10 +98,12 @@ class UdsTransport(BaseTransport):
         socket_path: str = DEFAULT_UDS_SOCKET_PATH,
         connect_timeout: float = 1.0,
         request_timeout: float = 5.0,
+        auth_token_file: Optional[str] = None,
     ):
         self.socket_path = socket_path
         self.connect_timeout = connect_timeout
         self.request_timeout = request_timeout
+        self.auth_token_file = auth_token_file
 
     def _build_payload(
         self,
@@ -133,6 +135,18 @@ class UdsTransport(BaseTransport):
             "params": params,
             "id": req_id,
         }
+        if self.auth_token_file:
+            # Read at send time so a rotated token is picked up by the next
+            # request; a missing/unreadable file is a retryable outage, not a
+            # permanent rejection of the queued session.
+            try:
+                from src.interfaces.adapter.credential import read_token
+
+                rpc_obj["auth_token"] = read_token(self.auth_token_file)
+            except (OSError, ValueError, TypeError) as exc:
+                raise TransientDeliveryError(
+                    "AMR credential unavailable or invalid"
+                ) from exc
         raw = json.dumps(rpc_obj, ensure_ascii=False).encode("utf-8")
         if len(raw) > MAX_FRAME_BYTES:
             raise ValueError(f"Payload size {len(raw)} exceeds max frame limit {MAX_FRAME_BYTES}")

@@ -64,11 +64,18 @@ def build_runtime(
     if os.path.realpath(business_path) == os.path.realpath(admin_path):
         raise ValueError("business_socket must not refer to admin_socket")
 
-    backend = RemoteBackend(RemoteRpc(business_path))
+    rpc = RemoteRpc(business_path)
+    backend = RemoteBackend(rpc)
+
+    async def readiness(identity):
+        health = await rpc('system.health', {'agent_id': identity.agent_id})
+        if not isinstance(health, dict) or health.get('qdrant_ok') is not True or health.get('sqlite_ok') is not True or str(health.get('model_state', '')).upper() not in ('READY', 'IDLE'):
+            raise RuntimeError('daemon dependencies unavailable')
 
     return build_app(
         authenticator,
         backend,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
+        readiness=readiness,
     )

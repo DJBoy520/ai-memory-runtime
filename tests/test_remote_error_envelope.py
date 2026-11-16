@@ -82,6 +82,7 @@ def _rendered(result) -> str:
         (-32004, "QUEUE_FULL", True),
         (-32005, "NOT_FOUND", False),
         (-32006, "IDEMPOTENCY_CONFLICT", False),
+        (-32010, "REGISTRY_UNAVAILABLE", True),
         (-32601, "METHOD_NOT_FOUND", False),
         (-32602, "INVALID_ARGUMENT", False),
         (-32603, "INTERNAL", False),

@@ -76,7 +76,7 @@ def test_cli_starts_pings_and_stops_on_sigterm(tmp_path):
             reader, writer = await asyncio.open_unix_connection(str(socket_path))
             try:
                 await write_frame(
-                    writer, {"jsonrpc": "2.0", "id": 1, "method": "amr.ping", "params": {}}
+                    writer, {"jsonrpc": "2.0", "id": 1, "method": "amr.ping", "params": {}, "auth_token": TOKEN}
                 )
                 return await asyncio.wait_for(read_frame(reader), timeout=5)
             finally:

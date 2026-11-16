@@ -16,6 +16,7 @@
       "order": 10,
       "properties": [
         "socketPath",
+        "tokenFile",
         "deadlineMs",
         "ingestDeadlineMs"
       ]
@@ -46,6 +47,10 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
+      "tokenFile": {
+        "type": "string",
+        "description": "Path to the private agent credential file"
+      },
       "socketPath": {
         "type": "string",
         "description": "Path to the AMR 2.x adapter Unix Domain Socket. Priority: this value > $AMR2_SOCKET_PATH > $AMR_SOCKET_PATH (legacy) > $XDG_RUNTIME_DIR/amr2-openclaw.sock > /run/user/<uid>/amr2-openclaw.sock"

@@ -255,12 +255,20 @@ class AMRApplication:
             elif method == "memory.approve_candidate":
                 return await asyncio.to_thread(approve_candidate, self.session_store, params.get("candidate_id"), params.get("project_id"), agent_id)
             elif method in ("system.health", "system_health", "system.ping", "ping"):
+                def sqlite_readable():
+                    try:
+                        with self.session_store._lock:
+                            self.session_store.get_connection().execute('SELECT name FROM sqlite_master LIMIT 1').fetchone()
+                        return True
+                    except Exception:
+                        return False
+
                 return {
                     "status": "healthy",
                     "service": "ai-memory-runtime",
                     "model_state": self.engine.state.value if hasattr(self.engine, "state") else "ready",
                     "qdrant_ok": self.qdrant_manager.is_healthy() if hasattr(self.qdrant_manager, "is_healthy") else True,
-                    "sqlite_ok": True,
+                    "sqlite_ok": await asyncio.to_thread(sqlite_readable),
                 }
             elif method in ("system.status", "system_status"):
                 return {

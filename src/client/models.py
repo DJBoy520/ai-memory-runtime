@@ -267,6 +267,7 @@ class SpoolConfig:
     agent_id: str = "default_agent"
     project_id: Optional[str] = None
     socket_path: Optional[str] = None
+    auth_token_file: Optional[str] = None
     file_mode: int = 0o600  # POSIX rw-------
     dir_mode: int = 0o700   # POSIX rwx------
     sync_parent_dir: bool = True

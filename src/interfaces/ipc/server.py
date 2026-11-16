@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -16,6 +18,7 @@ from src.core.errors import (
 )
 from src.core.request_context import get_request_id
 from src.interfaces.ipc.errors import RpcError
+from src.interfaces.adapter.credential import read_token
 from src.interfaces.ipc.protocol import (
     ConnectionClosedError,
     FrameDecodeError,
@@ -50,6 +53,7 @@ class UDSServer:
         socket_mode: int = 0o600,
         max_request_bytes: int = 4 * 1024 * 1024,
         drain_timeout: float = 5.0,
+        internal_token: Optional[str] = None,
     ):
         self.name = name
         self.socket_path = Path(socket_path)
@@ -57,6 +61,7 @@ class UDSServer:
         self.socket_mode = socket_mode
         self.max_request_bytes = max_request_bytes
         self.drain_timeout = drain_timeout
+        self._token_hash = hashlib.sha256(internal_token.encode('ascii')).digest() if internal_token is not None else None
         self.server: Optional[asyncio.Server] = None
         self._running = False
         self._active_connections: Dict[asyncio.StreamWriter, asyncio.Task] = {}
@@ -107,6 +112,17 @@ class UDSServer:
                 req_id = req.get("id")
                 method = req.get("method")
                 params = req.get("params")
+
+                if self._token_hash is not None:
+                    token = req.get('auth_token')
+                    try:
+                        candidate = hashlib.sha256(token.encode('ascii')).digest() if isinstance(token, str) else b''
+                    except UnicodeEncodeError:
+                        candidate = b''
+                    if not hmac.compare_digest(candidate, self._token_hash):
+                        if not is_notification:
+                            await write_frame(writer, make_jsonrpc_error(-32012, 'AUTH_FAILED', req_id=req_id), max_bytes=self.max_request_bytes)
+                        continue
 
                 if not method or not isinstance(method, str):
                     logger.warning("[%s] Invalid Request: missing or non-string method: %r", self.name, method)
@@ -393,6 +409,15 @@ class DualUDSServer:
         self.business_handler = business_handler or self._default_business_handler
         self.admin_handler = admin_handler or self._default_admin_handler
 
+        internal_path = os.environ.get('AMR_INTERNAL_TOKEN_FILE')
+        admin_path = os.environ.get('AMR_ADMIN_TOKEN_FILE')
+        if os.environ.get('AMR_INTERNAL_AUTH_REQUIRED') == '1' and (not internal_path or not admin_path or not os.environ.get('AMR_AGENT_CREDENTIALS_FILE')):
+            raise ValueError('internal business, admin and agent credential files are required')
+        internal_token = read_token(internal_path) if internal_path else None
+        admin_token = read_token(admin_path) if admin_path else None
+        if internal_token is not None and admin_token is not None and hmac.compare_digest(internal_token, admin_token):
+            raise ValueError('internal business and admin credentials must be distinct')
+
         self.business_server = UDSServer(
             name="business",
             socket_path=self.config.server.business_socket,
@@ -400,6 +425,7 @@ class DualUDSServer:
             socket_mode=self.config.server.socket_mode,
             max_request_bytes=self.config.server.max_request_bytes,
             drain_timeout=getattr(self.config.server, "drain_timeout_seconds", 5.0),
+            internal_token=internal_token,
         )
 
         self.admin_server = UDSServer(
@@ -409,6 +435,7 @@ class DualUDSServer:
             socket_mode=self.config.server.socket_mode,
             max_request_bytes=self.config.server.max_request_bytes,
             drain_timeout=getattr(self.config.server, "drain_timeout_seconds", 5.0),
+            internal_token=admin_token,
         )
 
     async def _default_business_handler(self, method: str, params: Any) -> Any:

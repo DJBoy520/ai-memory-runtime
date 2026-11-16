@@ -703,3 +703,46 @@ def test_request_maps_remote_auth_failure(mock_server):
     client = AmrUdsClient(socket_path=mock_server.socket_path)
     with pytest.raises(AmrAuthError):
         client.request("memory.search", {"query": "x"})
+
+
+def test_client_sends_credential_and_rejects_missing_file(mock_server, tmp_path):
+    credential = tmp_path / "token"
+    credential.write_text("t" * 43, encoding="ascii")
+    credential.chmod(0o600)
+    client = AmrUdsClient(socket_path=mock_server.socket_path, token_file=str(credential))
+    client.ping(timeout=1)
+    assert mock_server.received_requests[-1]["auth_token"] == "t" * 43
+    credential.unlink()
+    with pytest.raises(AmrRpcError) as exc:
+        client.ping(timeout=1)
+    assert is_transient(exc.value)
+
+
+def test_is_available_checks_authenticated_ping(mock_server, tmp_path):
+    token = tmp_path / 'token'; token.write_text('x'*43); token.chmod(0o600)
+    config = tmp_path / 'amr.json'; config.write_text(json.dumps({'socket_path': mock_server.socket_path, 'token_file': str(token)}))
+    p = AmrMemoryProvider(); p._hermes_home = tmp_path
+    assert p.is_available()
+    assert mock_server.received_requests[-1]['auth_token'] == 'x'*43
+    token.unlink()
+    assert not p.is_available()
+    p.shutdown()
+
+
+def test_provider_without_credential_is_not_available(mock_server, tmp_path):
+    config = tmp_path / 'amr.json'; config.write_text(json.dumps({'socket_path':mock_server.socket_path}))
+    p = AmrMemoryProvider(); p._hermes_home = tmp_path
+    assert not p.is_available()
+    p.shutdown()
+
+
+def test_rotated_credential_during_inflight_call_is_transient(mock_server, tmp_path):
+    token = tmp_path/'token'; token.write_text('a'*43); token.chmod(0o600)
+    def handler(req):
+        token.write_text('b'*43)
+        return {'jsonrpc':'2.0','id':req['id'],'error':{'code':-32012,'message':'AUTH_FAILED'}}
+    mock_server.handler = handler
+    client = AmrUdsClient(socket_path=mock_server.socket_path, token_file=str(token))
+    with pytest.raises(AmrRpcError) as exc:
+        client.ping(timeout=1)
+    assert is_transient(exc.value)

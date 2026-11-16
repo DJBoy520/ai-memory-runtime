@@ -72,10 +72,12 @@ class MCPBridge:
         socket_path: str = DEFAULT_SOCKET_PATH,
         source_agent: str = DEFAULT_SOURCE_AGENT,
         call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+        auth_token_file: Optional[str] = None,
     ):
         self.socket_path = socket_path
         self.source_agent = source_agent
         self.call_timeout = call_timeout
+        self.auth_token_file = auth_token_file or os.environ.get("AMR2_TOKEN_FILE")
         self._spool_dir = os.environ.get("AMR_SPOOL_DIR")
         self._spool_client = None
         self._spool_init_lock = asyncio.Lock()
@@ -90,7 +92,8 @@ class MCPBridge:
                 agent_dir = hashlib.sha256(self.source_agent.encode("utf-8")).hexdigest()
                 self._spool_client = await asyncio.to_thread(
                     AmrSessionClient, spool_dir=Path(self._spool_dir) / agent_dir,
-                    agent_id=self.source_agent, socket_path=self.socket_path, auto_replay=True,
+                    agent_id=self.source_agent, socket_path=self.socket_path,
+                    auth_token_file=self.auth_token_file, auto_replay=True,
                 )
         return self._spool_client
 
@@ -115,6 +118,15 @@ class MCPBridge:
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
             req_dict = make_jsonrpc_request(method=method, params=params, req_id=req_id)
+            if self.auth_token_file:
+                try:
+                    from src.interfaces.adapter.credential import read_token
+
+                    req_dict["auth_token"] = read_token(self.auth_token_file)
+                except (OSError, ValueError, TypeError):
+                    raise DaemonRpcError(
+                        code=-32012, message="AUTH_FAILED: credential unavailable"
+                    ) from None
             await write_frame(writer, req_dict)
             try:
                 resp_dict = await asyncio.wait_for(read_frame(reader), timeout=self.call_timeout)

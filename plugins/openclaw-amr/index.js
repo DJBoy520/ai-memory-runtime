@@ -92,6 +92,7 @@ export const plugin = {
 
     const udsClient = new AmrUdsClient({
       socketPath,
+      tokenFile: cfg.tokenFile,
       defaultDeadlineMs: deadlineMs,
     });
 

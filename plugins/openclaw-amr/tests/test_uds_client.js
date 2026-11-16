@@ -227,3 +227,53 @@ test("AmrUdsClient.ping uses the amr.ping control method", async () => {
     if (fs.existsSync(tmpSock)) fs.unlinkSync(tmpSock);
   }
 });
+
+test("per-agent credential is sent and missing credential fails", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "amr-auth-"));
+  const sock = path.join(dir, "a.sock");
+  const tokenFile = path.join(dir, "token");
+  fs.writeFileSync(tokenFile, "x".repeat(43), {mode: 0o600});
+  const server = net.createServer(socket => {
+    const decoder = new FrameDecoder();
+    socket.on("data", chunk => {
+      for (const frame of decoder.feed(chunk)) {
+        const req = JSON.parse(frame.toString());
+        socket.end(encodeFrame({jsonrpc:"2.0", id:req.id, result:{token:req.auth_token}}));
+      }
+    });
+  });
+  await new Promise(resolve => server.listen(sock, resolve));
+  try {
+    const client = new AmrUdsClient({socketPath:sock, tokenFile, defaultDeadlineMs:1000});
+    assert.equal((await client.ping()).token, "x".repeat(43));
+    fs.unlinkSync(tokenFile);
+    await assert.rejects(client.ping(), err => isTransientError(err));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(dir, {recursive:true, force:true});
+  }
+});
+
+test('in-flight credential rotation is retryable', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'amr-rotate-'));
+  const sock = path.join(dir, 's.sock'), file = path.join(dir, 'token');
+  fs.writeFileSync(file, 'a'.repeat(43), {mode:0o600});
+  const server = net.createServer(socket => {
+    const decoder = new FrameDecoder();
+    socket.on('data', chunk => {
+      for (const frame of decoder.feed(chunk)) {
+        const req = JSON.parse(frame.toString());
+        fs.writeFileSync(file, 'b'.repeat(43));
+        socket.end(encodeFrame({jsonrpc:'2.0',id:req.id,error:{code:-32012,message:'AUTH_FAILED'}}));
+      }
+    });
+  });
+  await new Promise(resolve => server.listen(sock, resolve));
+  try {
+    const client = new AmrUdsClient({socketPath:sock,tokenFile:file,defaultDeadlineMs:1000});
+    await assert.rejects(client.ping(), err => isTransientError(err));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    fs.rmSync(dir,{recursive:true,force:true});
+  }
+});
