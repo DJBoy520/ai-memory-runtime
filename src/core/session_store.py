@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS ingest_log (
 
 CREATE INDEX IF NOT EXISTS idx_messages_sess ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_sess ON ingest_log(session_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_processed ON ingest_log(processed_at, status, session_id);
 
 -- Optional source snapshot watermarks. Legacy, unversioned messages retain
 -- their original behavior until a matching baseline is explicitly versioned.
@@ -1781,6 +1782,8 @@ class SessionStore:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
+            cursor.execute("SELECT session_id, content_hash, sequence FROM raw_messages WHERE message_id = ?", (message_id,))
+            prior = cursor.fetchone()
             cursor.execute(
                 """
                 INSERT INTO raw_messages (
@@ -1797,6 +1800,11 @@ class SessionStore:
                 """,
                 (message_id, session_id, role, content, c_hash, sequence, source_type, is_synthetic, c_at),
             )
+            if prior is None or prior["content_hash"] != c_hash or prior["sequence"] != sequence:
+                cursor.execute(
+                    "INSERT INTO ingest_log (session_id, message_id, processed_at, status) VALUES (?, ?, ?, ?)",
+                    (prior["session_id"] if prior else session_id, message_id, now, "revision_updated" if prior else "ingested"),
+                )
             conn.commit()
             return {
                 "message_id": message_id,

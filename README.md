@@ -162,11 +162,17 @@ AMR 提供开箱即用的跨环境桥接脚本 `scripts/mcp-bridge.sh`（自动�
 8. `memory_record`：旧版兼容写入接口；
 9. `memory_update_status`：旧版兼容状态变更接口。
 
-会话接续与治理工具：`session_checkpoint` 写入项目检查点，`session_get_handoff` 按项目读取交接；`memory_candidates` 列出有证据的待审核候选，`memory_approve_candidate` 审核通过后创建正式记忆并异步索引。`memory_spool_status` / `memory_spool_retry` 用于查看和重试本机待发送队列。检查点和候选按项目过滤；项目标识是数据作用域，不构成不同本机进程之间的安全隔离。
+会话接续与治理工具：`session_checkpoint` 写入项目检查点，`session_get_handoff` 按项目读取交接；`memory_candidates` 列出有证据的待审核候选，`memory_approve_candidate` 可审核创建或更新正式记忆并异步索引。批准需传入审阅时的证据摘要；更新还需审阅目标版本和变更原因。`memory_spool_status` / `memory_spool_retry` 用于查看和重试本机待发送队列。检查点和候选按项目过滤；项目标识是数据作用域，不构成不同本机进程之间的安全隔离。
+
+仓库内的 [`amr-memory` skill](skills/amr-memory/SKILL.md) 是 Agent 使用 AMR 的权威工作流说明；工具的实时名称、参数和权限以各客户端发现的 MCP 定义为准。执行 `.venv/bin/python scripts/install_amr_skill.py --dry-run` 可预览九个本机 Agent 的安装路径，去掉 `--dry-run` 创建指向仓库原件的链接；已有不同内容的同名路径会被保留并阻止安装。skill 不授予工具权限，已有 Agent 会话可能需要重启后才能发现它。
 
 使用 `scripts/mcp-bridge.sh` 接入时，`memory_ingest_session` 与 `session_checkpoint` 会先写本机持久队列。AMR 不可用时返回 `status="queued"`，表示本机已排队、尚未确认服务端落盘；服务恢复后，桥运行期间定期重试，重新启动桥时也会重试。队列默认位于 `$XDG_DATA_HOME/amr/mcp-spool`（未设置时为 `~/.local/share/amr/mcp-spool`），包含会话内容，文件权限为 0600。直接运行 Python 桥时需设置 `AMR_SPOOL_DIR` 才启用队列。
 
 `scripts/amr_distill_runner.py` 可扫描新增或变更的会话并产生待审核候选。默认不调用外部模型；配置 OpenAI 兼容端点后可使用 `systemd/amr-distillation.timer` 定时运行。候选不会自动变为正式记忆；需要调用 `memory_candidates` 审阅来源，再调用 `memory_approve_candidate`。审批成功只代表 SQLite 已提交和索引任务已排队，语义搜索在后台投影完成后可见。
+
+非 dry-run 首次扫描默认从最近 24 小时开始；发现的会话会先持久化为待处理队列，再受单批数量限制。后续扫描覆盖上次发现以来的时间，服务停机或积压超过 24 小时也可继续处理。需要追溯更早历史时可显式指定 `--lookback 0`；启用外部模型时，这可能向模型端点发送历史会话内容。新摄取的旧时间戳消息按摄取时间发现。dry-run 可预览队列，不推进发现水位。
+
+同一会话的提纯运行使用 SQLite 租约防止正常并发重复处理；中断后租约过期可恢复，旧版无租约记录使用一小时宽限。失败仍可用 `--retry-failed` 重试；空会话仅在源内容变化后重新处理。会话仍以整体发送给模型，超长会话的分窗处理尚未实现。
 
 `memory_ingest_session` 和 `session_checkpoint` 需要客户端主动调用；仅配置 MCP 不会自动触发会话开始或结束事件。每条消息应提供稳定的 `message_id`，重试时保持相同 ID；一个 `session_id` 绑定最初的 Agent 和项目，其他 Agent 或项目须使用不同的会话 ID。归档会话与生成长期记忆是独立步骤；会话入库不代表已自动提炼为可搜索记忆。
 

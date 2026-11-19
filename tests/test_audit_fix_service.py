@@ -41,10 +41,10 @@ class MockQdrantManager:
         self.points: Dict[str, Dict[str, Any]] = {}
         self.upserted_points: List[Dict[str, Any]] = []
 
-    def get_point_by_memory_id(self, memory_id: str, collection_name: str = "ai_memory") -> Optional[Dict[str, Any]]:
+    def get_point_by_memory_id(self, memory_id: str, collections=None) -> Optional[Dict[str, Any]]:
         pt = self.points.get(memory_id)
-        if pt:
-            return {"point_id": pt.get("id"), "collection": collection_name, "payload": pt.get("payload")}
+        if pt and (collections is None or "ai_memory" in collections):
+            return {"point_id": pt.get("id"), "collection": "ai_memory", "payload": pt.get("payload")}
         return None
 
     def upsert_points(self, collection_name: str, points: List[Any], wait: bool = True):

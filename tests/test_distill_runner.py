@@ -640,3 +640,166 @@ def test_resolve_runner_config_defaults_and_env(monkeypatch):
     assert cfg_env["model"] == "qwen2.5-72b"
     assert cfg_env["api_key"] == "env-key-999"
     assert cfg_env["timeout"] == 45.0
+
+
+def test_discovered_backlog_survives_window_expiry_and_restart(temp_db):
+    now = int(time.time())
+    for sid in ('backlog-a', 'backlog-b'):
+        temp_db.record_raw_session(session_id=sid, agent_id='agent', project_id='project', started_at=now)
+        temp_db.record_raw_message(message_id=f'{sid}-msg', session_id=sid, role='user', content='Important durable fact', sequence=1, created_at=now)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    first = runner.scan_sessions(lookback_seconds=3600, limit=1)
+    assert len(first) == 1
+    first_id = first[0]['session_id']
+    conn = temp_db.get_connection()
+    conn.execute("UPDATE curation_distillation_state SET status='SUCCESS', source_digest=? WHERE session_id=?", (runner._source_digest(first_id), first_id))
+    conn.execute('UPDATE raw_sessions SET started_at=?', (now - 10000,))
+    conn.execute('UPDATE raw_messages SET created_at=?', (now - 10000,))
+    conn.execute('UPDATE ingest_log SET processed_at=?', (now - 10000,))
+    conn.commit()
+    restarted = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    remaining = restarted.scan_sessions(lookback_seconds=3600, limit=1)
+    assert len(remaining) == 1
+    assert remaining[0]['session_id'] != first_id
+
+
+def test_scan_recovers_sessions_created_during_long_outage(temp_db, monkeypatch):
+    from types import SimpleNamespace
+    import src.cognitive.distill_runner as runner_module
+    import src.cognitive.scheduler as scheduler_module
+    clock = {'now': 1800000000}
+    fake_time = SimpleNamespace(time=lambda: clock['now'], strftime=time.strftime)
+    monkeypatch.setattr(runner_module, 'time', fake_time)
+    monkeypatch.setattr(scheduler_module, 'time', fake_time)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    assert runner.scan_sessions(lookback_seconds=86400) == []
+    clock['now'] += 3600
+    temp_db.record_raw_session(session_id='outage', agent_id='agent', project_id='project', started_at=clock['now'])
+    temp_db.record_raw_message(message_id='outage-msg', session_id='outage', role='user', content='Important outage fact', sequence=1, created_at=clock['now'])
+    clock['now'] += 3 * 86400
+    assert [item['session_id'] for item in runner.scan_sessions(lookback_seconds=86400)] == ['outage']
+
+
+def test_newly_ingested_backdated_messages_are_discovered(temp_db):
+    now = int(time.time())
+    temp_db.ingest_messages('backdated', 'agent', 'project', [{'message_id':'late', 'role':'user', 'content':'A late arriving fact', 'timestamp':now - 30 * 86400}])
+    temp_db.get_connection().execute('UPDATE sessions SET started_at=? WHERE session_id=?', (now - 30 * 86400, 'backdated'))
+    temp_db.get_connection().commit()
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    assert any(item['session_id'] == 'backdated' for item in runner.scan_sessions(lookback_seconds=86400))
+
+
+@pytest.mark.asyncio
+async def test_empty_session_is_not_repeated_until_source_changes(temp_db):
+    now = int(time.time())
+    temp_db.record_raw_session(session_id='empty-session', agent_id='agent', project_id='project', started_at=now)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    result = await runner.run_batch(lookback_seconds=3600, limit=1)
+    assert result['sessions_skipped'] == 1
+    assert runner.scan_sessions(lookback_seconds=3600) == []
+    temp_db.record_raw_message(message_id='later', session_id='empty-session', role='user', content='New useful fact', sequence=1, created_at=now)
+    assert [item['session_id'] for item in runner.scan_sessions(lookback_seconds=3600)] == ['empty-session']
+
+
+def test_dry_run_previews_existing_backlog_without_advancing_watermark(temp_db):
+    now = int(time.time())
+    temp_db.record_raw_session(session_id='queued', agent_id='agent', project_id='project', started_at=now)
+    temp_db.record_raw_message(message_id='queued-msg', session_id='queued', role='user', content='Useful backlog fact', sequence=1, created_at=now)
+    real = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    assert real.scan_sessions(lookback_seconds=3600)[0]['session_id'] == 'queued'
+    conn = temp_db.get_connection()
+    before = conn.execute('SELECT scanned_until FROM curation_discovery_watermark WHERE id=1').fetchone()[0]
+    conn.execute('UPDATE raw_sessions SET started_at=?', (now - 10000,))
+    conn.execute('UPDATE raw_messages SET created_at=?', (now - 10000,))
+    conn.execute('UPDATE ingest_log SET processed_at=?', (now - 10000,))
+    conn.commit()
+    dry = DistillationRunner(session_store=temp_db, dry_run=True)
+    assert [item['session_id'] for item in dry.scan_sessions(lookback_seconds=3600)] == ['queued']
+    assert conn.execute('SELECT scanned_until FROM curation_discovery_watermark WHERE id=1').fetchone()[0] == before
+    assert conn.execute("SELECT status FROM curation_distillation_state WHERE session_id='queued'").fetchone()[0] == 'PENDING'
+
+
+def test_new_raw_message_with_old_source_timestamp_is_discovered(temp_db):
+    now = int(time.time())
+    temp_db.record_raw_session(session_id='raw-old', agent_id='agent', project_id='project', started_at=now - 30 * 86400)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    assert runner.scan_sessions(lookback_seconds=86400) == []
+    temp_db.record_raw_message(message_id='late-raw', session_id='raw-old', role='user', content='Late arriving raw fact', sequence=1, created_at=now - 30 * 86400)
+    assert [item['session_id'] for item in runner.scan_sessions(lookback_seconds=86400)] == ['raw-old']
+
+
+@pytest.mark.asyncio
+async def test_two_runners_do_not_distill_same_session_concurrently(temp_db):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    async def handler(_system, _messages):
+        calls.append(1)
+        entered.set()
+        await release.wait()
+        return {'candidates': [], 'message_disposition': []}
+    temp_db.record_raw_session(session_id='concurrent-distill', agent_id='agent', project_id='project')
+    temp_db.record_raw_message(message_id='concurrent-msg', session_id='concurrent-distill', role='user', content='Important source message', sequence=1)
+    first = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(handler=handler), allow_external=True)
+    second_store = SessionStore(db_path=str(temp_db.db_path))
+    second = DistillationRunner(session_store=second_store, model_worker=MockModelWorker(handler=handler), allow_external=True)
+    task = asyncio.create_task(first.run_pipeline_for_session('concurrent-distill'))
+    await asyncio.wait_for(entered.wait(), 5)
+    try:
+        result = await asyncio.wait_for(second.run_pipeline_for_session('concurrent-distill'), 2)
+        assert result['status'] == 'ALREADY_RUNNING'
+        assert len(calls) == 1
+    finally:
+        release.set()
+        await task
+        second_store.close()
+
+
+def test_old_interrupted_session_returns_to_backlog(temp_db):
+    now = int(time.time())
+    temp_db.record_raw_session(session_id='interrupted', agent_id='agent', project_id='project', started_at=now - 100000)
+    temp_db.record_raw_message(message_id='interrupted-msg', session_id='interrupted', role='user', content='Important source message', sequence=1, created_at=now - 100000)
+    conn = temp_db.get_connection()
+    conn.execute('UPDATE ingest_log SET processed_at=?', (now - 100000,))
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    conn.execute("INSERT INTO curation_distillation_state (session_id, batch_id, status, created_at, updated_at) VALUES ('interrupted', 'old', 'RUNNING', ?, ?)", (now - 7200, now - 7200))
+    conn.commit()
+    assert [item['session_id'] for item in runner.scan_sessions(lookback_seconds=3600)] == ['interrupted']
+
+
+@pytest.mark.asyncio
+async def test_unexpected_pipeline_exception_is_recorded_as_retryable_without_content(temp_db):
+    temp_db.record_raw_session(session_id='pipeline-exception', agent_id='agent', project_id='project')
+    temp_db.record_raw_message(message_id='source', session_id='pipeline-exception', role='user', content='Private source', sequence=1)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(), allow_external=True)
+    async def fail(**kwargs):
+        raise RuntimeError('Private source should not appear')
+    runner.scheduler.run_pipeline_for_session = fail
+    result = await runner.run_pipeline_for_session('pipeline-exception')
+    assert result['status'] == 'PIPELINE_ERROR'
+    assert result['error'] == 'RuntimeError'
+    state = temp_db.get_connection().execute("SELECT status, last_error FROM curation_distillation_state WHERE session_id='pipeline-exception'").fetchone()
+    assert tuple(state) == ('FAILED', 'RuntimeError')
+
+
+@pytest.mark.asyncio
+async def test_lost_lease_does_not_write_proposals_or_overwrite_new_owner(temp_db):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    async def handler(_system, _messages):
+        entered.set()
+        await release.wait()
+        return {'candidates': [{'operation':'EXTRACT', 'subject':'db', 'predicate':'uses', 'object':'SQLite', 'content':'The database uses SQLite.', 'evidence_source_ids':['lost-m'], 'extracted_spans':[{'message_id':'lost-m','span':'The database uses SQLite.'}]}], 'message_disposition':[{'message_id':'lost-m','disposition':'EXTRACTED'}]}
+    temp_db.record_raw_session(session_id='lost-lease', agent_id='agent', project_id='project')
+    temp_db.record_raw_message(message_id='lost-m', session_id='lost-lease', role='user', content='The database uses SQLite.', sequence=1)
+    runner = DistillationRunner(session_store=temp_db, model_worker=MockModelWorker(handler=handler), allow_external=True)
+    task = asyncio.create_task(runner.run_pipeline_for_session('lost-lease'))
+    await asyncio.wait_for(entered.wait(), 5)
+    conn = temp_db.get_connection()
+    conn.execute("UPDATE curation_distillation_state SET lease_token='new-owner' WHERE session_id='lost-lease'")
+    conn.commit()
+    release.set()
+    result = await task
+    assert result['status'] == 'LEASE_LOST'
+    assert conn.execute('SELECT count(*) FROM curation_candidates').fetchone()[0] == 0
+    assert conn.execute("SELECT lease_token FROM curation_distillation_state WHERE session_id='lost-lease'").fetchone()[0] == 'new-owner'

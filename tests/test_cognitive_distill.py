@@ -342,3 +342,87 @@ async def test_cognitive_scheduler_pipeline_dry_run_isolation(temp_db):
     cursor.execute("SELECT COUNT(*) as cnt FROM memories WHERE subject = 'AMR_Communication'")
     mem_cnt = cursor.fetchone()["cnt"]
     assert mem_cnt == 0
+
+
+def test_evidence_span_cannot_reference_message_outside_declared_sources():
+    validator = EvidenceValidator()
+    proposal = {
+        'evidence_source_ids': ['m1'],
+        'extracted_spans': [{'message_id': 'm2', 'span': 'The database is PostgreSQL'}],
+    }
+    valid, _ = validator.validate_proposal(proposal, {
+        'm1': 'We have not decided on a database.',
+        'm2': 'The database is PostgreSQL',
+    })
+    assert not valid
+
+
+@pytest.mark.asyncio
+async def test_context_pack_finds_old_identifier_match_within_project(temp_db):
+    for i in range(35):
+        temp_db.create_memory(memory_id=f'new_{i}', subject='', predicate='', content=f'Unrelated configuration {i}', type='fact', project_id='alpha', status='ACTIVE')
+    temp_db.create_memory(memory_id='old_relevant', subject='', predicate='', content='TLS gateway uses ALPN h2c-fallback protocol', type='fact', project_id='alpha', status='ACTIVE')
+    temp_db.create_memory(memory_id='other_project', subject='', predicate='', content='TLS gateway uses ALPN h2c-fallback protocol', type='fact', project_id='beta', status='ACTIVE')
+    conn = temp_db.get_connection()
+    conn.execute("UPDATE memories SET updated_at=1 WHERE memory_id='old_relevant'")
+    conn.commit()
+    pack = await ContextBuilder(session_store=temp_db).build_context_pack('alpha', [{'content': 'Please check h2c-fallback behavior'}])
+    ids = {item['memory_id'] for item in pack}
+    assert 'old_relevant' in ids
+    assert 'other_project' not in ids
+
+
+@pytest.mark.asyncio
+async def test_distillation_rejects_schema_invalid_operation_before_writing(temp_db):
+    temp_db.record_raw_session(session_id='schema-session', agent_id='agent', project_id='project')
+    temp_db.record_raw_message(message_id='schema-msg', session_id='schema-session', role='user', content='The database is PostgreSQL.', sequence=1)
+    proposal = {
+        'prompt_version': 'v3.0.0-mos', 'session_id': 'schema-session',
+        'candidates': [{'operation': 'DELETE', 'subject': 'database', 'predicate': 'uses', 'object': 'PostgreSQL', 'content': 'The database is PostgreSQL.', 'evidence_source_ids': ['schema-msg'], 'extracted_spans': [{'message_id': 'schema-msg', 'span': 'The database is PostgreSQL.'}]}],
+        'message_disposition': [{'message_id': 'schema-msg', 'disposition': 'EXTRACTED'}],
+    }
+    result = await CognitiveScheduler(session_store=temp_db).run_pipeline_for_session('schema-session', mock_llm_result=proposal)
+    assert result['written_candidates'] == 0
+    assert result['status'] in ('VALIDATION_PARTIAL', 'SCHEMA_REJECTED')
+    assert temp_db.get_connection().execute('SELECT count(*) FROM curation_candidates').fetchone()[0] == 0
+
+
+def test_coverage_does_not_call_unbacked_message_extracted():
+    valid, dispositions, _ = CoverageValidator().validate_and_reconcile(
+        raw_message_ids=['m1', 'm2'],
+        proposals=[{'evidence_source_ids': ['m1']}],
+        declared_dispositions=[{'message_id': 'm1', 'disposition': 'EXTRACTED'}, {'message_id': 'm2', 'disposition': 'EXTRACTED'}],
+    )
+    assert valid
+    assert {d['message_id']: d['disposition'] for d in dispositions} == {'m1': 'EXTRACTED', 'm2': 'UNPROCESSED'}
+
+
+@pytest.mark.asyncio
+async def test_distillation_rejects_update_target_from_another_project(temp_db):
+    temp_db.record_raw_session(session_id='target-session', agent_id='agent', project_id='alpha')
+    temp_db.record_raw_message(message_id='target-msg', session_id='target-session', role='user', content='The database is PostgreSQL.', sequence=1)
+    temp_db.create_memory_v3(memory_id='foreign-target', content='The database is SQLite.', project_id='beta', type='fact', status='ACTIVE', created_by_agent='agent')
+    proposal = {'prompt_version':'v3.0.0-mos', 'session_id':'target-session', 'candidates': [{
+        'operation':'UPDATE', 'target_memory_id':'foreign-target', 'subject':'database', 'predicate':'uses', 'object':'PostgreSQL', 'content':'The database is PostgreSQL.', 'evidence_source_ids':['target-msg'], 'extracted_spans':[{'message_id':'target-msg', 'span':'The database is PostgreSQL.'}]}],
+        'message_disposition':[{'message_id':'target-msg','disposition':'EXTRACTED'}]}
+    result = await CognitiveScheduler(session_store=temp_db).run_pipeline_for_session('target-session', mock_llm_result=proposal)
+    assert result['written_candidates'] == 0
+    assert result['status'] == 'VALIDATION_PARTIAL'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('bad_output', [[], {'candidates': 'wrong', 'message_disposition': []}, {'candidates': [], 'message_disposition': [{'message_id': 'm', 'disposition': 3}]}])
+async def test_distillation_rejects_malformed_envelope_without_writes(temp_db, bad_output):
+    temp_db.record_raw_session(session_id='bad-envelope', agent_id='agent', project_id='project')
+    temp_db.record_raw_message(message_id='m', session_id='bad-envelope', role='user', content='Useful source message', sequence=1)
+    result = await CognitiveScheduler(session_store=temp_db).run_pipeline_for_session('bad-envelope', mock_llm_result=bad_output)
+    assert result['status'] == 'SCHEMA_REJECTED'
+    assert result['written_candidates'] == 0
+
+
+def test_coverage_ignores_malformed_optional_nested_dispositions():
+    valid, dispositions, _ = CoverageValidator().validate_and_reconcile(
+        ['m'], [{'evidence_source_ids':['m'], 'message_disposition':[42, {'message_id':'m','disposition':None}]}], []
+    )
+    assert valid
+    assert dispositions[0]['disposition'] == 'EXTRACTED'

@@ -170,6 +170,8 @@ class EvidenceValidator:
                 span = item.get("span", "")
                 if msg_id and msg_id not in raw_messages:
                     return False, f"INVALID_EVIDENCE: Span referenced message_id '{msg_id}' not found in raw_messages"
+                if msg_id and evidence_source_ids and msg_id not in evidence_source_ids:
+                    return False, f"INVALID_EVIDENCE: Span message_id '{msg_id}' is not a declared source"
             elif isinstance(item, str):
                 msg_id = None
                 span = item

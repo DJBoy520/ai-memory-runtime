@@ -11,6 +11,7 @@ AI Memory Runtime - Memory Context Pack Builder
 """
 
 import inspect
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 from src.core.session_store import SessionStore
@@ -80,6 +81,24 @@ class ContextBuilder:
             except Exception as e:
                 # 向量召回若未就绪或降级，记录但继续依赖 SQLite 多维召回
                 pass
+
+        # Recall older exact technical identifiers even when no vector engine is
+        # configured. Bound both the query and candidate count for large stores.
+        query_text = " ".join(str(m.get("content") or "")[:2000] for m in recent_messages[-5:])
+        terms = sorted(set(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9_./:-]{3,}", query_text.lower())), key=lambda x: (-len(x), x))[:12]
+        if terms:
+            predicates = " OR ".join("instr(lower(content), ?) > 0" for _ in terms)
+            cursor.execute(
+                f"SELECT memory_id FROM memories WHERE project_id = ? AND LOWER(status) IN ('active', 'candidate') AND ({predicates}) ORDER BY updated_at DESC LIMIT 100",
+                (project_id, *terms),
+            )
+            for row in cursor.fetchall():
+                m_id = row["memory_id"]
+                mem = candidates_map.get(m_id) or self.session_store.get_memory(m_id)
+                if mem:
+                    mem["_lexical_match"] = True
+                    mem.setdefault("_recall_source", "identifier_match")
+                    candidates_map[m_id] = mem
 
         # 2. 同 project_id 全部活跃记忆 (优先 limit 30)
         cursor.execute(
@@ -157,6 +176,7 @@ class ContextBuilder:
         all_candidates.sort(
             key=lambda x: (
                 x.get("_score", 0.0),
+                x.get("_lexical_match", False),
                 x.get("updated_at", 0),
             ),
             reverse=True,

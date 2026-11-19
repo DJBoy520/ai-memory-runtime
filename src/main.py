@@ -253,7 +253,7 @@ class AMRApplication:
             elif method == "memory.candidates":
                 return await asyncio.to_thread(list_candidates, self.session_store, params.get("project_id"), params.get("limit", 20))
             elif method == "memory.approve_candidate":
-                return await asyncio.to_thread(approve_candidate, self.session_store, params.get("candidate_id"), params.get("project_id"), agent_id)
+                return await asyncio.to_thread(approve_candidate, self.session_store, params.get("candidate_id"), params.get("project_id"), agent_id, params.get("expected_version"), params.get("change_reason"), params.get("expected_evidence_digest"))
             elif method in ("system.health", "system_health", "system.ping", "ping"):
                 def sqlite_readable():
                     try:

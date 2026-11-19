@@ -18,6 +18,7 @@ import logging
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from jsonschema import Draft7Validator
 
 from src.core.session_store import SessionStore
 from src.cognitive.evidence_validator import EvidenceValidator
@@ -99,6 +100,10 @@ class CognitiveScheduler:
                        OR session_id IN (SELECT DISTINCT session_id FROM messages WHERE timestamp >= ?)
                 """
                 params.extend([since_ts, since_ts, since_ts])
+                cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_log'")
+                if cursor.fetchone():
+                    query_sessions += " OR session_id IN (SELECT DISTINCT session_id FROM ingest_log WHERE processed_at >= ? AND status IN ('ingested', 'revision_updated'))"
+                    params.append(since_ts)
             else:
                 query_sessions = """
                     SELECT session_id, agent_id, project_id, started_at, ended_at, status
@@ -119,6 +124,10 @@ class CognitiveScheduler:
                        OR session_id IN (SELECT DISTINCT session_id FROM raw_messages WHERE created_at >= ?)
                 """
                 params.extend([since_ts, since_ts, since_ts])
+                cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_log'")
+                if cursor.fetchone():
+                    query_raw += " OR session_id IN (SELECT DISTINCT session_id FROM ingest_log WHERE processed_at >= ? AND status IN ('ingested', 'revision_updated'))"
+                    params.append(since_ts)
             else:
                 query_raw = """
                     SELECT session_id, agent_id, project_id, started_at, ended_at, status
@@ -155,6 +164,7 @@ class CognitiveScheduler:
         mock_llm_result: Optional[Dict[str, Any]] = None,
         max_retries: Optional[int] = None,
         retry_delay: Optional[float] = None,
+        lease_token: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         为单个会话执行认知整理闭环流水线：
@@ -329,14 +339,68 @@ class CognitiveScheduler:
                 "written_candidates": 0,
             }
 
-        candidates = llm_output_data.get("candidates", [])
-        declared_dispositions = llm_output_data.get("message_disposition", [])
+        if not isinstance(llm_output_data, dict):
+            return {"batch_id": batch_id, "session_id": session_id, "project_id": project_id,
+                    "agent_id": agent_id, "status": "SCHEMA_REJECTED",
+                    "error": "Invalid distillation output structure", "written_candidates": 0}
+        candidates = llm_output_data.get("candidates")
+        declared_dispositions = llm_output_data.get("message_disposition")
+        schema = self.prompt_manager.get_json_schema()
+        envelope = dict(llm_output_data)
+        # The scheduler owns the session identity. Some workers omit these
+        # transport fields; never trust them to select a different session.
+        envelope.setdefault("session_id", session_id)
+        envelope.setdefault("prompt_version", self.prompt_manager.PROMPT_VERSION)
+        if isinstance(candidates, list):
+            envelope["candidates"] = []
+        if not isinstance(candidates, list) or not Draft7Validator(schema).is_valid(envelope):
+            return {"batch_id": batch_id, "session_id": session_id, "project_id": project_id,
+                    "agent_id": agent_id, "status": "SCHEMA_REJECTED",
+                    "error": "Invalid distillation output structure", "written_candidates": 0}
+
+        candidate_validator = Draft7Validator(schema["properties"]["candidates"]["items"])
+        schema_valid = [c for c in candidates if candidate_validator.is_valid(c)]
+        schema_invalid = len(candidates) - len(schema_valid)
+
+        # 4.2 Evidence 校验（防编造/防幻觉，严格比对原文与来源）
+        valid_candidates = []
+        invalid_candidates = [{"rejection_reason": "INVALID_SCHEMA"} for _ in range(schema_invalid)]
+
+        for cand in schema_valid:
+            if not isinstance(cand, dict):
+                logger.info("Proposal rejected: invalid structure")
+                invalid_candidates.append({"rejection_reason": "INVALID_PROPOSAL"})
+                continue
+            content = cand.get("content")
+            if not isinstance(content, str) or not 5 <= len(content.strip()) <= 16000:
+                cand["rejection_reason"] = "INVALID_CONTENT"
+                invalid_candidates.append(cand)
+                continue
+            op = cand["operation"]
+            target_id = cand.get("target_memory_id")
+            if op == "EXTRACT" and target_id:
+                cand["rejection_reason"] = "INVALID_TARGET"
+                invalid_candidates.append(cand)
+                continue
+            if op != "EXTRACT":
+                target = self.session_store.get_memory(target_id) if isinstance(target_id, str) and target_id else None
+                if not target or target.get("project_id") != project_id or (op == "UPDATE" and (str(target.get("status", "")).upper() != "ACTIVE" or target.get("projection_class") != "v3")):
+                    cand["rejection_reason"] = "INVALID_TARGET"
+                    invalid_candidates.append(cand)
+                    continue
+            ev_ok, ev_reason = self.evidence_validator.validate_proposal(cand, raw_msg_map)
+            if ev_ok:
+                valid_candidates.append(cand)
+            else:
+                cand["rejection_reason"] = ev_reason
+                invalid_candidates.append(cand)
+                logger.info("Proposal rejected by EvidenceValidator for session %s", session_id)
 
         # 4. 双验证器门禁校验
         # 4.1 Coverage 校验与调和（防遗漏/防沉默丢失）
         cov_valid, reconciled_disps, cov_err = self.coverage_validator.validate_and_reconcile(
             raw_message_ids=raw_msg_ids,
-            proposals=candidates,
+            proposals=valid_candidates,
             declared_dispositions=declared_dispositions,
         )
         if not cov_valid:
@@ -352,28 +416,6 @@ class CognitiveScheduler:
                 "written_candidates": 0,
             }
 
-        # 4.2 Evidence 校验（防编造/防幻觉，严格比对原文与来源）
-        valid_candidates = []
-        invalid_candidates = []
-
-        for cand in candidates:
-            if not isinstance(cand, dict):
-                logger.info("Proposal rejected: invalid structure")
-                invalid_candidates.append({"rejection_reason": "INVALID_PROPOSAL"})
-                continue
-            content = cand.get("content")
-            if not isinstance(content, str) or not 5 <= len(content.strip()) <= 16000:
-                cand["rejection_reason"] = "INVALID_CONTENT"
-                invalid_candidates.append(cand)
-                continue
-            ev_ok, ev_reason = self.evidence_validator.validate_proposal(cand, raw_msg_map)
-            if ev_ok:
-                valid_candidates.append(cand)
-            else:
-                cand["rejection_reason"] = ev_reason
-                invalid_candidates.append(cand)
-                logger.info("Proposal rejected by EvidenceValidator for session %s", session_id)
-
         # 5. 写入 curation_candidates 隔离表（14 天 Dry-Run 铁律，绝不写 memories SSOT）
         written_count = 0
         valid_candidate_ids = []
@@ -384,9 +426,13 @@ class CognitiveScheduler:
         })
         disposition_json = json.dumps(reconciled_disps, ensure_ascii=False)
 
-        with self.session_store._lock:
-            db_conn = self.session_store.get_connection()
+        with self.session_store.locked_write_transaction() as db_conn:
             db_cursor = db_conn.cursor()
+            if lease_token is not None:
+                db_cursor.execute("SELECT status, lease_token, next_retry_at FROM curation_distillation_state WHERE session_id = ?", (session_id,))
+                claim = db_cursor.fetchone()
+                if not claim or claim["status"] != "RUNNING" or claim["lease_token"] != lease_token or claim["next_retry_at"] is None or claim["next_retry_at"] <= int(time.time()):
+                    return {"batch_id": batch_id, "session_id": session_id, "status": "LEASE_LOST", "written_candidates": 0}
 
             for cand in valid_candidates:
                 op = cand.get("operation", "EXTRACT")
@@ -420,7 +466,6 @@ class CognitiveScheduler:
                     except (TypeError, ValueError, KeyError):
                         prior_sessions = None
                     if (prior_sessions, prior["operation"], prior["subject"], prior["predicate"], prior["object"], prior["content"], prior["evidence_source_ids"], prior["extracted_spans"]) != ([session_id], op, subject, predicate, obj, content, ev_ids, spans):
-                        db_conn.rollback()
                         raise ValueError(f"Candidate ID conflict: {cand_id}")
                     continue
 
@@ -446,8 +491,6 @@ class CognitiveScheduler:
                     ),
                 )
                 written_count += 1
-
-            db_conn.commit()
 
         return {
             "batch_id": batch_id,

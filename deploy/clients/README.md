@@ -11,6 +11,13 @@ Every client has its own agent identity and private token file:
 ~/.config/amr/agents/current/{adapter,remote}.json  # active generation
 ```
 
+The canonical [AMR memory skill](../../skills/amr-memory/SKILL.md) lives in this
+repository. Preview or install links for the nine local agents with
+`python scripts/install_amr_skill.py --dry-run` or `python scripts/install_amr_skill.py`.
+The installer refuses to overwrite a different existing skill. Hosts may need a
+new session or reload before discovering it. Skill installation does not grant
+MCP tools; each agent's existing allowlist still determines its capabilities.
+
 The local adapter socket is `/run/user/1000/amr2-<agent>.sock`; it accepts only
 that agent's token. The HTTPS gateway remains available for remote clients.
 

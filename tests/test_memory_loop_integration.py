@@ -70,7 +70,7 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         assert client.pending_count("sess-a") == 0
         assert store.get_messages("sess-a")[0]["content"] == text
 
-        llm = {"candidates": [{"proposal_id": "candidate-a", "operation": "EXTRACT", "subject": "database", "predicate": "uses", "content": text, "evidence_source_ids": ["msg-a"], "extracted_spans": [{"message_id": "msg-a", "span": text}]}], "message_disposition": [{"message_id": "msg-a", "disposition": "EXTRACTED"}]}
+        llm = {"candidates": [{"proposal_id": "candidate-a", "operation": "EXTRACT", "subject": "database", "predicate": "uses", "object": "PostgreSQL 16", "content": text, "evidence_source_ids": ["msg-a"], "extracted_spans": [{"message_id": "msg-a", "span": text}]}], "message_disposition": [{"message_id": "msg-a", "disposition": "EXTRACTED"}]}
         distill = await CognitiveScheduler(session_store=store).run_pipeline_for_session("sess-a", batch_id="batch-a", mock_llm_result=llm)
         assert distill["project_id"] == "project-a"
         assert distill["written_candidates"] == 1
@@ -83,14 +83,17 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         async def call(bridge, name, arguments):
             return await bridge.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
         listed = await call(b, "memory_candidates", {"project_id": "project-a"})
-        assert json.loads(listed["result"]["content"][0]["text"])["candidates"][0]["candidate_id"] == candidate_id
-        wrong = await call(b, "memory_approve_candidate", {"project_id": "project-b", "candidate_id": candidate_id})
+        listed_candidate = json.loads(listed["result"]["content"][0]["text"])["candidates"][0]
+        assert listed_candidate["candidate_id"] == candidate_id
+        assert listed_candidate["evidence_messages"] == [{"message_id": "msg-a", "role": "user", "content": text}]
+        digest = listed_candidate["evidence_digest"]
+        wrong = await call(b, "memory_approve_candidate", {"project_id": "project-b", "candidate_id": candidate_id, "expected_evidence_digest": digest})
         assert wrong["result"].get("isError")
-        approved = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id})
+        approved = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id, "expected_evidence_digest": digest})
         assert not approved["result"].get("isError")
         approved_data = json.loads(approved["result"]["content"][0]["text"])
         memory_id = approved_data["memory_id"]
-        again = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id})
+        again = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": candidate_id, "expected_evidence_digest": digest})
         assert json.loads(again["result"]["content"][0]["text"])["memory_id"] == memory_id
         assert store.get_connection().execute("SELECT count(*) FROM memory_projection_outbox WHERE memory_id = ?", (memory_id,)).fetchone()[0] == 1
         worker = OutboxWorker(session_store=store, qdrant_manager=index, engine=engine, batch_size=10)
@@ -99,6 +102,18 @@ async def test_offline_spool_distill_and_cross_agent_handoff(tmp_path):
         assert any(item["memory_id"] == memory_id for item in json.loads(recalled["result"]["content"][0]["text"])["results"])
         isolated_search = await call(b, "memory_search", {"query": "primary database", "project_id": "project-b"})
         assert all(item["memory_id"] != memory_id for item in json.loads(isolated_search["result"]["content"][0]["text"])["results"])
+        conn = store.get_connection()
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, memory_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("rpc-update", "batch", memory_id, json.dumps({"session_ids": ["sess-a"]}), "UPDATE", "COGNITIVE_DISTILL", "PostgreSQL 16 is the project's primary database.", json.dumps(["msg-a"]), json.dumps([{"message_id": "msg-a", "span": text}]), "PROPOSED", 1))
+        conn.commit()
+        listed_updates = await call(b, "memory_candidates", {"project_id": "project-a"})
+        update = next(c for c in json.loads(listed_updates["result"]["content"][0]["text"])["candidates"] if c["candidate_id"] == "rpc-update")
+        assert update["target_memory"]["version"] == 1
+        rejected = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "rpc-update", "expected_evidence_digest": update["evidence_digest"], "expected_version": 2, "change_reason": "Reviewed source"})
+        assert rejected["result"].get("isError")
+        assert store.get_memory_v3(memory_id)["version"] == 1
+        updated = await call(b, "memory_approve_candidate", {"project_id": "project-a", "candidate_id": "rpc-update", "expected_evidence_digest": update["evidence_digest"], "expected_version": 1, "change_reason": "Reviewed source"})
+        assert not updated["result"].get("isError")
+        assert store.get_memory_v3(memory_id)["version"] == 2
         saved = await call(a, "session_checkpoint", {"session_id": "sess-a", "project_id": "project-a", "completed": ["database selected"], "next_steps": ["apply migration"], "idempotency_key": "cp-a"})
         assert not saved["result"].get("isError")
         result = await call(b, "session_get_handoff", {"project_id": "project-a"})
@@ -180,23 +195,26 @@ def test_candidate_approval_is_atomic_and_concurrent(tmp_path, monkeypatch):
         conn = store.get_connection()
         conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("c", "b", json.dumps({"session_ids": ["s"]}), "EXTRACT", "COGNITIVE_DISTILL", "Evidence for this approved fact", json.dumps(["m"]), json.dumps([{"message_id": "m", "span": "Evidence for this approved fact"}]), "PROPOSED", 1))
         conn.commit()
+        from src.service.candidate_review import list_candidates
+        digest = list_candidates(store, 'p')['candidates'][0]['evidence_digest']
         original = store.enqueue_projection_task
         def fail(*args, **kwargs):
             raise RuntimeError("projection enqueue failed")
         monkeypatch.setattr(store, "enqueue_projection_task", fail)
         with pytest.raises(RuntimeError, match="enqueue"):
-            approve_candidate(store, "c", "p", "reviewer")
+            approve_candidate(store, "c", "p", "reviewer", expected_evidence_digest=digest)
         assert conn.execute("SELECT state FROM curation_candidates WHERE candidate_id = 'c'").fetchone()[0] == "PROPOSED"
         assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 0
         monkeypatch.setattr(store, "enqueue_projection_task", original)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda _: approve_candidate(store, "c", "p", "reviewer"), range(2)))
+            results = list(pool.map(lambda _: approve_candidate(store, "c", "p", "reviewer", expected_evidence_digest=digest), range(2)))
         assert results[0]["memory_id"] == results[1]["memory_id"]
         assert conn.execute("SELECT count(*) FROM memories").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM memory_projection_outbox").fetchone()[0] == 1
         conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ("span-only", "b", json.dumps({"session_ids": ["s"]}), "EXTRACT", "COGNITIVE_DISTILL", "Evidence for this approved fact", "[]", json.dumps([{"message_id": "m", "span": "Evidence for this approved fact"}]), "PROPOSED", 1))
         conn.commit()
-        assert approve_candidate(store, "span-only", "p", "reviewer")["status"] == "APPLIED"
+        digest2 = list_candidates(store, 'p')['candidates'][0]['evidence_digest']
+        assert approve_candidate(store, "span-only", "p", "reviewer", expected_evidence_digest=digest2)["status"] == "APPLIED"
     finally:
         store.close()
 
@@ -258,3 +276,81 @@ def test_crash_after_spooling_preserves_batch_for_replay(tmp_path):
     assert client.replay_pending("crash-session")[0].ok
     assert transport.calls[0]["messages"][0]["message_id"] == "m"
     assert client.pending_count("crash-session") == 0
+
+
+def test_approve_update_requires_reviewed_version_and_preserves_evidence(tmp_path):
+    from src.service.candidate_review import list_candidates, approve_candidate
+    from src.core.errors import VersionConflictError
+    store = SessionStore(db_path=str(tmp_path / 'update-review.db'))
+    try:
+        store.record_raw_session(session_id='s', agent_id='a', project_id='p')
+        store.record_raw_message(message_id='m', session_id='s', role='user', content='Database is now PostgreSQL 16.', sequence=1)
+        store.create_memory_v3(memory_id='mem_target', content='Database is PostgreSQL 15.', project_id='p', type='fact', status='ACTIVE', created_by_agent='a', source_refs=['old-source'])
+        conn = store.get_connection()
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, memory_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('update-c', 'batch', 'mem_target', json.dumps({'session_ids':['s']}), 'UPDATE', 'COGNITIVE_DISTILL', 'Database is PostgreSQL 16.', json.dumps(['m']), json.dumps([{'message_id':'m','span':'Database is now PostgreSQL 16.'}]), 'PROPOSED', 1))
+        conn.commit()
+        candidate = list_candidates(store, 'p')['candidates'][0]
+        digest = candidate['evidence_digest']
+        assert candidate['operation'] == 'UPDATE'
+        assert candidate['target_memory']['content'] == 'Database is PostgreSQL 15.'
+        assert candidate['target_memory']['version'] == 1
+        with pytest.raises(ValueError):
+            approve_candidate(store, 'update-c', 'p', 'reviewer', expected_evidence_digest=digest)
+        store.update_memory_v3(memory_id='mem_target', content='Database is PostgreSQL 15.1.', expected_version=1, change_reason='Concurrent update', agent_id='other')
+        with pytest.raises(VersionConflictError):
+            approve_candidate(store, 'update-c', 'p', 'reviewer', expected_version=1, change_reason='User confirmed version', expected_evidence_digest=digest)
+        assert conn.execute("SELECT state FROM curation_candidates WHERE candidate_id='update-c'").fetchone()[0] == 'PROPOSED'
+        result = approve_candidate(store, 'update-c', 'p', 'reviewer', expected_version=2, change_reason='User confirmed version', expected_evidence_digest=digest)
+        assert result['memory_id'] == 'mem_target'
+        memory = store.get_memory_v3('mem_target')
+        assert memory['content'] == 'Database is PostgreSQL 16.'
+        assert memory['version'] == 3
+        assert set(memory['source_refs']) == {'old-source', 's:m'}
+        assert approve_candidate(store, 'update-c', 'p', 'reviewer', expected_version=2, change_reason='User confirmed version', expected_evidence_digest=digest)['idempotent_replay']
+    finally:
+        store.close()
+
+
+def test_candidate_review_bounds_oversized_evidence_and_marks_truncation(tmp_path):
+    from src.service.candidate_review import list_candidates
+    store = SessionStore(db_path=str(tmp_path / 'oversized-evidence.db'))
+    try:
+        store.record_raw_session(session_id='s-large', agent_id='a', project_id='p')
+        text = 'A' * (5 * 1024 * 1024) + ' Important verified fact.'
+        store.record_raw_message(message_id='m-large', session_id='s-large', role='user', content=text, sequence=1)
+        conn = store.get_connection()
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('large', 'b', json.dumps({'session_ids':['s-large']}), 'EXTRACT', 'COGNITIVE_DISTILL', 'Important verified fact.', json.dumps(['m-large']), json.dumps([{'message_id':'m-large','span':'Important verified fact.'}]), 'PROPOSED', 1))
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('huge-span', 'b', json.dumps({'session_ids':['s-large']}), 'EXTRACT', 'COGNITIVE_DISTILL', 'Large source fact.', json.dumps(['m-large']), json.dumps([{'message_id':'m-large','span':'A' * 510000}]), 'PROPOSED', 2))
+        conn.commit()
+        result = list_candidates(store, 'p')
+        assert result['results_truncated'] is True
+        assert [candidate['candidate_id'] for candidate in result['candidates']] == ['large']
+        message = result['candidates'][0]['evidence_messages'][0]
+        assert message['content_truncated'] is True
+        assert message['original_characters'] == len(text)
+        assert len(json.dumps(result, ensure_ascii=False).encode()) < 1024 * 1024
+        from src.service.candidate_review import approve_candidate
+        with pytest.raises(ValueError, match='incomplete'):
+            approve_candidate(store, 'large', 'p', 'reviewer', expected_evidence_digest=result['candidates'][0]['evidence_digest'])
+        assert conn.execute("SELECT state FROM curation_candidates WHERE candidate_id='large'").fetchone()[0] == 'PROPOSED'
+    finally:
+        store.close()
+
+
+def test_candidate_approval_rejects_evidence_changed_since_review(tmp_path):
+    from src.service.candidate_review import list_candidates, approve_candidate
+    store = SessionStore(db_path=str(tmp_path / 'evidence-race.db'))
+    try:
+        store.ingest_messages('s', 'a', 'p', [{'message_id':'m', 'role':'user', 'content':'Decision: use database A'}])
+        conn = store.get_connection()
+        conn.execute("INSERT INTO curation_candidates (candidate_id, batch_id, session_window_json, operation, matched_rule_id, content, evidence_source_ids, extracted_spans, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('race', 'b', json.dumps({'session_ids':['s']}), 'EXTRACT', 'COGNITIVE_DISTILL', 'Decision: use database A', json.dumps(['m']), json.dumps([{'message_id':'m','span':'Decision: use database A'}]), 'PROPOSED', 1))
+        conn.commit()
+        review = list_candidates(store, 'p')['candidates'][0]
+        digest = review['evidence_digest']
+        store.ingest_messages('s', 'a', 'p', [{'message_id':'m', 'role':'user', 'content':'Decision: use database A was rejected; use database B'}])
+        with pytest.raises(ValueError, match='evidence'):
+            approve_candidate(store, 'race', 'p', 'reviewer', expected_evidence_digest=digest)
+        assert conn.execute("SELECT state FROM curation_candidates WHERE candidate_id='race'").fetchone()[0] == 'PROPOSED'
+        assert conn.execute('SELECT count(*) FROM memories').fetchone()[0] == 0
+    finally:
+        store.close()

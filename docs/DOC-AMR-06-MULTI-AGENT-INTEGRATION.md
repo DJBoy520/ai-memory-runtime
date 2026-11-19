@@ -78,7 +78,11 @@ AMR 通过本地 Unix Domain Socket 对外提供统一的语义记忆与会话�
 ```
 *注：必须显式配置 `PYTHONPATH` 指向仓库根目录，以避免 `ModuleNotFoundError`。*
 
-### 3.3 全量 9 个 MCP 工具说明
+### 3.3 MCP 工具说明
+
+以下为实现支持的工具；不同身份的授权列表可能只允许其中一部分。以当前客户端
+`tools/list` 返回的工具和参数为准，不要借用其他身份或绕过权限。Agent 工作流的
+权威说明见 [`amr-memory` skill](../skills/amr-memory/SKILL.md)。
 
 | 工具名 | 功能概述 | 关键入参与机制 |
 | :--- | :--- | :--- |
@@ -89,6 +93,11 @@ AMR 通过本地 Unix Domain Socket 对外提供统一的语义记忆与会话�
 | `memory_history` | 查询记忆版本演进历史 | `memory_id` (必填)。返回历次版本正文与变更原因。 |
 | `memory_delete` | 软删除记忆 | `memory_id` (必填), `reason`, `idempotency_key`。SQLite 标记 `DELETED`，异步从 Qdrant 物理删点。 |
 | `memory_ingest_session` | 对话流水归档 | `session_id`, `project_id`, `messages`（含 message_id, role, content, sequence）。 |
+| `session_checkpoint` / `session_get_handoff` | 写入 / 读取项目交接 | 使用本 Agent 自己的会话 ID；交接不等于长期记忆提炼。 |
+| `memory_candidates` | 查看待审核候选 | 包含来源消息、证据摘要和更新目标版本，可能包含敏感会话原文；截断会明确标记。 |
+| `memory_approve_candidate` | 批准候选 | 必须带审阅得到的 `expected_evidence_digest`；UPDATE 还需 `expected_version` 与 `change_reason`。证据视图不完整时不能批准。 |
+| `memory_spool_status` / `memory_spool_retry` | 查看 / 重试本机归档队列 | 仅配置本机 spool 且有相应能力时可用；`queued` 不表示服务端已提交。 |
+| `memory_session_checkpoint` / `memory_get_handoff` | 交接工具兼容别名 | 分别对应 `session_checkpoint` / `session_get_handoff`。 |
 | `memory_record` | 旧版兼容写入接口 | 兼容旧版参数，内部自动映射至 SSOT 事务账本与发件箱。 |
 | `memory_update_status` | 旧版兼容状态更新 | 兼容旧版状态变更请求。 |
 

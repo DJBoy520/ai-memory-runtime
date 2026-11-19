@@ -24,10 +24,10 @@ class RuleEngine:
     """
 
     HEARTBEAT_PATTERNS = [
-        re.compile(r"^ping\b", re.IGNORECASE),
-        re.compile(r"^pong\b", re.IGNORECASE),
-        re.compile(r"^heartbeat\b", re.IGNORECASE),
-        re.compile(r"^\[HEARTBEAT\]", re.IGNORECASE),
+        re.compile(r"ping", re.IGNORECASE),
+        re.compile(r"pong", re.IGNORECASE),
+        re.compile(r"heartbeat", re.IGNORECASE),
+        re.compile(r"\[HEARTBEAT\]", re.IGNORECASE),
     ]
 
     TOOL_LOOP_PATTERNS = [
@@ -55,7 +55,7 @@ class RuleEngine:
 
         # 1. 规则: 纯心跳噪音 (RULE_HEARTBEAT_NOISE) -> 建议转为 deleted 或 archived
         for pattern in self.HEARTBEAT_PATTERNS:
-            if pattern.search(content) and len(content) < 50:
+            if pattern.fullmatch(content):
                 return {
                     "memory_id": memory_id,
                     "current_status": current_status,

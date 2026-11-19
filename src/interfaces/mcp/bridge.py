@@ -73,11 +73,15 @@ class MCPBridge:
         source_agent: str = DEFAULT_SOURCE_AGENT,
         call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
         auth_token_file: Optional[str] = None,
+        adapter_mode: Optional[bool] = None,
     ):
         self.socket_path = socket_path
         self.source_agent = source_agent
         self.call_timeout = call_timeout
         self.auth_token_file = auth_token_file or os.environ.get("AMR2_TOKEN_FILE")
+        # Token-backed bridges default to the authenticated adapter. Callers
+        # intentionally connecting directly to a legacy daemon may opt out.
+        self._adapter_mode = bool(self.auth_token_file) if adapter_mode is None else adapter_mode
         self._spool_dir = os.environ.get("AMR_SPOOL_DIR")
         self._spool_client = None
         self._spool_init_lock = asyncio.Lock()
@@ -201,6 +205,20 @@ class MCPBridge:
             return None
 
         if method == "tools/list":
+            if self._adapter_mode:
+                try:
+                    result = await self._call_daemon("amr.tools", {}, req_id)
+                    grants = result.get("tools") if isinstance(result, dict) else None
+                    if not isinstance(grants, list) or any(not isinstance(item, str) for item in grants):
+                        raise ValueError("Invalid tool grants")
+                    allowed = set(grants)
+                    if self._spool_dir and "memory_ingest_session" in allowed:
+                        allowed.update(("memory_spool_status", "memory_spool_retry"))
+                    return {"jsonrpc": "2.0", "id": req_id,
+                            "result": {"tools": [tool for tool in TOOL_DEFINITIONS if tool["name"] in allowed]}}
+                except (DaemonRpcError, ConnectionError, OSError, TimeoutError, ValueError):
+                    return {"jsonrpc": "2.0", "id": req_id,
+                            "error": {"code": -32010, "message": "AMR authorization unavailable"}}
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,

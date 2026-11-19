@@ -161,3 +161,37 @@ async def test_record_non_default_collection_closes_outbox(memory_service, sessi
     point_info = memory_service.qdrant.get_point_by_memory_id(memory_id, collections=["crypto_standards"])
     assert point_info is not None and point_info["collection"] == "crypto_standards"
     assert session_store.get_memory(memory_id) is not None
+
+@pytest.mark.asyncio
+async def test_exact_id_respects_project_type_scope_and_collection(memory_service):
+    mid = (await memory_service.memory_record(
+        content='A unique memory with restrictive search filters',
+        project_id='other-project', memory_type='decision/arch', scope='private',
+    ))['memory_id']
+    async def search(**filters):
+        return await memory_service.memory_search(query=mid, score_threshold=1.1, **filters)
+
+    assert (await search(project_id='requested-project'))['results'] == []
+    assert (await search(type='lesson'))['results'] == []
+    assert (await search(type='lesson/*'))['results'] == []
+    assert (await search(scope='global'))['results'] == []
+    assert (await search(collections=['crypto_standards']))['results'] == []
+    assert (await search(collections=[]))['results'] == []
+    result = await search(project_id='other-project', type='decision/*', scope='private')
+    assert result['results'][0]['memory_id'] == mid
+    assert result['results'][0]['matched_by'] == 'exact_id'
+
+
+@pytest.mark.asyncio
+async def test_exact_id_matches_candidate_uuid_without_partial_id_matches(memory_service):
+    original = await _seed(memory_service, 'project-a', 'A candidate memory to retrieve by its exact UUID')
+    point = memory_service.qdrant.get_point_by_memory_id(original)
+    mid = 'mem_0123456789abcdef0123456789abcdef'
+    memory_service.qdrant._client.set_payload(
+        collection_name='ai_memory', payload={'memory_id': mid}, points=[point['point_id']], wait=True,
+    )
+    result = await memory_service.memory_search(query=f'Find {mid}', score_threshold=1.1)
+    assert result['results'][0]['memory_id'] == mid
+    assert result['results'][0]['matched_by'] == 'exact_id'
+    assert (await memory_service.memory_search(query=f'查看{mid}的详情', score_threshold=1.1))['results'][0]['memory_id'] == mid
+    assert (await memory_service.memory_search(query=f'{mid}suffix', score_threshold=1.1))['results'] == []

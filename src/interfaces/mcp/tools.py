@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 TOOL_DEFINITIONS = [
     {
         "name": "memory_search",
-        "description": "Semantic search across long-term memories (weakly consistent with recent writes while asynchronous projection is pending). By default returns current valid facts (status=ACTIVE). Supports history lookup (include_history=true) and domain filtering.",
+        "description": "Search shared memories for relevant context. Defaults to ACTIVE; include_history includes historical facts. project_id includes configured global/general fallbacks and is not an authorization boundary. Search uses an asynchronously updated index: an empty result does not prove absence, especially just after a write. Use memory_get by ID for current committed state.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -64,7 +64,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_create",
-        "description": "Create a new durable shared memory. SQLite committed immediately with projection_status='pending' (asynchronous vector projection; memory_search is weakly consistent). Idempotency conflicts return error code -32006. AMR automatically tracks version=1, timestamps, and caller agent_id.",
+        "description": "Create a durable shared memory for a substantive fact, decision, or preference. Check relevant existing memories to avoid duplicates; supply project_id, provenance in source_refs, and an appropriate status for uncertainty. SQLite commits immediately, search indexing is asynchronous. Reuse idempotency_key only for retries of the same payload; conflicts return -32006.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -108,7 +108,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_update",
-        "description": "Update an existing memory. Content changes require expected_version and change_reason (triggers version increment). Pure metadata updates (type/status) update in-place without versioning. SQLite committed immediately with projection_status='pending' (asynchronous vector projection; memory_search is weakly consistent). Idempotency conflicts return error code -32006.",
+        "description": "Update an existing memory. First use memory_get to inspect current content and version. Content changes require expected_version and change_reason; on version conflict re-read and reconsider. Does not add source_refs. Metadata-only changes do not increment the content version. SQLite commits immediately and search indexing is asynchronous.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -188,7 +188,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_get",
-        "description": "Retrieve precise memory details and current state by memory_id.",
+        "description": "Read a memory's current committed SQLite state and version by memory_id. Use after writing or before a versioned content update; search indexing may still be pending.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -232,7 +232,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_ingest_session",
-        "description": "Ingest conversation messages into SQLite. Supply stable message_id values for retry; a session_id is bound to its originating agent and project. Reusing it with a different agent or project is rejected. This tool must be invoked by the client; MCP does not automatically capture conversations.",
+        "description": "Archive authorized real conversation messages. Supply stable message_id values on retry; session_id is bound to its originating agent and project. MCP does not automatically capture conversations: account for any native plugin that already archives them. Archiving is separate from creating searchable long-term memory. A queued response is not a server commit.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -269,17 +269,17 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "memory_candidates",
-        "description": "List evidence-backed proposed memories for review in a project.",
+        "description": "List EXTRACT and UPDATE proposals for review in a project, including source messages, roles, excerpts, evidence_digest, and any update target and version. Source messages can contain private conversation text. Candidates with content_truncated or omitted_evidence_messages cannot be approved; results_truncated indicates omitted results. Project filtering is not authorization.",
         "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": ["project_id"]}
     },
     {
         "name": "memory_approve_candidate",
-        "description": "Approve a reviewed project memory candidate and queue it for search indexing. Evidence and project are checked again.",
-        "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, "required": ["project_id", "candidate_id"]}
+        "description": "Approve a reviewed project candidate. Pass expected_evidence_digest from memory_candidates; changed evidence is rejected. UPDATE also requires reviewed expected_version and change_reason. EXTRACT creates and UPDATE changes a memory; both queue asynchronous indexing. Other operations are unsupported. Review the source and all context before approving.",
+        "inputSchema": {"type": "object", "properties": {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}, "expected_evidence_digest": {"type": "string", "description": "Exact evidence_digest returned by memory_candidates after review."}, "expected_version": {"type": "integer", "minimum": 1}, "change_reason": {"type": "string"}}, "required": ["project_id", "candidate_id", "expected_evidence_digest"]}
     },
     {
         "name": "session_checkpoint",
-        "description": "Create a persistent structured session checkpoint and cross-agent handoff containing completed work, in-progress items, and next steps for the project.",
+        "description": "Create a structured project handoff with completed work, in-progress items, and next steps. This is not the same as ingesting the full conversation or creating searchable long-term memories. A queued response is not a server commit.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -453,11 +453,17 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
     elif name in ("memory_spool_status", "memory_spool_retry"):
         pass
     elif name in ("memory_candidates", "memory_approve_candidate"):
-        for field in (("project_id", "candidate_id") if name == "memory_approve_candidate" else ("project_id",)):
+        for field in (("project_id", "candidate_id", "expected_evidence_digest") if name == "memory_approve_candidate" else ("project_id",)):
             if not isinstance(args.get(field), str) or not args[field].strip():
                 raise ValueError(f"Parameter '{field}' is required.")
         if "limit" in args and (isinstance(args["limit"], bool) or not isinstance(args["limit"], int) or not 1 <= args["limit"] <= 100):
             raise ValueError("Parameter 'limit' must be an integer from 1 to 100.")
+        if name == "memory_approve_candidate":
+            version = args.get("expected_version")
+            if version is not None and (isinstance(version, bool) or not isinstance(version, int) or version < 1):
+                raise ValueError("Parameter 'expected_version' must be a positive integer.")
+            if "change_reason" in args and not isinstance(args["change_reason"], str):
+                raise ValueError("Parameter 'change_reason' must be a string.")
     elif name in ("session_checkpoint", "memory_session_checkpoint", "session_get_handoff", "memory_get_handoff"):
         for field in (("session_id", "project_id") if name in ("session_checkpoint", "memory_session_checkpoint") else ("project_id",)):
             if not isinstance(args.get(field), str) or not args[field].strip():

@@ -189,7 +189,7 @@ class MemoryService:
         - 作用域：显式传 project_id → [传入值] ∪ project_fallback_ids；不传 → 全库；
         - 状态可见性：默认仅 ACTIVE；include_history 追加 HISTORICAL/SUPERSEDED；
           PENDING_VERIFY/CONFLICT/TEMPORARY 仅显式传 status 时可见；
-        - query 携带 mem_xxx ID 时确定性直取（不受作用域收窄约束，沿 superseded_by 链重定向）；
+        - query 携带 mem_xxx ID 时确定性直取，沿 superseded_by 链重定向，并遵循相同过滤条件；
         - 排名一律用本次查询的实时 vector_score（payload 历史分仅作 stored_score 透出）。
         """
         if not query or not query.strip():
@@ -214,6 +214,8 @@ class MemoryService:
                 target_cols = list(STANDARD_COLLECTIONS)
             else:
                 target_cols = list(collections)
+        if not target_cols:
+            return {"results": [], "total": 0}
 
         # 限制 limit 范围
         limit = max(1, min(limit, 20))
@@ -286,9 +288,10 @@ class MemoryService:
         # 使 Agent 持有过期 ID 时仍能取到当前事实。
         exact_hits: List[Dict[str, Any]] = []
         allowed_status_set = {s.upper() for s in allowed_statuses} | {normalize_status(s) for s in allowed_statuses}
-        for matched_id in dict.fromkeys(re.findall(r"mem_\d{8}_[0-9a-f]{6,}(?:_chunk_\d+)?", query)):
+        id_pattern = r"(?<![A-Za-z0-9_])mem_(?:\d{8}_[0-9a-f]{6,}(?:_chunk_\d+)?|[0-9a-f]{32})(?![A-Za-z0-9_])"
+        for matched_id in dict.fromkeys(re.findall(id_pattern, query)):
             redirect_from: Optional[str] = None
-            point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, matched_id)
+            point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, matched_id, collections=target_cols)
             seen_ids = {matched_id}
             for _hop in range(3):
                 if not point_info:
@@ -301,7 +304,7 @@ class MemoryService:
                         break
                     seen_ids.add(target_id)
                     redirect_from = redirect_from or matched_id
-                    point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, target_id)
+                    point_info = await asyncio.to_thread(self.qdrant.get_point_by_memory_id, target_id, collections=target_cols)
                     continue
                 break
             if not point_info:
@@ -310,6 +313,19 @@ class MemoryService:
             status_val = (payload.get("status") or "").upper()
             canonical_status = normalize_status(payload.get("status"))
             if status_val and status_val not in allowed_status_set and canonical_status not in allowed_status_set:
+                continue
+            if project_id and project_id != "all" and payload.get("project_id") not in scope_ids:
+                continue
+            payload_type = payload.get("type") or payload.get("memory_type")
+            if isinstance(req_type, list) and payload_type not in req_type:
+                continue
+            if isinstance(req_type, str):
+                if req_type.endswith("/*"):
+                    if not isinstance(payload_type, str) or not payload_type.startswith(req_type[:-2]):
+                        continue
+                elif payload_type != req_type:
+                    continue
+            if scope and payload.get("scope") != scope:
                 continue
             p_type = payload.get("type") or payload.get("memory_type", "general")
             final_mid = payload.get("memory_id") or matched_id

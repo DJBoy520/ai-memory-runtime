@@ -41,6 +41,7 @@ class CoverageValidator:
         """
         all_raw_ids = set(raw_message_ids)
         disposition_map: Dict[str, Dict[str, Any]] = {}
+        supported_ids = {mid for prop in proposals for mid in prop.get("evidence_source_ids", []) if mid in all_raw_ids}
 
         # 1. 收集所有顶层声明的 dispositions
         if declared_dispositions:
@@ -60,7 +61,11 @@ class CoverageValidator:
         for prop in proposals:
             # 来自 prop.message_disposition
             prop_disps = prop.get("message_disposition", [])
+            if not isinstance(prop_disps, list):
+                prop_disps = []
             for item in prop_disps:
+                if not isinstance(item, dict) or not isinstance(item.get("disposition"), str) or not isinstance(item.get("message_id"), str):
+                    continue
                 m_id = item.get("message_id")
                 disp = item.get("disposition", "UNPROCESSED").upper()
                 if disp not in self.VALID_DISPOSITIONS:
@@ -80,6 +85,12 @@ class CoverageValidator:
                         "disposition": "EXTRACTED",
                         "reason": prop.get("rationale") or "Used as proposal evidence",
                     }
+
+        # A model's EXTRACTED declaration alone does not prove that a valid
+        # proposal actually uses the message.
+        for mid, disposition in disposition_map.items():
+            if disposition["disposition"] == "EXTRACTED" and mid not in supported_ids:
+                disposition.update(disposition="UNPROCESSED", reason="No validated proposal uses this message")
 
         # 3. 检查守恒性与遗漏补全
         declared_ids = set(disposition_map.keys())

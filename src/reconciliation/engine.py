@@ -282,8 +282,17 @@ class ReconciliationEngine:
         # 检查不变量 Invariant-02:
         # 1. Qdrant 中存在但 SQLite 中不存在或不是 active/stale 的点位 (需下架/清理)
         invalid_in_qdrant = []
+        orphan_in_qdrant = []
+        historical_in_qdrant = []
+        deleted_in_qdrant = []
         for pid in qdrant_points:
             st = sqlite_map.get(pid)
+            if st is None:
+                orphan_in_qdrant.append(pid)
+            elif normalize_status(st) == "HISTORICAL":
+                historical_in_qdrant.append(pid)
+            elif normalize_status(st) == "DELETED":
+                deleted_in_qdrant.append(pid)
             if st is None or normalize_status(st) in ("DELETED", "HISTORICAL"):
                 invalid_in_qdrant.append(pid)
 
@@ -297,6 +306,9 @@ class ReconciliationEngine:
             "sqlite_total": len(sqlite_records),
             "qdrant_total": len(qdrant_points),
             "invalid_in_qdrant_count": len(invalid_in_qdrant),
+            "orphan_in_qdrant_count": len(orphan_in_qdrant),
+            "historical_in_qdrant_count": len(historical_in_qdrant),
+            "deleted_in_qdrant_count": len(deleted_in_qdrant),
             "missing_in_qdrant_count": len(missing_in_qdrant),
             "dry_run": self.dry_run,
         }
@@ -320,11 +332,13 @@ class ReconciliationEngine:
         latency_ms = (time.time() - t0) * 1000.0
 
         telemetry = {
-            "qdrant_active_count": c_count,
+            "qdrant_total_count": c_count,
+            "qdrant_active_count": None,
             "probe_latency_ms": round(latency_ms, 2),
-            "correctness_gate_passed": True,
+            # A count/latency probe is not a retrieval correctness test.
+            "correctness_gate_passed": None,
         }
-        print(f"[Phase 5] 遥测完成: Qdrant 活跃点位 {c_count}, 探测延迟 {round(latency_ms, 2)}ms")
+        print(f"[Phase 5] 遥测完成: Qdrant 总点位 {c_count}, 探测延迟 {round(latency_ms, 2)}ms; 正确性门禁未执行")
         return telemetry
 
     # ==================== Phase 6: Shadow Restore Drill & Audit ====================

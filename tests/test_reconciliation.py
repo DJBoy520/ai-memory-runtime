@@ -156,3 +156,40 @@ def test_reconciliation_engine_lifecycle_chunky_commit():
         # 检查 qdrant_sync_queue 已记录
         cursor.execute("SELECT count(*) FROM qdrant_sync_queue WHERE op_type = 'delete'")
         assert cursor.fetchone()[0] == 250
+
+
+def test_heartbeat_rule_does_not_classify_diagnostic_memory_as_noise():
+    engine = RuleEngine()
+    assert engine.scan_memory({'memory_id': 'm', 'content': 'ping fails after proxy restart', 'status': 'active'}) is None
+    assert engine.scan_memory({'memory_id': 'm', 'content': 'ping', 'status': 'active'})['matched_rule_id'] == 'RULE_HEARTBEAT_NOISE'
+
+
+def test_reconciliation_reports_historical_separately_from_orphans(tmp_path):
+    from types import SimpleNamespace
+    store = SessionStore(db_path=str(tmp_path / 'reconciliation.db'))
+    for mid, pid, status in [('active', 'p1', 'ACTIVE'), ('old', 'p2', 'HISTORICAL'), ('gone', 'p3', 'DELETED')]:
+        store.create_memory(memory_id=mid, qdrant_point_id=pid, subject='', predicate='', content='A factual memory', type='fact', status=status)
+    engine = ReconciliationEngine.__new__(ReconciliationEngine)
+    engine.store = store
+    engine.dry_run = True
+    engine.collection_name = 'ai_memory'
+    engine.qdrant_client = MagicMock()
+    engine.qdrant_client.scroll.return_value = ([SimpleNamespace(id=x) for x in ('p1', 'p2', 'p3', 'orphan')], None)
+    report = engine.phase_4_projection_reconciliation()
+    assert report['historical_in_qdrant_count'] == 1
+    assert report['deleted_in_qdrant_count'] == 1
+    assert report['orphan_in_qdrant_count'] == 1
+    assert report['missing_in_qdrant_count'] == 0
+    store.close()
+
+
+def test_telemetry_does_not_claim_unchecked_correctness_or_active_count():
+    from types import SimpleNamespace
+    engine = ReconciliationEngine.__new__(ReconciliationEngine)
+    engine.collection_name = 'ai_memory'
+    engine.qdrant_client = MagicMock()
+    engine.qdrant_client.count.return_value = SimpleNamespace(count=12)
+    report = engine.phase_5_correctness_gate()
+    assert report['qdrant_total_count'] == 12
+    assert report['qdrant_active_count'] is None
+    assert report['correctness_gate_passed'] is None

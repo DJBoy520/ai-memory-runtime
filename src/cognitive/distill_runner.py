@@ -33,6 +33,11 @@ from src.cognitive.model_worker import (
 logger = logging.getLogger("amr_distill_runner")
 
 
+def _safe_runner_error(exc: Exception) -> str:
+    """Do not include model output or conversation contents in error reports."""
+    return type(exc).__name__
+
+
 def resolve_runner_config(
     cli_args: Optional[Any] = None,
     config_dict: Optional[Dict[str, Any]] = None,
@@ -226,9 +231,12 @@ class DistillationRunner:
             columns = {row[1] for row in cur.execute("PRAGMA table_info(curation_distillation_state)")}
             if "source_digest" not in columns:
                 cur.execute("ALTER TABLE curation_distillation_state ADD COLUMN source_digest TEXT")
+            if "lease_token" not in columns:
+                cur.execute("ALTER TABLE curation_distillation_state ADD COLUMN lease_token TEXT")
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_distill_batch ON curation_distillation_state(batch_id);"
             )
+            cur.execute("CREATE TABLE IF NOT EXISTS curation_discovery_watermark (id INTEGER PRIMARY KEY CHECK(id=1), scanned_until INTEGER NOT NULL)")
             conn.commit()
 
     def _source_digest(self, session_id: str) -> str:
@@ -300,20 +308,65 @@ class DistillationRunner:
             failed_rows = cur.fetchall()
             return [dict(r) for r in failed_rows]
 
-        # 场景 C: 正常增量扫描
-        # Apply the requested limit after filtering already-processed sessions;
-        # otherwise old successes can permanently hide newer work.
-        scanned = self.scheduler.scan_incremental_sessions(lookback_seconds=lookback_seconds, limit=2147483647)
-        if not scanned or force:
+        # Discovery is durable: queue every discovered session before limiting
+        # the batch, and include the interval since the previous scan after an
+        # outage. Capture the start time so arrivals during scanning are retried.
+        scan_started = int(time.time())
+        watermark = cur.execute("SELECT scanned_until FROM curation_discovery_watermark WHERE id=1").fetchone()
+        effective_lookback = lookback_seconds
+        if watermark and lookback_seconds > 0:
+            effective_lookback = max(lookback_seconds, scan_started - watermark[0] + 1)
+        scanned = self.scheduler.scan_incremental_sessions(lookback_seconds=effective_lookback, limit=2147483647)
+        if force:
             return scanned[:limit]
 
-        # 过滤掉已经成功处理过的 session_id
-        cur.execute(
-            "SELECT session_id, source_digest FROM curation_distillation_state WHERE status = 'SUCCESS'"
-        )
-        succeeded = {r[0]: r[1] for r in cur.fetchall()}
+        states = {r["session_id"]: dict(r) for r in cur.execute("SELECT session_id, status, source_digest FROM curation_distillation_state")}
+        eligible = []
+        for session in scanned:
+            state = states.get(session["session_id"])
+            if state and state["status"] in ("SUCCESS", "SKIPPED") and state["source_digest"] == self._source_digest(session["session_id"]):
+                continue
+            eligible.append(session)
 
-        return [s for s in scanned if succeeded.get(s["session_id"]) != self._source_digest(s["session_id"])][:limit]
+        if self.dry_run:
+            pending = [dict(r) for r in cur.execute(
+                "SELECT session_id, project_id, agent_id FROM curation_distillation_state WHERE status='PENDING' ORDER BY created_at, session_id"
+            )]
+            pending_ids = {item["session_id"] for item in pending}
+            return (pending + [item for item in eligible if item["session_id"] not in pending_ids])[:limit]
+
+        with self.session_store.locked_write_transaction() as write_conn:
+            write_cur = write_conn.cursor()
+            # Recover interrupted claims only after their persisted lease has
+            # expired. Older rows predate leases and get a one-hour grace period.
+            write_cur.execute("""UPDATE curation_distillation_state
+                                 SET status='PENDING', updated_at=?, lease_token=NULL, next_retry_at=NULL
+                                 WHERE status='RUNNING' AND COALESCE(next_retry_at, updated_at + 3600) <= ?""",
+                              (scan_started, scan_started))
+            for session in eligible:
+                prior = states.get(session["session_id"])
+                write_cur.execute(
+                    """INSERT INTO curation_distillation_state
+                       (session_id, batch_id, project_id, agent_id, status, created_at, updated_at)
+                       VALUES (?, 'discovery', ?, ?, 'PENDING', ?, ?)
+                       ON CONFLICT(session_id) DO UPDATE SET status='PENDING', updated_at=excluded.updated_at
+                       WHERE curation_distillation_state.status IN ('SUCCESS', 'SKIPPED')
+                         AND curation_distillation_state.source_digest IS ?""",
+                    (session["session_id"], session.get("project_id"), session.get("agent_id"), scan_started, scan_started, prior["source_digest"] if prior else None),
+                )
+            write_cur.execute(
+                """INSERT INTO curation_discovery_watermark(id, scanned_until) VALUES (1, ?)
+                   ON CONFLICT(id) DO UPDATE SET scanned_until = max(scanned_until, excluded.scanned_until)""",
+                (scan_started,),
+            )
+            pending = [dict(r) for r in write_cur.execute(
+                "SELECT session_id, project_id, agent_id FROM curation_distillation_state WHERE status='PENDING' ORDER BY created_at, session_id"
+            )]
+
+        # Preserve normal handling of failed/running sessions in the current
+        # window, while old pending work cannot fall out of the scan window.
+        pending_ids = {item["session_id"] for item in pending}
+        return (pending + [item for item in eligible if item["session_id"] not in pending_ids])[:limit]
 
     async def run_pipeline_for_session(
         self,
@@ -339,22 +392,30 @@ class DistillationRunner:
                 max_retries=retries_limit, retry_delay=delay,
             )
 
-        # 登记或更新状态为 RUNNING
-        with self.session_store._lock:
-            conn = self.session_store.get_connection()
+        # Claim the session atomically across runner processes. A persisted
+        # deadline makes interrupted work recoverable without immediately
+        # duplicating an in-flight model call.
+        timeout = float(getattr(self.model_worker, "timeout", 30.0))
+        lease_seconds = max(3600, int(timeout * max(1, retries_limit) * 4 + max(0.0, delay) * max(1, retries_limit) + 120))
+        lease_token = uuid.uuid4().hex
+        with self.session_store.locked_write_transaction() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
                 INSERT INTO curation_distillation_state (
                     session_id, batch_id, status, attempts, max_retries,
-                    model_name, created_at, updated_at
+                    model_name, created_at, updated_at, next_retry_at, lease_token
                 )
-                VALUES (?, ?, 'RUNNING', 1, ?, ?, ?, ?)
+                VALUES (?, ?, 'RUNNING', 1, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     batch_id = excluded.batch_id,
                     status = 'RUNNING',
                     attempts = curation_distillation_state.attempts + 1,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    next_retry_at = excluded.next_retry_at,
+                    lease_token = excluded.lease_token
+                WHERE curation_distillation_state.status != 'RUNNING'
+                   OR COALESCE(curation_distillation_state.next_retry_at, curation_distillation_state.updated_at + 3600) <= ?
                 """,
                 (
                     session_id,
@@ -363,9 +424,13 @@ class DistillationRunner:
                     getattr(self.model_worker, "model_name", "unknown"),
                     now,
                     now,
+                    now + lease_seconds,
+                    lease_token,
+                    now,
                 ),
             )
-            conn.commit()
+            if cur.rowcount != 1:
+                return {"batch_id": batch_id, "session_id": session_id, "status": "ALREADY_RUNNING", "written_candidates": 0}
 
         # 记录脱敏日志（严禁打印会话内容）
         logger.info(
@@ -374,12 +439,15 @@ class DistillationRunner:
             batch_id,
         )
 
-        res = await self.scheduler.run_pipeline_for_session(
-            session_id=session_id,
-            batch_id=batch_id,
-            max_retries=retries_limit,
-            retry_delay=delay,
-        )
+        try:
+            res = await asyncio.wait_for(self.scheduler.run_pipeline_for_session(
+                session_id=session_id, batch_id=batch_id,
+                max_retries=retries_limit, retry_delay=delay,
+                lease_token=lease_token,
+            ), timeout=lease_seconds - 30)
+        except Exception as exc:
+            res = {"batch_id": batch_id, "session_id": session_id, "status": "PIPELINE_ERROR",
+                   "error": _safe_runner_error(exc), "written_candidates": 0}
 
         status = res.get("status", "UNKNOWN")
         written = res.get("written_candidates", 0)
@@ -398,10 +466,12 @@ class DistillationRunner:
                         last_error = NULL,
                         last_error_type = NULL,
                         source_digest = ?,
+                        next_retry_at = NULL,
+                        lease_token = NULL,
                         updated_at = ?
-                    WHERE session_id = ?
+                    WHERE session_id = ? AND lease_token = ?
                     """,
-                    (written, source_digest, now_after, session_id),
+                    (written, source_digest, now_after, session_id, lease_token),
                 )
                 logger.info(
                     "Session %s distillation succeeded: %d candidates proposed",
@@ -413,10 +483,13 @@ class DistillationRunner:
                     """
                     UPDATE curation_distillation_state
                     SET status = 'SKIPPED',
+                        source_digest = ?,
+                        next_retry_at = NULL,
+                        lease_token = NULL,
                         updated_at = ?
-                    WHERE session_id = ?
+                    WHERE session_id = ? AND lease_token = ?
                     """,
-                    (now_after, session_id),
+                    (source_digest, now_after, session_id, lease_token),
                 )
                 logger.info("Session %s skipped: empty messages", session_id)
             else:
@@ -430,10 +503,12 @@ class DistillationRunner:
                         attempts = max(attempts, ?),
                         last_error = ?,
                         last_error_type = ?,
+                        next_retry_at = NULL,
+                        lease_token = NULL,
                         updated_at = ?
-                    WHERE session_id = ?
+                    WHERE session_id = ? AND lease_token = ?
                     """,
-                    (run_attempts, clean_err, status, now_after, session_id),
+                    (run_attempts, clean_err, status, now_after, session_id, lease_token),
                 )
                 logger.warning(
                     "Session %s distillation failed (%s): %s",
@@ -441,6 +516,9 @@ class DistillationRunner:
                     status,
                     clean_err,
                 )
+            if cur.rowcount != 1:
+                conn.rollback()
+                return {"batch_id": batch_id, "session_id": session_id, "status": "LEASE_LOST", "written_candidates": written}
             conn.commit()
 
         return res
@@ -491,7 +569,7 @@ class DistillationRunner:
             if st == "SUCCESS":
                 succeeded += 1
                 total_candidates += res.get("written_candidates", 0)
-            elif st == "SKIPPED_EMPTY":
+            elif st in ("SKIPPED_EMPTY", "ALREADY_RUNNING"):
                 skipped += 1
             else:
                 failed += 1
@@ -504,7 +582,7 @@ class DistillationRunner:
                 "attempts": r.get("attempts", 1),
             }
             for r in results
-            if r.get("status") not in ("SUCCESS", "SKIPPED_EMPTY")
+            if r.get("status") not in ("SUCCESS", "SKIPPED_EMPTY", "ALREADY_RUNNING")
         ]
 
         summary = {

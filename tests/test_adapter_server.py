@@ -941,3 +941,27 @@ def test_unavailable_active_registry_is_retryable_end_to_end(tmp_path, monkeypat
         finally:
             await daemon.stop(); await harness.stop()
     asyncio.run(run())
+
+
+def test_stdio_bridge_lists_only_agent_grants_and_fails_closed(tmp_path, monkeypatch):
+    from src.interfaces.mcp.bridge import MCPBridge
+    async def run():
+        harness = await Harness(tmp_path).start()
+        token_path = tmp_path / 'stdio-token'
+        token_path.write_text(TOKEN_A, encoding='ascii')
+        token_path.chmod(0o600)
+        monkeypatch.setenv('AMR2_TOKEN_FILE', str(token_path))
+        bridge = MCPBridge(socket_path=harness.openclaw_socket, source_agent=AGENT_A)
+        try:
+            response = await bridge.handle_request({'jsonrpc':'2.0', 'id':1, 'method':'tools/list'})
+            assert {item['name'] for item in response['result']['tools']} == set(TOKENS[TOKEN_A]['tools'])
+            monkeypatch.delenv('AMR2_TOKEN_FILE')
+            explicit_bridge = MCPBridge(socket_path=harness.openclaw_socket, source_agent=AGENT_A, auth_token_file=str(token_path))
+            explicit_response = await explicit_bridge.handle_request({'jsonrpc':'2.0', 'id':3, 'method':'tools/list'})
+            assert {item['name'] for item in explicit_response['result']['tools']} == set(TOKENS[TOKEN_A]['tools'])
+        finally:
+            await harness.stop()
+        response = await bridge.handle_request({'jsonrpc':'2.0', 'id':2, 'method':'tools/list'})
+        assert 'error' in response
+        assert 'result' not in response
+    asyncio.run(run())

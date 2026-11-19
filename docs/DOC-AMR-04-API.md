@@ -86,6 +86,7 @@ AMR 采用 JSON-RPC 2.0 扩展负数码，所有业务错误均携带机器可�
 ### 4.1 `memory_search` (记忆语义检索)
 - **RPC 方法**：`memory.search` / `memory_search`
 - **说明**：基于 Qdrant 向量检索。弱一致（若刚写入正在 pending 则暂未索引）。默认仅返回 `ACTIVE` 现役事实。
+- 查询中包含完整记忆 ID 时，支持日期格式和候选审核生成的 UUID 格式精确命中，并优先返回。精确命中及替代链的最终目标同样受集合、项目（含配置的 fallback）、类型、scope 和状态筛选约束。精确命中不受向量分数阈值约束；需要立即读取最新值时使用 `memory_get`。
 - **入参**：
 ```json
 {
@@ -118,6 +119,10 @@ AMR 采用 JSON-RPC 2.0 扩展负数码，所有业务错误均携带机器可�
 ```
 
 ---
+
+`memory_candidates(project_id)` 返回待审核的 EXTRACT 和 UPDATE 候选、证据消息及角色、`evidence_digest`；UPDATE 还包含当前目标正文和版本。为限制响应大小，`content_truncated`、`omitted_evidence_messages` 或 `results_truncated` 表示审核视图不完整；证据消息被截断或省略的候选暂不能批准。调用方应仅将该接口授权给可以查看项目会话原文的审核者。证据片段存在不代表候选结论一定成立，审核者需自行判断上下文和语义。
+
+`memory_approve_candidate` 需要传入审阅时取得的 `expected_evidence_digest`，候选内容或证据改变时拒绝并要求重新审阅；对 EXTRACT 创建新记忆，对 UPDATE 还必须提供审核时看到的 `expected_version` 和人工填写的 `change_reason`。目标必须仍是同项目、ACTIVE 的 v3 记忆，版本不一致时拒绝并保留候选。批准会在同一事务中更新正文、版本、来源和候选状态，并异步更新检索投影。MERGE、SUPERSEDE 等其他操作尚不支持通过此接口应用。
 
 ### 4.2 `memory_create` (创建记忆)
 - **RPC 方法**：`memory.create` / `memory_create`
