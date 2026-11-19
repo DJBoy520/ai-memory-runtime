@@ -1,12 +1,34 @@
 # AI Memory Runtime (AMR)
 
-面向多智能体（Claude Code、OpenClaw、OpenCode、Hermes Agent、DSH 等）的统一本地语义记忆与会话存储运行时。
+**在 Claude Code 里存下项目决定，在 Codex 里接着用。**
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![Storage](https://img.shields.io/badge/storage-SQLite%20WAL%20(SSOT)-lightgrey)](docs/DOC-AMR-02-ADD.md)
-[![Vector](https://img.shields.io/badge/vector-Qdrant-red)](https://qdrant.tech/)
-[![Protocol](https://img.shields.io/badge/protocol-UDS%20%7C%20MCP-orange)](docs/DOC-AMR-04-API.md)
+AMR 把两边的项目记忆保存在你的电脑上。CPU 可运行，不需要 NVIDIA 显卡。
+
+[10 分钟试用](#10-分钟试用) · 需要已登录的 Claude Code 和 Codex · 首次运行需下载模型（约 2.2 GB）
+
+## 10 分钟试用
+
+前置条件包括 Linux x86_64、Python 3.10+ 和 `venv`、`pip`、`flock`，以及已安装并登录的 Claude Code 和 Codex。建议至少有 3 GiB 可用内存。10 分钟目标从**模型就绪后**开始计算，包含依赖安装。首次需下载 CPU 版 PyTorch 和约 2.2 GB 的 BGE-M3 模型，20 Mbit/s 下模型下载约 15 分钟，实际取决于网络。
+
+```bash
+git clone https://github.com/DJBoy520/ai-memory-runtime.git
+cd ai-memory-runtime
+bash scripts/quickstart.sh --cpu
+```
+
+可先运行 `bash scripts/quickstart.sh --download-only` 预取依赖和模型。看到 `READY` 后保持终端运行，在另一个终端执行启动器打印的 Claude Code 和 Codex 接入命令，然后启动新会话。
+
+在 Claude Code 输入：
+
+> 调用 AMR 的 `memory_create`，在 `amr-demo` 项目保存这条我确认的决定：导出功能首版支持 CSV，JSON 放到下一版。返回工具结果中的 `memory_id` 和 `projection_status`。
+
+`pending` 表示已落盘、索引进行中。记下 `memory_id`，再在**全新的 Codex 会话**输入：
+
+> 用 AMR 的 `memory_search` 在 `amr-demo` 项目查询导出功能首版选择，返回工具结果中的 `memory_id`。若结果为空，等待约 1 秒再重试，最多 3 次。
+
+两端返回相同的 `memory_id` 即完成。如果仍未搜到，使用 `memory_get` 按 ID 立即读取，可区分已落盘待索引和写入失败。两条提示词也保存在 [quickstart-prompts.md](scripts/quickstart-prompts.md)。
+
+按 Ctrl-C 停止试用。执行 `bash scripts/quickstart.sh --clean` 删除独立试用数据和 socket。试用配置位于 `~/.amr-tryout/config.json`（设置了 `XDG_DATA_HOME` 时位于其 `.amr-tryout` 子目录）。如需 NVIDIA GPU，先按 NVIDIA 驱动版本在试用虚拟环境中安装对应的 CUDA 版 PyTorch，再将 `model.device` 改为 `cuda` 或 `cuda:0` 后重新启动。CPU 搜索耗时通常为亚秒量级，具体取决于设备与负载。
 
 ---
 
@@ -39,7 +61,7 @@
 
 ---
 
-## 快速开始 (Quick Start)
+## 完整部署
 
 ### 1. 准备虚拟环境与依赖
 
