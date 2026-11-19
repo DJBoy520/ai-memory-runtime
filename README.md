@@ -65,11 +65,12 @@ chmod 600 config/config.yaml
 ```
 
 核心配置项说明（`config/config.yaml`）：
+- `model.device`：默认 `cpu`，使用 CPU 计算。需要 NVIDIA GPU 时可设为 `cuda` 或 `cuda:0`；CUDA 不可用时自动回退 CPU。CPU 使用 FP32，两种模式使用相同 BGE-M3 模型和记忆库。修改后重启 AMR，使用 `.venv/bin/python src/admin/cli.py status` 查看实际设备。首次加载需要模型文件，CPU 性能取决于硬件。
 - `server.business_socket`：业务 Unix Socket 路径（默认 `/run/user/<uid>/qdrant-bge.sock`）；
 - `server.admin_socket`：管理 Unix Socket 路径（默认 `/run/user/<uid>/qdrant-bge-admin.sock`）；
 - `server.allowed_agents`：允许连接的客户端 Agent 标识白名单（大小写不敏感）；
 - `model.preload_on_start`：生产建议设为 `true`（消除首个请求冷启动延迟）；
-- `model.idle_timeout_seconds`：生产建议设为 `0`（禁用空闲卸载，模型常驻显存）；
+- `model.idle_timeout_seconds`：默认 `0`，模型加载后常驻内存或显存；设为正整数可在空闲指定秒数后卸载；
 - `model.watchdog_exit_enabled`：生产建议设为 `true`（仅在 systemd 托管环境下开启，卡死受控退出自动重启）；
 - `storage.sqlite_path`：本地数据库路径（默认 `data/sessions.db`）。
 

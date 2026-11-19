@@ -73,6 +73,26 @@ class DummyTokenizer:
         }
 
 
+def test_default_model_config_uses_resident_cpu():
+    config = ModelConfig()
+    assert config.device == "cpu"
+    assert config.idle_timeout_seconds == 0
+
+
+def test_indexed_cuda_device_is_used_for_model_loading(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr("src.core.engine.AutoTokenizer.from_pretrained", lambda path: DummyTokenizer())
+    monkeypatch.setattr("src.core.engine.AutoModel.from_pretrained", lambda path: DummyModel())
+    engine = BGEM3Engine(config=ModelConfig(device="cuda:0", fp16=True))
+    try:
+        _, model = engine._load_model_sync()
+        assert model.device == "cuda:0"
+        assert engine.use_fp16
+    finally:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        engine.close()
+
+
 @pytest.mark.asyncio
 async def test_initial_state_and_status(mock_model_config):
     engine = BGEM3Engine(config=mock_model_config)

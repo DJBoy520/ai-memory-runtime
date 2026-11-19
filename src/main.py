@@ -80,7 +80,7 @@ class AMRApplication:
         logger.info("Initializing Storage (SQLite WAL)...")
         self.session_store = session_store if session_store is not None else SessionStore(config=self.config)
 
-        logger.info("Initializing BGE-M3 Engine (Tesla P4 GPU)...")
+        logger.info("Initializing BGE-M3 Engine (configured device: %s)...", self.config.model.device)
         self.engine = engine if engine is not None else BGEM3Engine(config=self.config.model)
 
         logger.info("Initializing Qdrant Manager...")

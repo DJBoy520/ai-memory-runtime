@@ -22,11 +22,11 @@ server:
 
 model:
   name_or_path: "BAAI/bge-m3"
-  device: "cuda"  # 支持 "cuda" 或 "cpu"
-  fp16: true
+  device: "cpu"  # 默认 CPU；NVIDIA GPU 可选 "cuda" 或 "cuda:0"，CUDA 不可用时回退 CPU
+  fp16: true  # 仅 CUDA 生效，CPU 使用 FP32
   max_batch: 16
   max_queue_size: 64
-  idle_timeout_seconds: 300  # 代码默认 300 秒。生产建议：0（禁用空闲卸载，模型长驻显存避免冷启动抖动）
+  idle_timeout_seconds: 0  # 默认不空闲卸载；设置正整数可在空闲指定秒数后卸载
   max_token_length: 8192
   preload_on_start: false  # 代码默认 false。生产建议：true（启动时即预加载模型，消除首请求冷启动延迟）
   load_timeout_seconds: 120.0

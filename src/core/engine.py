@@ -117,7 +117,7 @@ class BGEM3Engine:
 
         # 硬件与精度决策
         self.device = self._resolve_device(self.config.device)
-        self.use_fp16 = self.config.fp16 and (self.device == "cuda")
+        self.use_fp16 = self.config.fp16 and self.device.startswith("cuda")
 
         # 卸载定时器
         self._idle_timer: Optional[threading.Timer] = None
@@ -439,10 +439,10 @@ class BGEM3Engine:
         tokenizer = AutoTokenizer.from_pretrained(self.model_path)
         model = AutoModel.from_pretrained(self.model_path)
 
-        if self.device == "cuda":
+        if self.device.startswith("cuda"):
             if self.use_fp16:
                 model = model.half()
-            model = model.to("cuda")
+            model = model.to(self.device)
         else:
             model = model.to("cpu")
 
@@ -661,11 +661,11 @@ class BGEM3Engine:
         )
 
         device = self.device
-        if device == "cuda":
-            encoded = {k: v.to("cuda") for k, v in encoded.items()}
+        if device.startswith("cuda"):
+            encoded = {k: v.to(device) for k, v in encoded.items()}
 
         with torch.no_grad():
-            if device == "cuda" and self.use_fp16:
+            if device.startswith("cuda") and self.use_fp16:
                 with torch.amp.autocast("cuda"):
                     outputs = model(**encoded)
             else:
@@ -776,9 +776,9 @@ class BGEM3Engine:
     async def get_model_status(self) -> Dict[str, Any]:
         allocated_mb = 0.0
         reserved_mb = 0.0
-        if torch.cuda.is_available() and self.device == "cuda":
-            allocated_mb = round(torch.cuda.memory_allocated() / (1024 * 1024), 2)
-            reserved_mb = round(torch.cuda.memory_reserved() / (1024 * 1024), 2)
+        if torch.cuda.is_available() and self.device.startswith("cuda"):
+            allocated_mb = round(torch.cuda.memory_allocated(self.device) / (1024 * 1024), 2)
+            reserved_mb = round(torch.cuda.memory_reserved(self.device) / (1024 * 1024), 2)
 
         driver_used_mb = self._get_driver_used_mb()
 

@@ -45,11 +45,11 @@ class ServerConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     name_or_path: str = "BAAI/bge-m3"
-    device: str = "cuda"
+    device: str = "cpu"
     fp16: bool = True
     max_batch: int = 16
     max_queue_size: int = 64
-    idle_timeout_seconds: int = 300
+    idle_timeout_seconds: int = 0
     max_token_length: int = 8192
     preload_on_start: bool = False
     load_timeout_seconds: float = 120.0
