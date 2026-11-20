@@ -33,7 +33,10 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.6.0+c
       "uvicorn==0.54.0"
 
 WORKDIR /app
+# config/ 包（settings.py 等）被 src 运行时导入；config.yaml 本体被 .dockerignore
+# 排除，镜像内只有 settings.py 与 example（运行时配置一律走 AMR_CONFIG_PATH 挂载）
 COPY src/ ./src/
+COPY config/ ./config/
 COPY VERSION pytest.ini ./
 
 # 与宿主约定 uid 1000（Unraid 侧 appdata 目录 chown 1000:1000）
