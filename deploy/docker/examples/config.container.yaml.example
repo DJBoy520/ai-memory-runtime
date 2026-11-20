@@ -1,0 +1,61 @@
+# AMR 容器版 daemon 配置模板
+# 复制到部署目录 ./config/config.yaml 后按注释修改；文件权限必须 0600、属主 1000:1000。
+# 本文件不含任何真实密钥；api_key 部署时自行填写。
+
+server:
+  business_socket: "/run/amr/qdrant-bge.sock"
+  admin_socket: "/run/amr/qdrant-bge-admin.sock"
+  socket_mode: 0o600
+  max_request_bytes: 4194304  # 4MB
+  allowed_agents:
+    - "hermes"
+    - "openclaw"
+    - "opencode"
+    - "dsh"
+    - "qwenwork"
+    - "doubao"
+    - "zcode"
+    - "codex"
+    - "claude_code"
+    - "pi"
+    - "gemini_cli"
+    - "kle"
+    - "system"
+    - "default_agent"
+    - "test_runner"
+
+model:
+  name_or_path: "/models/bge-m3"   # 只读卷挂载的本地模型目录
+  device: "cpu"                     # Unraid 无 GPU；有 GPU 可改 cuda/cuda:0
+  fp16: false                       # CPU 用 FP32
+  max_batch: 16
+  max_queue_size: 64
+  idle_timeout_seconds: 0           # 常驻，避免冷启动抖动
+  max_token_length: 8192
+  preload_on_start: true
+  load_timeout_seconds: 300.0
+  request_load_wait_seconds: 25.0
+  load_stall_exit_seconds: 420.0
+  watchdog_exit_enabled: true       # 容器受 restart=unless-stopped 托管，卡死受控退出
+
+storage:
+  sqlite_path: "/data/amr/sessions.db"
+  busy_timeout: 5000
+  wal_enabled: true
+  idempotency_retention_days: 7
+
+qdrant:
+  url: "http://192.168.30.161:6333"   # 部署时改为实际 Qdrant 服务器地址（不要包含在镜像内）
+  api_key: "REPLACE_WITH_REAL_KEY"    # 0600 本地文件；严禁提交 git 或烘焙进镜像
+  timeout: 10.0
+  collections:
+    - "ai_memory"
+    - "crypto_standards"
+    - "project_docs"
+  # 实验实例请改为独立集合名（如 ai_memory_exp），避免与生产数据互写
+
+search:
+  default_score_threshold: 0.52   # BGE-M3 黄金集校准阈值（F2-2）
+  project_fallback_ids:
+    - "global"
+    - "general"

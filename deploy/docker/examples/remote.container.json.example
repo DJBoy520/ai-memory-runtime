@@ -1,0 +1,19 @@
+{
+  "business_socket": "/run/amr/qdrant-bge.sock",
+  "admin_socket": "/run/amr/qdrant-bge-admin.sock",
+  "credentials_file": "/etc/amr/secrets/credentials.json",
+  "cert_file": "/etc/amr/secrets/tls/server-chain.crt",
+  "key_file": "/etc/amr/secrets/tls/server.key",
+  "allowed_hosts": [
+    "amr-unraid.djper.cn",
+    "amr-unraid.djper.cn:8443",
+    "192.168.30.161:8443",
+    "127.0.0.1:8443"
+  ],
+  "allowed_origins": [
+    "https://amr-unraid.djper.cn:8443"
+  ],
+  "bind_host": "0.0.0.0",
+  "bind_port": 8443,
+  "crypto_profile": "system"
+}

@@ -1,0 +1,72 @@
+# AMR 容器编排（Unraid / 任意 Docker 主机）
+# 用法见 docs/DOC-AMR-10-DOCKER-UNRAID.md。
+# 部署目录布局（compose 文件所在目录）：
+#   ./config/config.yaml      daemon 配置（0600, owner 1000:1000，含 Qdrant 地址与 api_key）
+#   ./config/remote.json      HTTPS 网关配置（0600）
+#   ./secrets/                internal.token / admin.token / credentials.json / tls/
+#   ./data/                   SQLite SSOT（sessions.db）
+#   ./models/bge-m3/          BGE-M3 模型（只读）
+#
+# 两个服务通过共享卷 amr-run 传递 UDS socket：
+#   daemon  建立业务/管理 socket → gateway 反向代理并对外提供 HTTPS MCP。
+# 认证链：agent token（credentials.json）→ gateway → internal/admin token → daemon。
+
+name: amr
+
+services:
+  amr-daemon:
+    image: djboy520/amr:${AMR_VERSION:-2.1.0}
+    container_name: amr-daemon
+    user: "1000:1000"
+    restart: unless-stopped
+    environment:
+      AMR_CONFIG_PATH: /etc/amr/config.yaml
+      AMR_INTERNAL_AUTH_REQUIRED: "1"
+      AMR_INTERNAL_TOKEN_FILE: /etc/amr/secrets/internal.token
+      AMR_ADMIN_TOKEN_FILE: /etc/amr/secrets/admin.token
+      AMR_AGENT_CREDENTIALS_FILE: /etc/amr/secrets/credentials.json
+      XDG_RUNTIME_DIR: /run/amr
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - amr-run:/run/amr
+      - ./config/config.yaml:/etc/amr/config.yaml
+      - ./secrets:/etc/amr/secrets:ro
+      - ./data:/data/amr
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "test -S /run/amr/qdrant-bge.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 240s   # BGE-M3 CPU 冷加载约 2 分钟，socket 会先于模型就绪
+
+  amr-gateway:
+    image: djboy520/amr:${AMR_VERSION:-2.1.0}
+    container_name: amr-gateway
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      - amr-daemon
+    ports:
+      - "8443:8443"
+    environment:
+      AMR_INTERNAL_AUTH_REQUIRED: "1"
+      AMR_INTERNAL_TOKEN_FILE: /etc/amr/secrets/internal.token
+      XDG_RUNTIME_DIR: /run/amr
+      PYTHONUNBUFFERED: "1"
+    command: >
+      sh -c 'while [ ! -S /run/amr/qdrant-bge.sock ]; do sleep 1; done;
+             exec python -m src.interfaces.mcp.remote_main --config /etc/amr/remote.json'
+    volumes:
+      - amr-run:/run/amr
+      - ./config/remote.json:/etc/amr/remote.json
+      - ./secrets:/etc/amr/secrets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-kfsS", "https://127.0.0.1:8443/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  amr-run:

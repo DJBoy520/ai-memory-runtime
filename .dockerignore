@@ -1,0 +1,35 @@
+# 构建上下文瘦身：镜像只收 src/ + VERSION + pytest.ini
+.git
+.gitignore
+.venv
+venv
+.pytest_cache
+.ruff_cache
+__pycache__
+**/__pycache__
+*.py[cod]
+
+# 本地数据 / 模型 / 密钥 —— 严禁进入镜像或构建上下文
+data/
+models/
+config/config.yaml
+config/*.local.yaml
+config/*.bak-*
+*.db
+*.db-wal
+*.db-shm
+*.sock
+*.token
+*.aep
+*.log
+.env*
+
+# 客户端资产与文档不进镜像
+plugins/
+skills/
+tests/
+docs/
+deploy/
+scripts/
+.claude/
+.zcode/
