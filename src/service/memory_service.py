@@ -49,6 +49,13 @@ class MemoryService:
         config: Optional[AppConfig] = None,
     ):
         self.config = config or load_config()
+        # 主集合由配置驱动（qdrant.collections[0]），实验/dev 实例改配置即可整体隔离，
+        # 避免写入路径硬编码 'ai_memory' 把非生产实例的向量投进生产集合。
+        self._default_collection = (
+            self.config.qdrant.collections[0]
+            if self.config is not None and getattr(self.config.qdrant, "collections", None)
+            else "ai_memory"
+        )
         self.engine = engine or BGEM3Engine(config=self.config.model)
         self.qdrant = qdrant_manager or QdrantManager.get_instance(config=self.config.qdrant)
         self.session_store = session_store or SessionStore(config=self.config.storage)
@@ -203,7 +210,7 @@ class MemoryService:
 
         # 规范化 target collections
         if collections is None:
-            target_cols = ["ai_memory"]
+            target_cols = [self._default_collection]
         elif isinstance(collections, str):
             if collections == "all":
                 target_cols = list(STANDARD_COLLECTIONS)
@@ -464,7 +471,7 @@ class MemoryService:
         session_id: Optional[str] = None,
         source_message_ids: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
-        collection_name: str = "ai_memory",
+        collection_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         显式沉淀记忆（legacy 通道，已补齐 v3 SSOT 底账）
@@ -479,6 +486,7 @@ class MemoryService:
         if not content or not content.strip():
             raise ValueError("content must not be empty")
 
+        collection_name = collection_name or self._default_collection
         now_ts = int(time.time())
         primary_memory_id = self._generate_memory_id()
         tags = tags or []
@@ -565,7 +573,7 @@ class MemoryService:
             points=points,
         )
 
-        if collection_name != "ai_memory":
+        if collection_name != self._default_collection:
             # 发件箱队列不携带 collection 维度，非默认集合的投影已由本方法直接写入，
             # 关闭对应任务，避免 Outbox Worker 把同一点位误推送到默认集合 ai_memory
             for payload_with_point in chunk_payloads:
@@ -933,7 +941,7 @@ class MemoryService:
         agent_id: str = "system",
         source_refs: Optional[List[str]] = None,
         conflicts_with: Optional[List[str]] = None,
-        collection_name: str = "ai_memory",
+        collection_name: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -962,7 +970,7 @@ class MemoryService:
         agent_id: str = "system",
         source_refs: Optional[List[str]] = None,
         conflicts_with: Optional[List[str]] = None,
-        collection_name: str = "ai_memory",
+        collection_name: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -989,7 +997,7 @@ class MemoryService:
             "agent_id": agent_id or "system",
             "source_refs": source_refs,
             "conflicts_with": conflicts_with,
-            "collection_name": collection_name or "ai_memory",
+            "collection_name": collection_name or self._default_collection,
         }
         digest = compute_request_digest("create", digest_payload)
 
@@ -1004,7 +1012,7 @@ class MemoryService:
                 created_by_agent=agent_id or "system",
                 source_refs=source_refs,
                 conflicts_with=conflicts_with,
-                collection_name=collection_name or "ai_memory",
+                collection_name=collection_name or self._default_collection,
                 request_id=req_id,
                 cursor=cur,
             )
@@ -1031,7 +1039,7 @@ class MemoryService:
         change_reason: Optional[str] = None,
         agent_id: str = "system",
         conflicts_with: Optional[List[str]] = None,
-        collection_name: str = "ai_memory",
+        collection_name: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -1083,7 +1091,7 @@ class MemoryService:
                     "change_reason": change_reason,
                     "agent_id": agent_id or "system",
                     "conflicts_with": conflicts_with,
-                    "collection_name": collection_name or "ai_memory",
+                    "collection_name": collection_name or self._default_collection,
                 }
                 digest = compute_request_digest("update", digest_payload)
 
@@ -1124,7 +1132,7 @@ class MemoryService:
             "change_reason": change_reason,
             "agent_id": agent_id or "system",
             "conflicts_with": conflicts_with,
-            "collection_name": collection_name or "ai_memory",
+            "collection_name": collection_name or self._default_collection,
         }
         digest = compute_request_digest("update", digest_payload)
 

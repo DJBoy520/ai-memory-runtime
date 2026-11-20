@@ -54,7 +54,7 @@ class OutboxWorker:
         config: Optional[AppConfig] = None,
         batch_size: int = 10,
         poll_interval: float = 1.0,
-        default_collection: str = "ai_memory",
+        default_collection: Optional[str] = None,
         lock_path: Optional[Union[str, Path]] = None,
     ):
         self.config = config or load_config()
@@ -63,7 +63,11 @@ class OutboxWorker:
         self.engine = engine or BGEM3Engine(config=self.config.model)
         self.batch_size = batch_size
         self.poll_interval = poll_interval
-        self.default_collection = default_collection
+        # 主集合由配置驱动（qdrant.collections[0]）；未配置时回退 'ai_memory'
+        self.default_collection = default_collection or (
+            self.config.qdrant.collections[0]
+            if getattr(self.config.qdrant, "collections", None) else "ai_memory"
+        )
 
         # 单执行者锁路径（可在 start() 时注入或默认取 XDG_RUNTIME_DIR）
         # 注意：__init__ 中严禁抢锁！仅在 start() 抢锁。

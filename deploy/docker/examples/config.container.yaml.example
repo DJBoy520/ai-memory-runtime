@@ -45,7 +45,7 @@ storage:
   idempotency_retention_days: 7
 
 qdrant:
-  url: "http://192.168.30.161:6333"   # 部署时改为实际 Qdrant 服务器地址（不要包含在镜像内）
+  url: "http://192.0.2.50:6333"   # 部署时改为实际 Qdrant 服务器地址（不要包含在镜像内）
   api_key: "REPLACE_WITH_REAL_KEY"    # 0600 本地文件；严禁提交 git 或烘焙进镜像
   timeout: 10.0
   collections:

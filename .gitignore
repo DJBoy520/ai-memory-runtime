@@ -35,3 +35,17 @@ config/*.bak-*
 
 # local migration reports (generated next to sqlite db)
 migration_report.json
+
+# Docker/Unraid 部署本地材料（2026-11-20 2.1.0）：证书与凭据绝不入库
+secrets/
+tls/
+tls-unraid/
+**/tls-unraid/
+*.key
+*.crt
+*.csr
+*.pem
+*.srl
+credentials*.json
+remote*.json
+*.sqlite*

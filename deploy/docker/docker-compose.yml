@@ -27,9 +27,11 @@ services:
       AMR_AGENT_CREDENTIALS_FILE: /etc/amr/secrets/credentials.json
       XDG_RUNTIME_DIR: /run/amr
       PYTHONUNBUFFERED: "1"
+    # 清理上次异常退出残留在共享卷上的死 socket，再启动 daemon
+    command: ["sh", "-c", "rm -f /run/amr/*.sock; exec python src/main.py"]
     volumes:
       - amr-run:/run/amr
-      - ./config/config.yaml:/etc/amr/config.yaml
+      - ./config/config.yaml:/etc/amr/config.yaml:ro   # 必须预置 0600 且属主 1000:1000（settings.py 只在权限不符时 chmod）
       - ./secrets:/etc/amr/secrets:ro
       - ./data:/data/amr
       - ./models:/models:ro
@@ -59,7 +61,7 @@ services:
              exec python -m src.interfaces.mcp.remote_main --config /etc/amr/remote.json'
     volumes:
       - amr-run:/run/amr
-      - ./config/remote.json:/etc/amr/remote.json
+      - ./config/remote.json:/etc/amr/remote.json:ro   # 必须预置 0600 且属主 1000:1000
       - ./secrets:/etc/amr/secrets:ro
     healthcheck:
       test: ["CMD", "curl", "-kfsS", "https://127.0.0.1:8443/healthz"]

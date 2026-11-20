@@ -48,6 +48,9 @@ EXPOSE 8443
 
 VOLUME ["/run/amr", "/data/amr"]
 
+# daemon 默认进程；compose 的 amr-gateway 用独立 command 覆盖为网关
+CMD ["python", "src/main.py"]
+
 ARG AMR_VERSION=2.1.0
 ARG AMR_REVISION=unknown
 ARG AMR_SOURCE=https://github.com/DJBoy520/ai-memory-runtime

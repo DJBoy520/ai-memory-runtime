@@ -24,6 +24,20 @@ config/*.bak-*
 *.log
 .env*
 
+# 证书与凭据材料（部署期放部署目录，绝不进镜像/构建上下文）
+secrets/
+tls/
+tls-unraid/
+**/tls-unraid/
+*.key
+*.crt
+*.pem
+*.csr
+*.srl
+credentials*.json
+remote*.json
+*.sqlite*
+
 # 客户端资产与文档不进镜像
 plugins/
 skills/

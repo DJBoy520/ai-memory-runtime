@@ -5,13 +5,13 @@
   "cert_file": "/etc/amr/secrets/tls/server-chain.crt",
   "key_file": "/etc/amr/secrets/tls/server.key",
   "allowed_hosts": [
-    "amr-unraid.djper.cn",
-    "amr-unraid.djper.cn:8443",
-    "192.168.30.161:8443",
+    "amr-unraid.example.net",
+    "amr-unraid.example.net:8443",
+    "192.0.2.50:8443",
     "127.0.0.1:8443"
   ],
   "allowed_origins": [
-    "https://amr-unraid.djper.cn:8443"
+    "https://amr-unraid.example.net:8443"
   ],
   "bind_host": "0.0.0.0",
   "bind_port": 8443,
