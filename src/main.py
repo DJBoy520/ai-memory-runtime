@@ -162,7 +162,7 @@ class AMRApplication:
                     agent_id=agent_id,
                     source_refs=params.get("source_refs"),
                     conflicts_with=params.get("conflicts_with"),
-                    collection_name=params.get("collection_name", "ai_memory"),
+                    collection_name=params.get("collection_name"),
                     idempotency_key=params.get("idempotency_key"),
                     request_id=get_request_id(),
                 )
@@ -176,7 +176,7 @@ class AMRApplication:
                     change_reason=params.get("change_reason"),
                     agent_id=agent_id,
                     conflicts_with=params.get("conflicts_with"),
-                    collection_name=params.get("collection_name", "ai_memory"),
+                    collection_name=params.get("collection_name"),
                     idempotency_key=params.get("idempotency_key"),
                     request_id=get_request_id(),
                 )
@@ -200,7 +200,7 @@ class AMRApplication:
                     session_id=params.get("session_id"),
                     source_message_ids=params.get("source_message_ids"),
                     tags=params.get("tags"),
-                    collection_name=params.get("collection_name", "ai_memory"),
+                    collection_name=params.get("collection_name"),
                 )
             elif method == "embedding.generate":
                 texts = params.get("texts", [])
@@ -318,7 +318,7 @@ class AMRApplication:
                     info[c.name] = {"points_count": cnt}
                 return info
             elif method in ("admin.snapshot", "admin_snapshot"):
-                col = params.get("collection", "ai_memory")
+                col = params.get("collection") or (self.config.qdrant.collections[0] if self.config.qdrant.collections else "ai_memory")
                 snap = self.qdrant_manager.client.create_snapshot(col)
                 return {"collection": col, "snapshot_name": snap.name if hasattr(snap, "name") else str(snap)}
             elif method in ("status.metrics", "status_metrics", "admin.metrics"):
@@ -419,7 +419,7 @@ class AMRApplication:
                             continue
 
                         curr_rev = mem_row["projection_revision"]
-                        col = mem_row["collection_name"] or task["target_collection"] or "ai_memory"
+                        col = mem_row["collection_name"] or task["target_collection"] or (self.config.qdrant.collections[0] if self.config.qdrant.collections else "ai_memory")
 
                         # 调用统一入队 helper（以 memories 当前 projection_revision 重新入队，合并 pending）
                         new_pending_id = self.session_store.enqueue_projection_task(
