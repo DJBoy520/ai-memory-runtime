@@ -85,3 +85,21 @@ def _assert_mapping_is_consistent() -> None:
 
 
 _assert_mapping_is_consistent()
+
+def _assert_consistency_with_tool_rpc_methods() -> None:
+    """防漂移守卫：METHOD_TO_TOOL 的每个规范条目必须与 TOOL_RPC_METHODS（唯一真源）一致。
+
+    注意：别名工具（memory_session_checkpoint / memory_get_handoff）刻意不在 METHOD_TO_TOOL
+    （别名不产生第二套 grants 条目），但其在 TOOL_RPC_METHODS 中必须与规范工具同方法。
+    """
+    from src.interfaces.mcp.remote_backend import TOOL_RPC_METHODS as _SRC
+    for _method, _tool in METHOD_TO_TOOL.items():
+        assert _SRC.get(_tool) == _method, (
+            f"mapping drift: { _tool } -> { _SRC.get(_tool) } != { _method }"
+        )
+    for _alias, _canonical in (("memory_session_checkpoint", "session_checkpoint"),
+                               ("memory_get_handoff", "session_get_handoff")):
+        assert _SRC.get(_alias) == _SRC.get(_canonical), f"alias drift: {_alias}"
+
+
+_assert_consistency_with_tool_rpc_methods()

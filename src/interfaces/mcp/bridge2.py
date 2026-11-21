@@ -136,6 +136,9 @@ class AdapterBridge:
 
         if not isinstance(response, dict):
             raise AdapterRpcError(-32603, "INVALID_RESPONSE")
+        resp_id = response.get("id")
+        if resp_id is not None and req_id is not None and resp_id != req_id:
+            raise AdapterRpcError(-32603, "MISMATCHED_RESPONSE_ID")
         error = response.get("error")
         if error:
             if not isinstance(error, dict):

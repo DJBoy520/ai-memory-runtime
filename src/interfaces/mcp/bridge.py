@@ -29,6 +29,7 @@ from src.interfaces.ipc.protocol import (
     read_frame,
     write_frame,
 )
+from src.interfaces.mcp.remote_backend import TOOL_RPC_METHODS
 from src.interfaces.mcp.tools import TOOL_DEFINITIONS, validate_tool_args
 
 def _resolve_socket_path() -> str:
@@ -138,6 +139,9 @@ class MCPBridge:
                 raise TimeoutError(
                     f"AMR daemon did not respond within {self.call_timeout:.0f}s for {method}"
                 ) from None
+            resp_id = resp_dict.get("id")
+            if resp_id is not None and req_id is not None and resp_id != req_id:
+                raise DaemonRpcError(code=-32603, message="MISMATCHED_RESPONSE_ID")
             if "error" in resp_dict and resp_dict["error"]:
                 err = resp_dict["error"]
                 code = err.get("code", -32603)
@@ -253,25 +257,8 @@ class MCPBridge:
                     result = {"pending": await asyncio.to_thread(spool.pending_count), "quarantined": await asyncio.to_thread(spool.quarantined_count)}
                     return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(result)}], "isError": False}}
                 # Map MCP tool calls to Daemon RPC methods
-                rpc_method_map = {
-                    "memory_search": "memory.search",
-                    "memory_create": "memory.create",
-                    "memory_update": "memory.update",
-                    "memory_history": "memory.history",
-                    "memory_delete": "memory.delete",
-                    "memory_get": "memory.get",
-                    "memory_record": "memory.record",
-                    "memory_update_status": "memory.update_status",
-                    "memory_ingest_session": "session.ingest",
-                    "session_checkpoint": "session.checkpoint",
-                    "memory_session_checkpoint": "session.checkpoint",
-                    "session_get_handoff": "session.get_handoff",
-                    "memory_get_handoff": "session.get_handoff",
-                    "memory_candidates": "memory.candidates",
-                    "memory_approve_candidate": "memory.approve_candidate",
-                }
-
-                rpc_method = rpc_method_map.get(tool_name)
+                # 单一真源：TOOL_RPC_METHODS（remote_backend.py）；此处不再维护第二份映射表
+                rpc_method = TOOL_RPC_METHODS.get(tool_name)
                 if not rpc_method:
                     raise ValueError(f"Unknown tool name: {tool_name}")
 

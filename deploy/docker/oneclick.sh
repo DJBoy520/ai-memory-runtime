@@ -10,7 +10,7 @@ umask 077
 
 # ---------- 参数 ----------
 AMR_DIR="${AMR_DIR:-$HOME/amr-deploy}"
-AMR_VERSION="${AMR_VERSION:-2.2.2}"
+AMR_VERSION="${AMR_VERSION:-2.2.3}"
 AMR_IMAGE="${AMR_IMAGE:-ckddkk/amr}"
 AMR_QDRANT_URL="${AMR_QDRANT_URL:?需要 AMR_QDRANT_URL，例如 http://192.0.2.50:6333}"
 AMR_QDRANT_API_KEY="${AMR_QDRANT_API_KEY:?需要 AMR_QDRANT_API_KEY}"
