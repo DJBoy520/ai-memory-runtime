@@ -34,7 +34,7 @@ bash scripts/quickstart.sh --cpu
 
 ## Docker 部署（服务器 / Unraid）
 
-镜像 `djboy520/amr`，不内置 Qdrant、模型与任何密钥：daemon + 认证 HTTPS MCP 网关双容器，Qdrant 服务器、BGE-M3 模型、SQLite SSOT、TLS/身份材料全部由卷挂载。构建、部署与生产切换 runbook 见 [docs/DOC-AMR-10-DOCKER-UNRAID.md](docs/DOC-AMR-10-DOCKER-UNRAID.md)，配置模板在 [deploy/docker/examples/](deploy/docker/examples/)。
+镜像 `ckddkk/amr`，**不内置 Qdrant、模型与任何密钥**：daemon + 认证 HTTPS MCP 网关双容器，Qdrant 服务器、SQLite SSOT、TLS/身份材料全部由卷挂载。**BGE-M3 模型不随镜像分发**，部署者自行从官方源下载（约 2.2GB，`hf download BAAI/bge-m3`，命令见 runbook）。构建、部署与生产切换 runbook 见 [docs/DOC-AMR-10-DOCKER-UNRAID.md](docs/DOC-AMR-10-DOCKER-UNRAID.md)，配置模板在 [deploy/docker/examples/](deploy/docker/examples/)。
 
 ---
 
