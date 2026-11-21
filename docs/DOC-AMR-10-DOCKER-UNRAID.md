@@ -20,6 +20,18 @@ docker build -f deploy/docker/Dockerfile \
   -t ckddkk/amr:2.1.0 -t ckddkk/amr:2.1 -t ckddkk/amr:latest .
 ```
 
+## 1.5 一键部署（推荐路径）
+
+前置：外部 Qdrant 服务器已就绪；BGE-M3 模型已从官方源下载（见第 2 节"模型获取"）。
+
+```bash
+AMR_QDRANT_URL=http://192.0.2.50:6333 AMR_QDRANT_API_KEY=<key> \
+AMR_MODEL_DIR=/path/to/models/bge-m3 \
+bash oneclick.sh
+```
+
+oneclick.sh（deploy/docker/ 下）自包含：内嵌 compose 与配置模板、自动生成 TLS（独立私有 CA，SAN 含宿主 IP 与 127.0.0.1）、internal/admin token 与 claude_code/codex 两个演示 agent 凭据，然后 `docker compose up -d` 并等 healthy，最后打印 MCP 地址与令牌路径。常用参数：`AMR_DIR`（部署目录，默认 ~/amr-deploy）、`AMR_HTTP_PORT`（默认 8443）、`AMR_COLLECTION`（默认 ai_memory；**指向共享 Qdrant 时务必换名隔离**）、`AMR_VERSION`/`AMR_IMAGE`。
+
 ## 2. 部署目录布局（Unraid /mnt/user/appdata/amr/）
 
 ```
