@@ -49,3 +49,4 @@ tls-unraid/
 credentials*.json
 remote*.json
 *.sqlite*
+config/config.dev.yaml

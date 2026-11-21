@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 import os
 import stat
 import yaml
@@ -95,6 +95,15 @@ class SearchConfig(BaseModel):
     project_fallback_ids: List[str] = Field(default_factory=lambda: ["global", "general"])
     # 低分截断阈值（F2-2 用黄金集校准后填入；None 表示不设默认阈值）
     default_score_threshold: Optional[float] = None
+    # ---- v2 检索契约键（2026-11-21，多模型共识终版方案；此前为 getattr 隐式键，Pydantic 会静默丢弃配置覆盖） ----
+    # 读侧可检索集合白名单（daemon 强制；project_docs 与 all 展开语义一律拒绝）
+    allowed_collections: List[str] = Field(default_factory=lambda: ["ai_memory", "crypto_standards"])
+    # naive ISO 时间参数补全用的服务时区
+    local_timezone: str = "Asia/Shanghai"
+    # 集合级 filter profile：无 status 字段的集合（文档切块）不注入 ACTIVE 强制过滤
+    collection_status_enforcement: Dict[str, bool] = Field(
+        default_factory=lambda: {"ai_memory": True, "crypto_standards": False}
+    )
 
 
 class DistillationConfig(BaseModel):
