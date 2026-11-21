@@ -1,5 +1,7 @@
 """映射单一真源与别名一致性守卫测试（复杂度审计 Phase1 修复，2026-11-21）"""
 import pytest
+from pathlib import Path
+REPO=Path(__file__).resolve().parents[1]
 
 
 def test_method_to_tool_matches_tool_rpc_methods():
@@ -20,12 +22,12 @@ def test_alias_tools_map_to_same_method_as_canonical():
 
 def test_bridge_no_second_mapping_table():
     """bridge.py 不得再内置第二份映射表（复杂度审计 codex#1/DeepSeek#3）"""
-    src = open("src/interfaces/mcp/bridge.py").read()
+    src = (REPO/"src/interfaces/mcp/bridge.py").read_text()
     assert "rpc_method_map" not in src, "bridge.py reintroduced a local mapping table"
 
 
 def test_bridge_rejects_mismatched_response_id():
     """bridge.py/bridge2 必须校验响应 id（审计 DeepSeek#4：此前不校验）"""
-    b = open("src/interfaces/mcp/bridge.py").read()
-    b2 = open("src/interfaces/mcp/bridge2.py").read()
+    b = (REPO/"src/interfaces/mcp/bridge.py").read_text()
+    b2 = (REPO/"src/interfaces/mcp/bridge2.py").read_text()
     assert "MISMATCHED_RESPONSE_ID" in b and "MISMATCHED_RESPONSE_ID" in b2

@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Union
 import os
 import stat
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import model_validator, BaseModel, Field, field_validator
 
 
 def _get_default_runtime_dir() -> str:
@@ -34,6 +34,9 @@ class ServerConfig(BaseModel):
             "test_runner",
         ]
     )
+    # 写侧集合选择拒绝清单（main.py 消费；默认仅 system 可带 collection_name 写入）
+    create_collection_allowlist: List[str] = Field(default_factory=lambda: ["system"])
+
 
     @field_validator("socket_mode", mode="before")
     @classmethod
@@ -104,6 +107,20 @@ class SearchConfig(BaseModel):
     collection_status_enforcement: Dict[str, bool] = Field(
         default_factory=lambda: {"ai_memory": True, "crypto_standards": False}
     )
+
+    @model_validator(mode="after")
+    def _v2_search_keys_guard(self) -> "SearchConfig":
+        # ① 记忆主集合的 status 过滤不可关闭（否则默认检索会召回 DELETED/HISTORICAL）
+        if self.collection_status_enforcement.get("ai_memory") is not True:
+            raise ValueError("search.collection_status_enforcement['ai_memory'] must be true")
+        # ② allowed_collections 必须是已知集合的子集
+        _known = {"ai_memory", "crypto_standards", "project_docs"}
+        bad = [c for c in self.allowed_collections if c not in _known]
+        if bad:
+            raise ValueError(f"search.allowed_collections contains unknown collections: {bad}")
+        if "ai_memory" not in self.allowed_collections:
+            raise ValueError("search.allowed_collections must include 'ai_memory'")
+        return self
 
 
 class DistillationConfig(BaseModel):

@@ -94,12 +94,14 @@ def _assert_consistency_with_tool_rpc_methods() -> None:
     """
     from src.interfaces.mcp.remote_backend import TOOL_RPC_METHODS as _SRC
     for _method, _tool in METHOD_TO_TOOL.items():
-        assert _SRC.get(_tool) == _method, (
+        if _SRC.get(_tool) != _method:
+            raise ImportError(
             f"mapping drift: { _tool } -> { _SRC.get(_tool) } != { _method }"
-        )
+            )
     for _alias, _canonical in (("memory_session_checkpoint", "session_checkpoint"),
                                ("memory_get_handoff", "session_get_handoff")):
-        assert _SRC.get(_alias) == _SRC.get(_canonical), f"alias drift: {_alias}"
+        if _SRC.get(_alias) != _SRC.get(_canonical):
+            raise ImportError(f"alias drift: {_alias}")
 
 
 _assert_consistency_with_tool_rpc_methods()

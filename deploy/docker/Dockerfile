@@ -1,6 +1,6 @@
 # AI Memory Runtime (AMR) 容器镜像
 # 构建（仓库根目录执行）：
-#   docker build -f deploy/docker/Dockerfile -t ckddkk/amr:2.2.3 .
+#   docker build -f deploy/docker/Dockerfile -t ckddkk/amr:2.2.4 .
 #
 # 设计要点：
 #   * 不内置 Qdrant（生产使用外部 Qdrant 服务器，由 config.yaml 指向）；
@@ -54,7 +54,7 @@ VOLUME ["/run/amr", "/data/amr"]
 # daemon 默认进程；compose 的 amr-gateway 用独立 command 覆盖为网关
 CMD ["python", "src/main.py"]
 
-ARG AMR_VERSION=2.2.3
+ARG AMR_VERSION=2.2.4
 ARG AMR_REVISION=unknown
 ARG AMR_SOURCE=https://github.com/DJBoy520/ai-memory-runtime
 LABEL org.opencontainers.image.title="ai-memory-runtime" \
