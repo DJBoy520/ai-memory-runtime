@@ -28,8 +28,22 @@ config/config.yaml      ← deploy/docker/examples/config.container.yaml.example
 config/remote.json      ← deploy/docker/examples/remote.container.json.example 改制（0600, 1000:1000）
 secrets/                ← 见 deploy/docker/examples/secrets.README.md
 data/                   ← SQLite SSOT（sessions.db）
-models/bge-m3/          ← 从构建机 rsync（至少 config.json、tokenizer*、sentencepiece、pytorch_model.bin）
+models/bge-m3/          ← **不随镜像/项目分发，部署者自行从官方源下载**（见下）
 ```
+
+**模型获取（BAAI/bge-m3，官方源自行下载，约 2.2GB）：**
+
+```bash
+pip install -U "huggingface_hub"
+hf download BAAI/bge-m3 \
+  --include "config.json" "tokenizer.json" "tokenizer_config.json" \
+           "special_tokens_map.json" "sentencepiece.bpe.model" "pytorch_model.bin" \
+  --local-dir ./models/bge-m3
+# 国内网络可加速：export HF_ENDPOINT=https://hf-mirror.com 后再执行
+# 旧版 CLI 用 huggingface-cli download，参数相同
+```
+
+最小文件集 = 上面 6 个（config + tokenizer×4 + 权重）；引擎只做本地加载，运行期不联网。校验：`pytorch_model.bin` 约 2.27GB 即完整。
 
 ```bash
 chown -R 1000:1000 config secrets data && chmod 700 config secrets
