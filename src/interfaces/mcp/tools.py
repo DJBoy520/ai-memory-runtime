@@ -391,8 +391,17 @@ def validate_tool_args(name: str, args: Dict[str, Any]) -> None:
         raise ValueError("Tool arguments must be a dictionary")
 
     if name == "memory_search":
-        if "query" not in args or not isinstance(args["query"], str) or not args["query"].strip():
-            raise ValueError("Parameter 'query' is required and must be a non-empty string.")
+        # v2: 空 query + time_from/time_to = 纯时间浏览（keyset）；
+        #     无时间窗时 query 仍必填且非空。
+        has_time_window = bool(args.get("time_from")) or bool(args.get("time_to"))
+        q = args.get("query")
+        if q is not None and not isinstance(q, str):
+            raise ValueError("Parameter 'query' must be a string.")
+        if not has_time_window and (q is None or not q.strip()):
+            raise ValueError(
+                "Parameter 'query' is required and must be a non-empty string, "
+                "or provide time_from/time_to for a pure time browse (empty query)."
+            )
         if "limit" in args and args["limit"] is not None:
             if not isinstance(args["limit"], int) or isinstance(args["limit"], bool) or args["limit"] <= 0:
                 raise ValueError("Parameter 'limit' must be a positive integer.")
