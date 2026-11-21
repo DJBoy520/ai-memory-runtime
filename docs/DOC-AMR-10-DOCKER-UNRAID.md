@@ -17,7 +17,7 @@
 ```bash
 docker build -f deploy/docker/Dockerfile \
   --build-arg AMR_REVISION=$(git rev-parse --short HEAD) \
-  -t ckddkk/amr:2.1.0 -t ckddkk/amr:2.1 -t ckddkk/amr:latest .
+  -t ckddkk/amr:2.2.0 -t ckddkk/amr:2.2 -t ckddkk/amr:latest .
 ```
 
 ## 1.5 一键部署（推荐路径）

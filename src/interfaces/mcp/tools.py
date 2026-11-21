@@ -25,7 +25,7 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The natural language query or technical problem statement to search for."
+                    "description": "The natural language query or technical problem statement to search for. Omit (or pass empty) together with time_from/time_to to browse records purely by time (newest first)."
                 },
                 "project_id": {
                     "type": "string",
@@ -57,9 +57,32 @@ TOOL_DEFINITIONS = [
                     "minimum": 0.0,
                     "maximum": 1.0,
                     "description": "Optional custom cosine similarity score threshold."
+                },
+                "collection_name": {
+                    "type": "string",
+                    "enum": ["ai_memory", "crypto_standards"],
+                    "description": "Optional target collection. 'ai_memory' (default) searches curated memories; 'crypto_standards' searches the cryptography standards full-text knowledge base (document chunks). Other collections (e.g. project_docs) are not searchable via this API."
+                },
+                "time_from": {
+                    "type": "string",
+                    "description": "Optional lower time bound for created_at: epoch seconds or ISO-8601 (naive local time is interpreted in the server timezone). With an empty query this becomes a pure time browse (newest first)."
+                },
+                "time_to": {
+                    "type": "string",
+                    "description": "Optional upper time bound for created_at: epoch seconds or ISO-8601. With an empty query this becomes a pure time browse (newest first). To find 'yesterday's memories', pass yesterday 00:00 to today 00:00 in the server timezone with an empty query."
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["relevance", "created_at_desc"],
+                    "description": "Result ordering. Defaults to 'relevance'. 'created_at_desc' re-ranks the semantic top-K by creation time, newest first."
+                },
+                "include_obsolete": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "crypto_standards only: when true, includes document chunks whose standard is verified obsolete/withdrawn (results then carry standard_status and superseded_by). Defaults to false."
                 }
             },
-            "required": ["query"]
+            "required": []
         }
     },
     {

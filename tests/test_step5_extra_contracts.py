@@ -138,16 +138,19 @@ async def test_memory_search_limits(memory_env, limit_val):
     assert search_res["total"] <= limit_val
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("coll", ["ai_memory", "crypto_standards", "project_docs"])
+@pytest.mark.parametrize("coll", ["ai_memory", "crypto_standards"])
 async def test_memory_search_single_collection(memory_env, coll):
     res = await memory_env.memory_search(query="any", collections=[coll], limit=5)
     assert isinstance(res["results"], list)
     assert "total" in res
 
 @pytest.mark.asyncio
-async def test_memory_search_all_collections(memory_env):
-    res = await memory_env.memory_search(query="general", collections=["all"], limit=10)
-    assert isinstance(res["results"], list)
+@pytest.mark.parametrize("bad", [["project_docs"], ["all"], "all"])
+async def test_memory_search_rejects_disallowed_collections(memory_env, bad):
+    """v2 契约：越权集合（project_docs）与 all 展开语义被显式拒绝"""
+    from src.interfaces.ipc.errors import RpcInvalidArgument
+    with pytest.raises(RpcInvalidArgument):
+        await memory_env.memory_search(query="any", collections=bad, limit=5)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("threshold", [0.1, 0.5, 0.8, 0.99])

@@ -223,22 +223,27 @@ class QdrantManager:
         filter_conditions: Optional[List[models.FieldCondition]] = None,
         extra_filter: Optional[models.Filter] = None,
         allowed_statuses: Optional[List[str]] = None,
+        enforce_status: bool = True,
     ) -> List[models.ScoredPoint]:
         """
         向量相似度搜索：
         - 默认只召回 ACTIVE (当前有效事实，并兼容小写 active)
         - 若传入 allowed_statuses (如 ["ACTIVE", "HISTORICAL"])，则按 MatchAny 过滤
         - 支持通过 filter_conditions 或 extra_filter 叠加业务条件（如 project_id, type 等）
+        - enforce_status=False 用于无 status 字段的集合（如 crypto_standards 文档切块），
+          此时不再注入 status 过滤，避免把全部文档块滤光（集合级 filter profile）
         """
         statuses = allowed_statuses or ["active", "ACTIVE"]
         # 统一大小写集合匹配
         normalized_statuses = list(set([s.lower() for s in statuses] + [s.upper() for s in statuses]))
-        must_conditions: List[Union[models.FieldCondition, models.Filter]] = [
-            models.FieldCondition(
-                key="status",
-                match=models.MatchAny(any=normalized_statuses),
+        must_conditions: List[Union[models.FieldCondition, models.Filter]] = []
+        if enforce_status:
+            must_conditions.append(
+                models.FieldCondition(
+                    key="status",
+                    match=models.MatchAny(any=normalized_statuses),
+                )
             )
-        ]
 
         if filter_conditions:
             must_conditions.extend(filter_conditions)

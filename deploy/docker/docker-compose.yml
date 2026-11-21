@@ -15,7 +15,7 @@ name: amr
 
 services:
   amr-daemon:
-    image: ckddkk/amr:${AMR_VERSION:-2.1.0}
+    image: ckddkk/amr:${AMR_VERSION:-2.2.0}
     container_name: amr-daemon
     user: "1000:1000"
     restart: unless-stopped
@@ -43,7 +43,7 @@ services:
       start_period: 240s   # BGE-M3 CPU 冷加载约 2 分钟，socket 会先于模型就绪
 
   amr-gateway:
-    image: ckddkk/amr:${AMR_VERSION:-2.1.0}
+    image: ckddkk/amr:${AMR_VERSION:-2.2.0}
     container_name: amr-gateway
     user: "1000:1000"
     restart: unless-stopped

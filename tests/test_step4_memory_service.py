@@ -232,17 +232,24 @@ async def test_memory_search_and_mandatory_active_filter(memory_service):
     rec2_detail = await memory_service.memory_get(rec2["memory_id"])
     assert rec2_detail["status"] in ("archived", "HISTORICAL")
 
-    # 搜索全部集合 (collections='all')
-    res_all = await memory_service.memory_search(query="SM4 或 SM3", collections="all")
+    # 搜索白名单集合（v2 契约：'all' 展开语义已拒绝，须显式列出可检索集合）
+    res_all = await memory_service.memory_search(query="SM4 或 SM3", collections=["ai_memory", "crypto_standards"])
     returned_ids_all = [r["memory_id"] for r in res_all["results"]]
     assert rec1["memory_id"] in returned_ids_all
     assert rec3["memory_id"] in returned_ids_all
     assert rec2_detail["status"] in ("archived", "HISTORICAL")
 
+    # v2 契约：collections='all' / project_docs 越权展开被显式拒绝
+    from src.interfaces.ipc.errors import RpcInvalidArgument as _RpcInvalidArgument
+    with pytest.raises(_RpcInvalidArgument):
+        await memory_service.memory_search(query="SM4", collections="all")
+    with pytest.raises(_RpcInvalidArgument):
+        await memory_service.memory_search(query="SM4", collections=["ai_memory", "project_docs"])
+
     # 过滤 project_id
     res_proj = await memory_service.memory_search(
         query="SM3",
-        collections="all",
+        collections=["ai_memory", "crypto_standards"],
         project_id="CryptoCore",
     )
     assert len(res_proj["results"]) == 1

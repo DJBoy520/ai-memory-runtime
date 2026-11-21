@@ -21,6 +21,7 @@ from qdrant_client import models
 from config.settings import AppConfig, load_config
 from src.core.engine import BGEM3Engine
 from src.core.errors import IdempotencyConflict, LegacyPathForbidden, VersionConflictError
+from src.interfaces.ipc.errors import RpcInvalidArgument
 from src.core.idempotency import compute_request_digest
 from src.core.qdrant import QdrantManager, STANDARD_COLLECTIONS
 from src.core.request_context import get_request_id
@@ -188,9 +189,14 @@ class MemoryService:
         score_threshold: Optional[float] = None,
         include_history: bool = False,
         status: Optional[Union[str, List[str]]] = None,
+        collection_name: Optional[str] = None,
+        time_from: Optional[Union[int, float, str]] = None,
+        time_to: Optional[Union[int, float, str]] = None,
+        sort_by: str = "relevance",
+        include_obsolete: bool = False,
     ) -> Dict[str, Any]:
         """
-        记忆语义检索（检索语义契约 v1，见 DOC-AMR-04-API）
+        记忆语义检索（检索语义契约 v1，见 DOC-AMR-04-API；v2 增补见 DOC-AMR-04 §集合与时间）
         - 生成 query 的 1024 维向量；
         - 并行在指定的 collections 中检索；
         - 作用域：显式传 project_id → [传入值] ∪ project_fallback_ids；不传 → 全库；
@@ -198,30 +204,83 @@ class MemoryService:
           PENDING_VERIFY/CONFLICT/TEMPORARY 仅显式传 status 时可见；
         - query 携带 mem_xxx ID 时确定性直取，沿 superseded_by 链重定向，并遵循相同过滤条件；
         - 排名一律用本次查询的实时 vector_score（payload 历史分仅作 stored_score 透出）。
+        v2 增补（2026-11-21，多模型共识终版方案）：
+        - collection_name：读侧集合选择，服务端白名单 [ai_memory, crypto_standards]；
+          拒绝 project_docs 与 all 展开语义（越权防御）；
+        - time_from/time_to：epoch 秒或 ISO-8601（naive 按服务时区补全），Qdrant created_at range 过滤；
+        - 空 query + 时间窗：纯时间浏览（created_at 倒序 keyset）；
+        - sort_by=created_at_desc：语义召回后按创建时间倒序重排；
+        - include_obsolete：废止感知软过滤（crypto_standards），默认排除 verified 的 obsolete/withdrawn。
         """
-        if not query or not query.strip():
-            return {"results": [], "total": 0}
+        # ---- 时间参数归一化（epoch 秒或 ISO-8601；naive 按服务时区补全） ----
+        def _norm_time(val) -> Optional[int]:
+            if val is None or val == "":
+                return None
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                return int(val)
+            s = str(val).strip()
+            if s.isdigit():
+                return int(s)
+            try:
+                from datetime import datetime, timezone, timedelta
+                v = s.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(v)
+                if dt.tzinfo is None:
+                    tz_name = getattr(self.config.search, "local_timezone", None) or "Asia/Shanghai"
+                    try:
+                        from zoneinfo import ZoneInfo
+                        dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+                    except Exception:
+                        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                return int(dt.timestamp())
+            except Exception:
+                raise RpcInvalidArgument(
+                    f"Invalid time parameter '{val}': use epoch seconds or ISO-8601 (timezone-aware or naive-local)"
+                )
 
-        # JSON 客户端可能把布尔值传成字符串；避免 "false" 被 Python 当作真值。
-        if isinstance(include_history, str):
-            include_history = include_history.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            include_history = bool(include_history)
+        from datetime import timedelta  # noqa: E402
+        time_from_ep = _norm_time(time_from)
+        time_to_ep = _norm_time(time_to)
 
-        # 规范化 target collections
+        # ---- 集合解析：读侧白名单（拒绝 project_docs 与 all 展开语义） ----
+        search_allowed = getattr(self.config.search, "allowed_collections", None) or ["ai_memory", "crypto_standards"]
+        if collection_name is not None:
+            if isinstance(collections, (list, str)) and collections:
+                raise RpcInvalidArgument("Pass either collection_name or collections, not both")
+            collections = collection_name
+
         if collections is None:
             target_cols = [self._default_collection]
         elif isinstance(collections, str):
             if collections == "all":
-                target_cols = list(STANDARD_COLLECTIONS)
-            else:
-                target_cols = [collections]
+                raise RpcInvalidArgument(
+                    "collections='all' is not allowed; it would expand to non-searchable collections. "
+                    f"Use one of: {', '.join(search_allowed)}"
+                )
+            target_cols = [collections]
         else:
-            if "all" in collections:
-                target_cols = list(STANDARD_COLLECTIONS)
-            else:
-                target_cols = list(collections)
+            target_cols = list(collections)
         if not target_cols:
+            return {"results": [], "total": 0}
+        for c in target_cols:
+            if c not in search_allowed:
+                raise RpcInvalidArgument(
+                    f"Collection '{c}' is not searchable via this API. Allowed: {', '.join(search_allowed)}"
+                )
+        # project_docs 永不作为检索目标（含间接展开）
+        if "project_docs" in target_cols:
+            raise RpcInvalidArgument("Collection 'project_docs' is not searchable via this API")
+
+        # ---- 空 query + 时间窗：纯时间浏览（keyset 语义，created_at 倒序） ----
+        if (not query or not query.strip()) and (time_from_ep is not None or time_to_ep is not None):
+            return await self._time_browse(
+                target_cols=target_cols,
+                time_from_ep=time_from_ep,
+                time_to_ep=time_to_ep,
+                limit=limit,
+                project_id=project_id,
+            )
+        if not query or not query.strip():
             return {"results": [], "total": 0}
 
         # 限制 limit 范围
@@ -276,6 +335,44 @@ class MemoryService:
                     match=models.MatchValue(value=scope),
                 )
             )
+
+        # ---- v2: 时间窗（Qdrant created_at range，epoch 秒整数） ----
+        if time_from_ep is not None:
+            filter_conditions.append(
+                models.FieldCondition(key="created_at", range=models.Range(gte=time_from_ep))
+            )
+        if time_to_ep is not None:
+            filter_conditions.append(
+                models.FieldCondition(key="created_at", range=models.Range(lte=time_to_ep))
+            )
+
+        # ---- v2: 废止感知软过滤（仅 crypto_standards；嵌套 must_not 表达
+        #   exclude iff (standard_status ∈ {obsolete,withdrawn}) AND (verified=true)；
+        #   verified=false/缺字段一律放行——推测不驱动行为，异常 fail-open） ----
+        validity_extra_filter: Optional[models.Filter] = None
+        if ("crypto_standards" in target_cols) and (not include_obsolete):
+            validity_extra_filter = models.Filter(
+                must_not=[
+                    models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="standard_status",
+                                match=models.MatchAny(any=["obsolete", "withdrawn", "OBSOLETE", "WITHDRAWN"]),
+                            ),
+                            models.FieldCondition(
+                                key="verified",
+                                match=models.MatchValue(value=True),
+                            ),
+                        ]
+                    )
+                ]
+            )
+
+        # 集合级 filter profile：文档切块集合无 status 字段，不注入 status 过滤
+        status_enforce_map = getattr(self.config.search, "collection_status_enforcement", None) or {
+            "ai_memory": True,
+            "crypto_standards": False,
+        }
 
         # 确定状态过滤列表（自适应大小写兼容）
         if status:
@@ -380,6 +477,7 @@ class MemoryService:
         # 3. 在 target collections 中检索
         async def _search_single_collection(col_name: str) -> List[Dict[str, Any]]:
             try:
+                enforce_status = bool(status_enforce_map.get(col_name, True))
                 scored_points = await asyncio.to_thread(
                     self.qdrant.search_points,
                     collection_name=col_name,
@@ -388,8 +486,11 @@ class MemoryService:
                     score_threshold=score_threshold,
                     filter_conditions=filter_conditions,
                     allowed_statuses=allowed_statuses,
+                    enforce_status=enforce_status,
+                    extra_filter=validity_extra_filter if col_name == "crypto_standards" else None,
                 )
                 items = []
+                missing_created = 0
                 for sp in scored_points:
                     payload = sp.payload or {}
                     p_type = payload.get("type") or payload.get("memory_type", "general")
@@ -409,13 +510,19 @@ class MemoryService:
                         stored_score = None
                     final_score = vec_score
 
+                    created_at_val = payload.get("created_at")
+                    if created_at_val is None:
+                        missing_created += 1
+                    # 集合字段适配：文档切块集合正文存 text，记忆集合存 content
+                    content_val = payload.get("content", "") or payload.get("text", "")
+
                     items.append({
-                        "memory_id": payload.get("memory_id"),
+                        "memory_id": payload.get("memory_id") or payload.get("standard_id") or "",
                         "version": payload.get("version", 1),
-                        "content": payload.get("content", ""),
+                        "content": content_val,
                         "project_id": payload.get("project_id", "global"),
                         "type": p_type,
-                        "status": (payload.get("status") or "ACTIVE").upper(),
+                        "status": (payload.get("status") or payload.get("standard_status") or "").upper() or None,
                         "created_by_agent": payload.get("created_by_agent") or payload.get("source_agent", "system"),
                         "updated_by_agent": payload.get("updated_by_agent") or payload.get("source_agent", "system"),
                         "score": final_score,
@@ -425,13 +532,21 @@ class MemoryService:
                         "matched_by": "semantic",
                         "collection": col_name,
                         "scope": payload.get("scope", "global"),
-                        "created_at": payload.get("created_at"),
+                        "created_at": created_at_val,
                         "updated_at": payload.get("updated_at"),
-                        "subject": payload.get("subject", ""),
+                        "subject": payload.get("subject", "") or payload.get("file_name", ""),
                         "predicate": payload.get("predicate", ""),
                         "object": payload.get("object", None),
+                        "standard_id": payload.get("standard_id"),
+                        "standard_status": payload.get("standard_status"),
+                        "superseded_by": payload.get("superseded_by"),
+                        "chunk_idx": payload.get("chunk_idx"),
+                        "total_chunks": payload.get("total_chunks"),
                     })
-                return items
+                result_meta: Dict[str, Any] = {"items": items}
+                if time_from_ep is not None or time_to_ep is not None:
+                    result_meta["coverage_created_at_missing"] = missing_created
+                return result_meta
             except Exception as e:
                 logger.error(f"Search collection '{col_name}' failed: {e}")
                 return []
@@ -439,12 +554,21 @@ class MemoryService:
         search_tasks = [_search_single_collection(col) for col in target_cols]
         search_results = await asyncio.gather(*search_tasks)
 
-        # 4. 聚合多集合结果并排序（F2-1 精确命中置顶，其余按实时向量分降序、平局按 updated_at 新者优先）
+        # 4. 聚合多集合结果并排序（F2-1 精确命中置顶；默认按实时向量分降序、平局按 updated_at 新者优先；
+        #    sort_by=created_at_desc 时按创建时间倒序重排——语义召回 top-K 内的时间序）
         all_results: List[Dict[str, Any]] = []
-        for res_list in search_results:
-            all_results.extend(res_list)
+        coverage_missing_created = 0
+        for res in search_results:
+            if isinstance(res, dict):
+                all_results.extend(res.get("items", []))
+                coverage_missing_created += int(res.get("coverage_created_at_missing", 0) or 0)
+            else:
+                all_results.extend(res)
 
-        all_results.sort(key=lambda x: (x.get("final_score", 0.0), x.get("updated_at") or 0), reverse=True)
+        if sort_by == "created_at_desc":
+            all_results.sort(key=lambda x: (x.get("created_at") or 0), reverse=True)
+        else:
+            all_results.sort(key=lambda x: (x.get("final_score", 0.0), x.get("updated_at") or 0), reverse=True)
         merged_results: List[Dict[str, Any]] = []
         seen_memory_ids: set = set()
         for item in exact_hits + all_results:
@@ -456,9 +580,135 @@ class MemoryService:
             merged_results.append(item)
         final_results = merged_results[:limit]
 
+        response: Dict[str, Any] = {
+            "results": final_results,
+            "total": len(final_results),
+        }
+        if sort_by == "created_at_desc":
+            response["sort_by"] = sort_by
+        if time_from_ep is not None or time_to_ep is not None:
+            response["time_window"] = {"from": time_from_ep, "to": time_to_ep}
+            response["coverage"] = {
+                "returned_missing_created_at": coverage_missing_created,
+                "note": "points missing created_at payload cannot be time-filtered; run the backfill tool to reach full coverage",
+            }
+        if ("crypto_standards" in target_cols) and (not include_obsolete):
+            response["validity_filter"] = {
+                "applied": True,
+                "include_obsolete": False,
+                "note": "verified obsolete/withdrawn points excluded; pass include_obsolete=true to include",
+            }
+        return response
+
+    async def _time_browse(
+        self,
+        target_cols: List[str],
+        time_from_ep: Optional[int],
+        time_to_ep: Optional[int],
+        limit: int,
+        project_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        空 query + 时间窗的纯时间浏览：按 created_at 倒序返回时间窗内记录（keyset 语义）。
+        不做向量召回——语义相似度对"找昨天的记忆"类浏览诉求是噪声源。
+        状态可见性遵循集合画像：ai_memory 仅 ACTIVE；无 status 字段的集合不过滤。
+        """
+        status_enforce_map = getattr(self.config.search, "collection_status_enforcement", None) or {
+            "ai_memory": True,
+            "crypto_standards": False,
+        }
+
+        def _scroll_one(col_name: str):
+            must: List[models.FieldCondition] = []
+            if time_from_ep is not None:
+                must.append(models.FieldCondition(key="created_at", range=models.Range(gte=time_from_ep)))
+            if time_to_ep is not None:
+                must.append(models.FieldCondition(key="created_at", range=models.Range(lte=time_to_ep)))
+            if project_id and project_id != "all":
+                scope_ids = [project_id]
+                for fid in self.config.search.project_fallback_ids:
+                    if fid and fid not in scope_ids:
+                        scope_ids.append(fid)
+                must.append(models.FieldCondition(key="project_id", match=models.MatchAny(any=scope_ids)))
+            if bool(status_enforce_map.get(col_name, True)):
+                must.append(
+                    models.FieldCondition(key="status", match=models.MatchAny(any=["active", "ACTIVE"]))
+                )
+            scroll_filter = models.Filter(must=must) if must else None
+            collected, offset = [], None
+            max_scan = 10000
+            while len(collected) < max_scan:
+                kwargs: Dict[str, Any] = dict(
+                    collection_name=col_name,
+                    scroll_filter=scroll_filter,
+                    limit=min(256, max_scan - len(collected)),
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                if offset is not None:
+                    kwargs["offset"] = offset
+                records, next_offset = self.qdrant._client.scroll(**kwargs)
+                collected.extend(records or [])
+                if not next_offset:
+                    break
+                offset = next_offset
+            return collected
+
+        all_points: List[Any] = []
+        for col in target_cols:
+            try:
+                for rec in await asyncio.to_thread(_scroll_one, col):
+                    all_points.append((col, rec))
+            except Exception as e:
+                logger.error(f"Time browse collection '{col}' failed: {e}")
+
+        items: List[Dict[str, Any]] = []
+        missing_created = 0
+        for col, rec in all_points:
+            payload = rec.payload or {}
+            created_at_val = payload.get("created_at")
+            if created_at_val is None:
+                missing_created += 1
+                continue
+            content_val = payload.get("content", "") or payload.get("text", "")
+            p_type = payload.get("type") or payload.get("memory_type", "general")
+            items.append({
+                "memory_id": payload.get("memory_id") or payload.get("standard_id") or "",
+                "version": payload.get("version", 1),
+                "content": content_val,
+                "project_id": payload.get("project_id", "global"),
+                "type": p_type,
+                "status": (payload.get("status") or payload.get("standard_status") or "").upper() or None,
+                "created_by_agent": payload.get("created_by_agent") or payload.get("source_agent", "system"),
+                "updated_by_agent": payload.get("updated_by_agent") or payload.get("source_agent", "system"),
+                "score": None,
+                "vector_score": None,
+                "final_score": None,
+                "stored_score": None,
+                "matched_by": "time_browse",
+                "collection": col,
+                "scope": payload.get("scope", "global"),
+                "created_at": created_at_val,
+                "updated_at": payload.get("updated_at"),
+                "subject": payload.get("subject", "") or payload.get("file_name", ""),
+                "predicate": payload.get("predicate", ""),
+                "object": payload.get("object", None),
+                "standard_id": payload.get("standard_id"),
+                "standard_status": payload.get("standard_status"),
+                "superseded_by": payload.get("superseded_by"),
+            })
+        items.sort(key=lambda x: (x.get("created_at") or 0), reverse=True)
+        final_results = items[:limit]
+
         return {
             "results": final_results,
             "total": len(final_results),
+            "matched_by_note": "time_browse (empty query + time window)",
+            "time_window": {"from": time_from_ep, "to": time_to_ep},
+            "coverage": {
+                "scanned_missing_created_at": missing_created,
+                "note": "points missing created_at payload cannot be time-filtered; run the backfill tool to reach full coverage",
+            },
         }
 
     async def memory_record(

@@ -150,8 +150,23 @@ class AMRApplication:
                     score_threshold=params.get("score_threshold"),
                     include_history=inc_hist,
                     status=norm_status,
+                    collection_name=params.get("collection_name"),
+                    time_from=params.get("time_from"),
+                    time_to=params.get("time_to"),
+                    sort_by=params.get("sort_by") or "relevance",
+                    include_obsolete=bool(params.get("include_obsolete", False)),
                 )
             elif method in ("memory.create", "memory_create"):
+                # 写侧集合选择显式拒绝（多模型共识终审 DeepSeek 修正 #5）：
+                # "不暴露 schema"不等于"参数被拒"——daemon 入口必须硬拒，防止越权写
+                # crypto_standards/project_docs。知识入库走专用摄取管道，不走本入口。
+                _create_col = params.get("collection_name")
+                _create_allow = list(getattr(self.config.server, "create_collection_allowlist", None) or ["system"])
+                if _create_col and _create_col != "ai_memory" and agent_id not in _create_allow:
+                    raise RpcInvalidArgument(
+                        "collection_name is not accepted on memory.create; "
+                        "knowledge ingestion must use the ingestion pipeline"
+                    )
                 # 幂等仲裁在 SessionStore.execute_idempotent 内与业务写入同事务完成；
                 # main 只透传 key 与服务端 request_id，不再做第二套包装。
                 return await self.memory_service.memory_create(
@@ -162,7 +177,7 @@ class AMRApplication:
                     agent_id=agent_id,
                     source_refs=params.get("source_refs"),
                     conflicts_with=params.get("conflicts_with"),
-                    collection_name=params.get("collection_name"),
+                    collection_name=_create_col,
                     idempotency_key=params.get("idempotency_key"),
                     request_id=get_request_id(),
                 )
