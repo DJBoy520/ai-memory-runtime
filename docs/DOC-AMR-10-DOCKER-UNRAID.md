@@ -32,6 +32,50 @@ bash oneclick.sh
 
 oneclick.sh（deploy/docker/ 下）自包含：内嵌 compose 与配置模板、自动生成 TLS（独立私有 CA，SAN 含宿主 IP 与 127.0.0.1）、internal/admin token 与 claude_code/codex 两个演示 agent 凭据，然后 `docker compose up -d` 并等 healthy，最后打印 MCP 地址与令牌路径。常用参数：`AMR_DIR`（部署目录，默认 ~/amr-deploy）、`AMR_HTTP_PORT`（默认 8443）、`AMR_COLLECTION`（默认 ai_memory；**指向共享 Qdrant 时务必换名隔离**）、`AMR_VERSION`/`AMR_IMAGE`。
 
+### 1.5.1 客户端信任部署 CA（必做，一次性配置）
+
+oneclick 生成的是**私有 CA 签发**的证书：网关侧无感，但**每个客户端都必须显式信任部署目录里的 `secrets/tls/root.crt`**，否则连接报证书校验失败。所有客户端一律不许关闭证书校验。按形态三选一：
+
+**A. 系统信任库（推荐：同机所有客户端一次到位）**
+
+```bash
+# Linux (Debian/Ubuntu)，需要 sudo
+sudo cp secrets/tls/root.crt /usr/local/share/ca-certificates/amr-local.crt
+sudo update-ca-certificates
+# Windows (管理员 PowerShell)：certutil -addstore -f Root secrets\tls\root.crt
+```
+
+配置后该机所有工具（curl、Claude Code、Codex、Python httpx…）自动信任，无需再逐个配置。验证：不带 `--cacert` 直接 `curl https://127.0.0.1:8443/readyz` 应返回 200。
+
+**B. 环境变量（无 sudo / 只影响特定客户端进程）**
+
+```bash
+# Node 系客户端（Claude Code、部分 MCP 工具）
+export NODE_EXTRA_CA_CERTS=/部署目录/secrets/tls/root.crt
+# Rust / Python(httpx) / OpenSSL 系客户端（Codex 等）
+export SSL_CERT_FILE=/部署目录/secrets/tls/root.crt
+# curl 亦可用：export CURL_CA_BUNDLE=/部署目录/secrets/tls/root.crt
+```
+
+写进 shell profile（或客户端的启动器/systemd drop-in）即可长期生效。**注意必须用绝对路径**，且在客户端进程启动前已设置。
+
+**C. 每客户端显式配置（客户端自带 CA 字段时）**
+
+- adapter / bridge 配置的 `ca_file` 字段（本仓库 `deploy/clients/*` 模板即此方式）
+- curl 用 `--cacert`；Python httpx 用 `verify=cafile路径`
+
+**自检三连（信任配置是否真正生效）：**
+
+```bash
+# ① TLS 链路通（信任了 root.crt 后不带 --cacert 也应 200）
+curl -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:8443/healthz
+# ② 鉴权通
+curl -s -H "Authorization: Bearer $(cat tokens/claude_code.token)" https://127.0.0.1:8443/readyz
+# ③ 反向验证：换一个未被信任的客户端/没设环境变量的 shell，应报证书错误——说明安全策略真的在生效
+```
+
+常见坑：`root.crt` 拷给客户端后改了名仍是 CRT 格式没问题，但**改存成 .pem 换行差异通常也无碍，切勿给客户端发 `server.key` 或 `root.key`**；`NODE_EXTRA_CA_CERTS` 指向的文件必须是 CA 证书本体而非证书链 `server-chain.crt`；Windows 侧工具若读系统信任库，用 certutil 导入后需重启该工具进程。
+
 ## 2. 部署目录布局（Unraid /mnt/user/appdata/amr/）
 
 ```
