@@ -17,7 +17,7 @@
 ```bash
 docker build -f deploy/docker/Dockerfile \
   --build-arg AMR_REVISION=$(git rev-parse --short HEAD) \
-  -t djboy520/amr:2.1.0 -t djboy520/amr:2.1 -t djboy520/amr:latest .
+  -t ckddkk/amr:2.1.0 -t ckddkk/amr:2.1 -t ckddkk/amr:latest .
 ```
 
 ## 2. 部署目录布局（Unraid /mnt/user/appdata/amr/）
@@ -90,6 +90,6 @@ SQLite 是 SSOT 账本：若第一批就直连生产数据，两台 daemon 各�
 ## 6. push 前复核清单
 - [ ] `git grep -nE '192\.168\.|djper|/home/dj' -- deploy docs scripts` 零命中
 - [ ] 镜像内 `find /app` 无 token/key/credentials 文件；`docker history` 无敏感 build-arg
-- [ ] `docker run --rm djboy520/amr:2.1.0 python -c "import src.main"` 可导入
+- [ ] `docker run --rm ckddkk/amr:2.1.0 python -c "import src.main"` 可导入
 - [ ] compose 起停冒烟通过（写+搜同 memory_id）
 - [ ] 全量 pytest 绿

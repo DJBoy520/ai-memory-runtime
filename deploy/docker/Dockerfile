@@ -1,6 +1,6 @@
 # AI Memory Runtime (AMR) 容器镜像
 # 构建（仓库根目录执行）：
-#   docker build -f deploy/docker/Dockerfile -t djboy520/amr:2.1.0 .
+#   docker build -f deploy/docker/Dockerfile -t ckddkk/amr:2.1.0 .
 #
 # 设计要点：
 #   * 不内置 Qdrant（生产使用外部 Qdrant 服务器，由 config.yaml 指向）；
